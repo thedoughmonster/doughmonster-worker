@@ -16,19 +16,11 @@ export interface EnvDeps {
 }
 
 type ToastGetOptions = {
-  /** Pacing scope name. Use "menus" for /menus endpoint (1 rps). Default "global". */
   scope?: "global" | "menus";
-  /** Minimum ms gap to enforce in the given scope (default 600ms). */
   minGapMs?: number;
 };
 
-/**
- * Toast GET with:
- *  - scoped pacer (caps call rate by scope)
- *  - auth token injection
- *  - restaurant header
- *  - 429 handling (sets cooldown)
- */
+/** Toast GET with scoped pacing, auth, and 429 handling. */
 export async function toastGet<T>(
   env: EnvDeps,
   path: string,
@@ -38,7 +30,6 @@ export async function toastGet<T>(
   const scope = opts.scope ?? "global";
   const minGapMs = opts.minGapMs ?? 600;
 
-  // Pace this scope BEFORE any upstream call (also protects against auth+API in same second)
   await paceBeforeToastCall(env.CACHE_KV, minGapMs, scope);
 
   const accessToken = await getAccessToken({
@@ -46,7 +37,7 @@ export async function toastGet<T>(
     clientSecret: env.TOAST_CLIENT_SECRET,
     authUrl: env.TOAST_AUTH_URL,
     kv: env.TOKEN_KV,
-    paceKv: env.CACHE_KV, // allow auth to use global pacer internally
+    paceKv: env.CACHE_KV,
   });
 
   const url = new URL(path, env.TOAST_API_BASE);
@@ -64,7 +55,8 @@ export async function toastGet<T>(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 429) {
-      const ra = Number(res.headers.get("Retry-After")) || 60;
+      // Use server-provided Retry-After if present; our helper adds jitter and caps
+      const ra = Number(res.headers.get("Retry-After")) || 10;
       await setRateLimited(env.CACHE_KV, ra);
     }
     throw new Error(`Toast GET ${url.pathname} failed: ${res.status}${text ? ` - ${text}` : ""}`);
