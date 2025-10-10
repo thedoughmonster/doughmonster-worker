@@ -31,10 +31,9 @@ export default async function handleMenu(env: EnvDeps): Promise<Response> {
     );
   }
 
-  // Single-flight: only one caller hits Toast; others wait briefly then serve cache if filled
-  const iAmFetcher = await acquireSingleFlight(env.CACHE_KV, 10); // 10s lock
+  // Single-flight: only one caller hits Toast; others wait then read cache
+  const iAmFetcher = await acquireSingleFlight(env.CACHE_KV, 60); // hold lock for 60s
   if (!iAmFetcher) {
-    // brief wait then try cache once
     await new Promise((r) => setTimeout(r, 1500));
     const after = await env.CACHE_KV.get(cacheKey);
     if (after) {
@@ -42,11 +41,10 @@ export default async function handleMenu(env: EnvDeps): Promise<Response> {
         headers: { "Content-Type": "application/json", "X-Cache": "LATE-HIT" },
       });
     }
-    // fallthrough to attempt fetch (edge case)
   }
 
   try {
-    // Try v3 first
+    // Try V3 first
     const dataV3 = await toastGet<any>(env, "/menus/v3/menus");
     const body = JSON.stringify({ ok: true, apiVersion: "v3", data: dataV3 });
     await env.CACHE_KV.put(cacheKey, body, { expirationTtl: 600 }); // 10 minutes
@@ -67,11 +65,13 @@ export default async function handleMenu(env: EnvDeps): Promise<Response> {
           headers: { "Content-Type": "application/json", "X-Cache": "MISS" },
         });
       } catch (e2: any) {
-        return Response.json({ ok: false, error: e2?.message || "Unknown error (v2 fallback)" }, { status: 502 });
+        return Response.json(
+          { ok: false, error: e2?.message || "Unknown error (v2 fallback)" },
+          { status: 502 }
+        );
       }
     }
 
-    // Surface other errors (incl. 429). If 429 occurred, our toastGet set a cool-down.
     const status = Number(/failed:\s*(\d{3})\b/.exec(msg)?.[1] ?? "502");
     return Response.json({ ok: false, error: msg }, { status });
   } finally {

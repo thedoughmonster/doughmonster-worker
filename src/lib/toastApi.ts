@@ -43,10 +43,9 @@ export async function toastGet<T>(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    // If rate-limited, set a cooldown based on Retry-After (default 60s)
     if (res.status === 429) {
-      const retryAfter = Number(res.headers.get("Retry-After")) || 60;
-      await setRateLimited(env.CACHE_KV, retryAfter);
+      const ra = Number(res.headers.get("Retry-After")) || 60;
+      await setRateLimited(env.CACHE_KV, ra);
     }
     throw new Error(`Toast GET ${url.pathname} failed: ${res.status}${text ? ` - ${text}` : ""}`);
   }
