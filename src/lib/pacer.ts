@@ -1,69 +1,38 @@
 // /src/lib/pacer.ts
 // Path: src/lib/pacer.ts
 
-/**
- * Scoped upstream pacing for Toast calls.
- * - Each `scope` has its own lock and "last call at" timestamp.
- * - Use scope "menus" to enforce 1 rps for the /menus endpoint.
- * - Use scope "global" (default) for everything else.
- */
+/** In-memory per-request pacing with 429 handling. Pure helpers + a module-level timestamp map. */
+const lastCallAt = new Map<string, number>();
 
-const MIN_TTL = 60;
+const JITTER_MS = 40; // small jitter to avoid burst alignment
 
-function lockKey(scope: string) {
-  return `toast_pacer_lock_${scope}`;
-}
-function lastKey(scope: string) {
-  return `toast_pacer_last_${scope}`;
-}
-
-async function acquireLock(kv: KVNamespace, scope: string, ttlSec = MIN_TTL): Promise<boolean> {
-  const key = lockKey(scope);
-  const existing = await kv.get(key);
-  if (existing) return false;
-  const ttl = Math.max(MIN_TTL, ttlSec);
-  await kv.put(key, String(Date.now() + ttl * 1000), { expirationTtl: ttl });
-  return true;
-}
-
-async function releaseLock(kv: KVNamespace, scope: string): Promise<void> {
-  await kv.delete(lockKey(scope));
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+export function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
 }
 
 /**
- * Ensures at least `minGapMs` has elapsed since the last Toast call in this scope.
- * Call this RIGHT BEFORE any upstream Toast fetch.
+ * Enforce a minimum gap between calls per `scope`.
+ * If `retryAfterHeader` is provided (429), we wait that instead.
  */
-export async function paceBeforeToastCall(
-  kv: KVNamespace,
-  minGapMs = 600,
-  scope = "global"
-): Promise<void> {
-  // Try to coordinate pacing decisions per-scope
-  const iHold = await acquireLock(kv, scope, 60);
-  if (!iHold) {
-    // Someone else is pacing this scope; wait a touch and let them handle spacing.
-    await sleep(200);
-    return;
-  }
+export async function pace(scope: string, minGapMs: number, retryAfterHeader?: string | null) {
+  const now = Date.now();
 
-  try {
-    const key = lastKey(scope);
-    const now = Date.now();
-    const last = Number((await kv.get(key)) || "0");
-    const elapsed = now - last;
-
-    if (last > 0 && elapsed < minGapMs) {
-      await sleep(minGapMs - elapsed);
+  // Respect Retry-After header first (seconds or HTTP-date; Toast uses seconds)
+  if (retryAfterHeader) {
+    const sec = parseInt(retryAfterHeader, 10);
+    if (Number.isFinite(sec) && sec > 0) {
+      await sleep(sec * 1000);
+      // Reset last-call so we don't immediately fire again
+      lastCallAt.set(scope, Date.now());
+      return;
     }
-
-    // Mark this scope's latest call
-    await kv.put(key, String(Date.now()), { expirationTtl: 24 * 60 * 60 });
-  } finally {
-    await releaseLock(kv, scope);
   }
+
+  const last = lastCallAt.get(scope) ?? 0;
+  const elapsed = now - last;
+  const need = minGapMs + Math.floor(Math.random() * JITTER_MS) - elapsed;
+  if (need > 0) {
+    await sleep(need);
+  }
+  lastCallAt.set(scope, Date.now());
 }

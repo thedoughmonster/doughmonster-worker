@@ -1,66 +1,96 @@
 // /src/lib/toastApi.ts
 // Path: src/lib/toastApi.ts
 
+import { pace } from "./pacer";
 import { getAccessToken } from "./toastAuth";
-import { setRateLimited } from "./rateLimit";
-import { paceBeforeToastCall } from "./pacer";
 
 export interface EnvDeps {
   TOAST_API_BASE: string;
   TOAST_AUTH_URL: string;
+  TOAST_RESTAURANT_GUID: string;
   TOAST_CLIENT_ID: string;
   TOAST_CLIENT_SECRET: string;
-  TOAST_RESTAURANT_GUID: string;
   TOKEN_KV: KVNamespace;
   CACHE_KV: KVNamespace;
 }
 
-type ToastGetOptions = {
-  scope?: "global" | "menus";
+type FetchOpts = {
+  scope?: "global" | "menu" | "orders";
   minGapMs?: number;
+  query?: Record<string, string | number | boolean | undefined | null>;
+  method?: "GET" | "POST";
+  body?: unknown;
 };
 
-/** Toast GET with scoped pacing, auth, and 429 handling. */
+/** Builds a URL with query params. Pure. */
+function buildUrl(base: string, path: string, query?: FetchOpts["query"]: string) {
+  const u = new URL(path.replace(/^\//, ""), base.endsWith("/") ? base : base + "/");
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
+    }
+  }
+  return u.toString();
+}
+
+/**
+ * Toast GET with pacing + 429 handling + auth token.
+ * Caller may set scope & minGapMs; we default conservatively.
+ */
 export async function toastGet<T>(
   env: EnvDeps,
   path: string,
-  query: Record<string, string> = {},
-  opts: ToastGetOptions = {}
+  query?: FetchOpts["query"],
+  opts?: Omit<FetchOpts, "query" | "method" | "body">
 ): Promise<T> {
-  const scope = opts.scope ?? "global";
-  const minGapMs = opts.minGapMs ?? 600;
+  const scope = opts?.scope ?? "global";
+  // Defaults tuned to earlier findings:
+  // - Menus: 1 req/sec hard limit → 1100ms
+  // - Orders: global limit ~2 req/sec → 800ms is safer
+  const minGapMs =
+    opts?.minGapMs ??
+    (scope === "menu" ? 1100 : scope === "orders" ? 800 : 750);
 
-  await paceBeforeToastCall(env.CACHE_KV, minGapMs, scope);
+  // Pace BEFORE the request to avoid tripping the per-second caps.
+  await pace(scope, minGapMs);
 
-  const accessToken = await getAccessToken({
-    clientId: env.TOAST_CLIENT_ID,
-    clientSecret: env.TOAST_CLIENT_SECRET,
-    authUrl: env.TOAST_AUTH_URL,
-    kv: env.TOKEN_KV,
-    paceKv: env.CACHE_KV,
-  });
+  const accessToken = await getAccessToken(env);
 
-  const url = new URL(path, env.TOAST_API_BASE);
-  for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
-
-  const res = await fetch(url.toString(), {
+  const url = buildUrl(env.TOAST_API_BASE, path, query);
+  const res = await fetch(url, {
+    method: "GET",
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
       Accept: "application/json",
-      "User-Agent": "doughmonster-worker/1.0 (+workers)",
+      "Content-Type": "application/json",
+      "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
     },
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 429) {
-      // Use server-provided Retry-After if present; our helper adds jitter and caps
-      const ra = Number(res.headers.get("Retry-After")) || 10;
-      await setRateLimited(env.CACHE_KV, ra);
+  // If we got throttled, honor Retry-After and retry once.
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("Retry-After");
+    await pace(scope, minGapMs, retryAfter);
+    const res2 = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
+      },
+    });
+    if (!res2.ok) {
+      const body2 = await res2.text();
+      throw new Error(`Toast ${res2.status} after retry: ${body2}`);
     }
-    throw new Error(`Toast GET ${url.pathname} failed: ${res.status}${text ? ` - ${text}` : ""}`);
+    return (await res2.json()) as T;
   }
 
-  return res.json<T>();
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Toast ${res.status}: ${body}`);
+  }
+
+  return (await res.json()) as T;
 }
