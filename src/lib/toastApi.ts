@@ -2,6 +2,7 @@
 // Path: src/lib/toastApi.ts
 
 import { getAccessToken } from "./toastAuth";
+import { setRateLimited } from "./rateLimit";
 
 export interface EnvDeps {
   TOAST_API_BASE: string;
@@ -10,11 +11,11 @@ export interface EnvDeps {
   TOAST_CLIENT_SECRET: string;
   TOAST_RESTAURANT_GUID: string;
   TOKEN_KV: KVNamespace;
+  CACHE_KV: KVNamespace;
 }
 
 /**
- * Pure helper to call Toast API with an auto-fetched Bearer token.
- * Adds required `Toast-Restaurant-External-ID` header.
+ * Toast GET with auth, restaurant header, and 429 handling.
  */
 export async function toastGet<T>(
   env: EnvDeps,
@@ -35,15 +36,19 @@ export async function toastGet<T>(
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
-      "Accept": "application/json",
+      Accept: "application/json",
+      "User-Agent": "doughmonster-worker/1.0 (+workers)",
     },
   });
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `Toast GET ${url.pathname} failed: ${res.status}${body ? ` - ${body}` : ""}`
-    );
+    const text = await res.text().catch(() => "");
+    // If rate-limited, set a cooldown based on Retry-After (default 60s)
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("Retry-After")) || 60;
+      await setRateLimited(env.CACHE_KV, retryAfter);
+    }
+    throw new Error(`Toast GET ${url.pathname} failed: ${res.status}${text ? ` - ${text}` : ""}`);
   }
 
   return res.json<T>();
