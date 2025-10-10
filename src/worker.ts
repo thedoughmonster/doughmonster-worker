@@ -1,47 +1,79 @@
 // /src/worker.ts
 // Path: src/worker.ts
-// (Replace with this full file so imports/routes are explicit & small)
 
-import handleDebugToken from "./routes/api/debug/token";
-import handleAuthStats from "./routes/api/debug/auth-stats";
-import handleRL from "./routes/api/debug/rl";
+import type { EnvDeps } from "./lib/toastApi";
 import handleMenu from "./routes/api/menu/index";
-import handleMenuMetadata from "./routes/api/menu/metadata";
-import handleOrdersLatest from "./routes/api/orders/latest";
 import handleOrdersRange from "./routes/api/orders/range";
+import handleOrdersByDate from "./routes/api/orders/by-date";
+import handleBindings from "./routes/api/debug/bindings";
 
-export interface Env {
-  TOAST_CLIENT_ID: string;
-  TOAST_CLIENT_SECRET: string;
-  TOAST_AUTH_URL: string;
-  TOAST_API_BASE: string;
-  TOAST_RESTAURANT_GUID: string;
-  TOKEN_KV: KVNamespace;
-  CACHE_KV: KVNamespace;
-  DM_ADMIN_KEY?: string;
+export type Env = EnvDeps;
+
+function withCors(r: Response, origin: string) {
+  const h = new Headers(r.headers);
+  h.set("Access-Control-Allow-Origin", origin || "*");
+  h.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  h.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  return new Response(r.body, { status: r.status, headers: h });
+}
+
+function okJson(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    const origin = request.headers.get("Origin") ?? "*";
 
-    if (pathname === "/api/health") {
-      return Response.json({ ok: true, service: "doughmonster-worker", timestamp: new Date().toISOString() });
+    if (request.method === "OPTIONS") {
+      return withCors(
+        new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Max-Age": "600",
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          },
+        }),
+        origin
+      );
     }
 
-    // Debug
-    if (pathname === "/api/debug/token") return handleDebugToken(env);
-    if (pathname === "/api/debug/auth-stats") return handleAuthStats(env);
-    if (pathname === "/api/debug/rl" || pathname === "/api/debug/rl/clear") return handleRL(env, request);
+    try {
+      if (request.method === "GET" && path === "/api/health") {
+        return withCors(okJson({ ok: true, service: "doughmonster-worker" }), origin);
+      }
 
-    // Menu
-    if (pathname === "/api/menu/metadata") return handleMenuMetadata(env);
-    if (pathname === "/api/menu") return handleMenu(env, request);
+      if (request.method === "GET" && path === "/api/debug/bindings") {
+        const res = await handleBindings(env);
+        return withCors(res, origin);
+      }
 
-    // Orders
-    if (pathname === "/api/orders/latest") return handleOrdersLatest(env, request);
-    if (pathname === "/api/orders/range") return handleOrdersRange(env, request);
+      if (request.method === "GET" && path === "/api/menu") {
+        const res = await handleMenu(env, request);
+        return withCors(res, origin);
+      }
 
-    return Response.json({ ok: false, error: "Not Found", path: pathname }, { status: 404 });
+      if (request.method === "GET" && path === "/api/orders/by-date") {
+        const res = await handleOrdersByDate(env, request);
+        return withCors(res, origin);
+      }
+
+      if (request.method === "GET" && path === "/api/orders/range") {
+        const res = await handleOrdersRange(env, request);
+        return withCors(res, origin);
+      }
+
+      return withCors(okJson({ ok: false, error: "Not Found", path }, 404), origin);
+    } catch (err: any) {
+      const msg = typeof err?.message === "string" ? err.message : "Internal Error";
+      return withCors(okJson({ ok: false, error: msg }, 500), origin);
+    }
   },
 };
