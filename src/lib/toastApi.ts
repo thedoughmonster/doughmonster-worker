@@ -3,6 +3,7 @@
 
 import { getAccessToken } from "./toastAuth";
 import { setRateLimited } from "./rateLimit";
+import { paceBeforeToastCall } from "./pacer";
 
 export interface EnvDeps {
   TOAST_API_BASE: string;
@@ -14,19 +15,38 @@ export interface EnvDeps {
   CACHE_KV: KVNamespace;
 }
 
+type ToastGetOptions = {
+  /** Pacing scope name. Use "menus" for /menus endpoint (1 rps). Default "global". */
+  scope?: "global" | "menus";
+  /** Minimum ms gap to enforce in the given scope (default 600ms). */
+  minGapMs?: number;
+};
+
 /**
- * Toast GET with auth, restaurant header, and 429 handling.
+ * Toast GET with:
+ *  - scoped pacer (caps call rate by scope)
+ *  - auth token injection
+ *  - restaurant header
+ *  - 429 handling (sets cooldown)
  */
 export async function toastGet<T>(
   env: EnvDeps,
   path: string,
-  query: Record<string, string> = {}
+  query: Record<string, string> = {},
+  opts: ToastGetOptions = {}
 ): Promise<T> {
+  const scope = opts.scope ?? "global";
+  const minGapMs = opts.minGapMs ?? 600;
+
+  // Pace this scope BEFORE any upstream call (also protects against auth+API in same second)
+  await paceBeforeToastCall(env.CACHE_KV, minGapMs, scope);
+
   const accessToken = await getAccessToken({
     clientId: env.TOAST_CLIENT_ID,
     clientSecret: env.TOAST_CLIENT_SECRET,
     authUrl: env.TOAST_AUTH_URL,
     kv: env.TOKEN_KV,
+    paceKv: env.CACHE_KV, // allow auth to use global pacer internally
   });
 
   const url = new URL(path, env.TOAST_API_BASE);
