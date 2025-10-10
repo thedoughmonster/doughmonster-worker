@@ -3,7 +3,7 @@
 
 import type { EnvDeps } from "../../../lib/toastApi";
 import { toastGet } from "../../../lib/toastApi";
-import { nowToastIsoUtc, minusHoursToastIsoUtc } from "../../../lib/time";
+import { nowToastIsoUtc, minusMinutesToastIsoUtc } from "../../../lib/time";
 
 type CompactItem = {
   name: string | null;
@@ -22,22 +22,21 @@ type CompactOrder = {
 
 export default async function handleOrdersLatest(env: EnvDeps, request: Request): Promise<Response> {
   const url = new URL(request.url);
-  const hours = clampInt(url.searchParams.get("hours"), 1, 24, 4);
+  const minutes = clampInt(url.searchParams.get("minutes"), 1, 60, 60);
   const limit = clampInt(url.searchParams.get("limit"), 1, 200, 50);
 
-  // Build a Toast-formatted UTC window with millis & numeric offset
+  // Build Toast-formatted UTC window with millis & +0000, <= 60 minutes
   const end = nowToastIsoUtc();
-  const start = minusHoursToastIsoUtc(end, hours);
+  const start = minusMinutesToastIsoUtc(end, minutes);
 
   try {
-    // Conservative pacing on global scope
     const data = await toastGet<any>(
       env,
       "/orders/v2/orders",
       {
         startDate: start,
         endDate: end,
-        pageSize: String(limit), // if Toast ignores, we trim below
+        pageSize: String(limit), // if ignored, we trim locally
       },
       { scope: "global", minGapMs: 650 }
     );
@@ -61,10 +60,10 @@ export default async function handleOrdersLatest(env: EnvDeps, request: Request)
 
     return Response.json({
       ok: true,
-      window: { start, end, hours },
+      window: { start, end, minutes },
       count: compact.length,
       data: compact,
-      raw: data, // keep raw for now
+      raw: data,
     });
   } catch (e: any) {
     const status = Number(/failed:\s*(\d{3})\b/.exec(e?.message || "")?.[1] ?? "502");
