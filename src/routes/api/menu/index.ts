@@ -5,30 +5,31 @@ import type { EnvDeps } from "../../../lib/toastApi";
 import { toastGet } from "../../../lib/toastApi";
 
 /**
- * Fetches the restaurant's full menu payload from Toast.
- * NOTE: If this 404/400s, we’ll read the error and adjust the path.
- * Common paths:
- * - /menus/v3/menus
- * - /configuration/v1/menus
+ * Fetch menus. Try V3 first; on 403/404, fall back to V2.
  */
 export default async function handleMenu(env: EnvDeps): Promise<Response> {
   try {
-    // Try the v3 Menus API first; include the restaurant GUID as query if required.
-    const data = await toastGet<any>(env, "/menus/v3/menus", {
-      restaurantGuid: env.TOAST_RESTAURANT_GUID,
-    });
-
-    // Return as-is for now; we’ll shape it later when we define the frontend needs.
-    return Response.json({ ok: true, data });
+    // Recommended flow: check metadata first to avoid heavy pulls (optional)
+    // const meta = await toastGet<any>(env, "/menus/v3/metadata");
+    // Then fetch menus if needed:
+    const data = await toastGet<any>(env, "/menus/v3/menus");
+    return Response.json({ ok: true, apiVersion: "v3", data });
   } catch (e: any) {
-    // Fallback attempt (uncomment if needed after testing)
-    // try {
-    //   const data = await toastGet<any>(env, "/configuration/v1/menus", {
-    //     restaurantGuid: env.TOAST_RESTAURANT_GUID,
-    //   });
-    //   return Response.json({ ok: true, data, note: "from configuration/v1/menus" });
-    // } catch {}
+    const msg: string = e?.message || "";
+    const shouldFallback = /failed:\s*(403|404)\b/.test(msg);
 
-    return Response.json({ ok: false, error: e?.message ?? "Unknown error" }, { status: 502 });
+    if (shouldFallback) {
+      try {
+        const dataV2 = await toastGet<any>(env, "/menus/v2/menus");
+        return Response.json({ ok: true, apiVersion: "v2", data: dataV2 });
+      } catch (e2: any) {
+        return Response.json(
+          { ok: false, error: e2?.message || "Unknown error (v2 fallback)" },
+          { status: 502 }
+        );
+      }
+    }
+
+    return Response.json({ ok: false, error: msg || "Unknown error" }, { status: 502 });
   }
 }
