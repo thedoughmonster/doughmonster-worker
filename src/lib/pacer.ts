@@ -1,38 +1,69 @@
 // /src/lib/pacer.ts
 // Path: src/lib/pacer.ts
+// Purpose: lightweight per-scope pacing to avoid Toast per-second limits.
+// Notes:
+// - Uses in-memory state (per isolate). Good enough for our current usage.
+// - Honors Retry-After when provided.
+// - Adds tiny jitter to reduce thundering herd in multi-request bursts.
 
-/** In-memory per-request pacing with 429 handling. Pure helpers + a module-level timestamp map. */
-const lastCallAt = new Map<string, number>();
+type Scope = "global" | "menu" | "orders";
 
-const JITTER_MS = 40; // small jitter to avoid burst alignment
+const lastCallAt = new Map<Scope, number>();
 
-export function sleep(ms: number): Promise<void> {
+function sleep(ms: number) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
 /**
- * Enforce a minimum gap between calls per `scope`.
- * If `retryAfterHeader` is provided (429), we wait that instead.
+ * Pace a Toast API call:
+ * - If `retryAfterHeader` present, wait that many seconds (+ jitter).
+ * - Else, ensure at least `minGapMs` since the last call for this scope.
  */
-export async function pace(scope: string, minGapMs: number, retryAfterHeader?: string | null) {
-  const now = Date.now();
-
-  // Respect Retry-After header first (seconds or HTTP-date; Toast uses seconds)
+export async function pace(
+  scope: Scope,
+  minGapMs: number,
+  retryAfterHeader?: string | null
+): Promise<void> {
+  // Honor Retry-After if present (seconds; may be int or HTTP date).
   if (retryAfterHeader) {
-    const sec = parseInt(retryAfterHeader, 10);
-    if (Number.isFinite(sec) && sec > 0) {
-      await sleep(sec * 1000);
-      // Reset last-call so we don't immediately fire again
-      lastCallAt.set(scope, Date.now());
-      return;
+    let waitMs = 0;
+    const seconds = Number(retryAfterHeader);
+    if (!Number.isNaN(seconds)) {
+      waitMs = Math.max(0, Math.floor(seconds * 1000));
+    } else {
+      const asDate = Date.parse(retryAfterHeader);
+      if (!Number.isNaN(asDate)) {
+        waitMs = Math.max(0, asDate - Date.now());
+      }
     }
+    // add small jitter (0–120ms)
+    waitMs += Math.floor(Math.random() * 120);
+    if (waitMs > 0) await sleep(waitMs);
+    lastCallAt.set(scope, Date.now());
+    return;
   }
 
+  const now = Date.now();
   const last = lastCallAt.get(scope) ?? 0;
-  const elapsed = now - last;
-  const need = minGapMs + Math.floor(Math.random() * JITTER_MS) - elapsed;
-  if (need > 0) {
-    await sleep(need);
+  const since = now - last;
+  const needed = minGapMs - since;
+
+  if (needed > 0) {
+    // add tiny jitter (0–60ms) to spread parallel calls
+    await sleep(needed + Math.floor(Math.random() * 60));
   }
+
   lastCallAt.set(scope, Date.now());
+}
+
+/**
+ * Back-compat alias used by some files.
+ * Equivalent to: await pace(scope, minGapMs, retryAfterHeader)
+ */
+export async function paceBeforeToastCall(
+  scope: Scope,
+  minGapMs: number,
+  retryAfterHeader?: string | null
+): Promise<void> {
+  return pace(scope, minGapMs, retryAfterHeader);
 }
