@@ -23,8 +23,9 @@ type FetchOpts = {
 };
 
 /** Builds a URL with query params. Pure. */
-function buildUrl(base: string, path: string, query?: FetchOpts["query"]: string) {
-  const u = new URL(path.replace(/^\//, ""), base.endsWith("/") ? base : base + "/");
+function buildUrl(base: string, path: string, query?: FetchOpts["query"]): string {
+  const root = base.endsWith("/") ? base : base + "/";
+  const u = new URL(path.replace(/^\//, ""), root);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
