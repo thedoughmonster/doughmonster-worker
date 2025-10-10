@@ -1,24 +1,11 @@
 // /src/worker.ts
 // Path: src/worker.ts
 
-// Small, pure helper for JSON responses.
-function jsonResponse<T>(data: T, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json; charset=utf-8" },
-    ...init,
-  });
-}
+import { jsonResponse, pathnameOf } from "./lib/http";
+import type { Env as SecretsEnv } from "./handlers/debugSecrets";
+import { handleDebugSecrets } from "./handlers/debugSecrets";
 
-// Simple path matcher (pure)
-function pathnameOf(request: Request): string {
-  try {
-    return new URL(request.url).pathname;
-  } catch {
-    return "/";
-  }
-}
-
-export interface Env {
+export interface Env extends SecretsEnv {
   TOAST_API_BASE: string;
   TOAST_AUTH_URL: string;
 }
@@ -32,8 +19,12 @@ export default {
         ok: true,
         service: "doughmonster-worker",
         timestamp: new Date().toISOString(),
-        toastApiBase: env.TOAST_API_BASE
+        toastApiBase: env.TOAST_API_BASE,
       });
+    }
+
+    if (path === "/api/debug/secrets") {
+      return handleDebugSecrets(request, env);
     }
 
     return jsonResponse({ ok: false, error: "Not Found", path }, { status: 404 });
