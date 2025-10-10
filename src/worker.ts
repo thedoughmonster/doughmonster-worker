@@ -1,6 +1,6 @@
 // /src/worker.ts
 // Path: src/worker.ts
-// (Replace the existing file with this complete version)
+// (Replace with this full file so imports/routes are explicit & small)
 
 import handleDebugToken from "./routes/api/debug/token";
 import handleAuthStats from "./routes/api/debug/auth-stats";
@@ -8,6 +8,7 @@ import handleRL from "./routes/api/debug/rl";
 import handleMenu from "./routes/api/menu/index";
 import handleMenuMetadata from "./routes/api/menu/metadata";
 import handleOrdersLatest from "./routes/api/orders/latest";
+import handleOrdersRange from "./routes/api/orders/range";
 
 export interface Env {
   TOAST_CLIENT_ID: string;
@@ -17,7 +18,7 @@ export interface Env {
   TOAST_RESTAURANT_GUID: string;
   TOKEN_KV: KVNamespace;
   CACHE_KV: KVNamespace;
-  DM_ADMIN_KEY?: string; // optional secret to clear RL
+  DM_ADMIN_KEY?: string;
 }
 
 export default {
@@ -39,6 +40,7 @@ export default {
 
     // Orders
     if (pathname === "/api/orders/latest") return handleOrdersLatest(env, request);
+    if (pathname === "/api/orders/range") return handleOrdersRange(env, request);
 
     return Response.json({ ok: false, error: "Not Found", path: pathname }, { status: 404 });
   },
