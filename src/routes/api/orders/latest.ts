@@ -3,7 +3,7 @@
 
 import type { EnvDeps } from "../../../lib/toastApi";
 import { toastGet } from "../../../lib/toastApi";
-import { nowUtcIso, isoMinusHours } from "../../../lib/time";
+import { nowToastIsoUtc, minusHoursToastIsoUtc } from "../../../lib/time";
 
 type CompactItem = {
   name: string | null;
@@ -25,25 +25,30 @@ export default async function handleOrdersLatest(env: EnvDeps, request: Request)
   const hours = clampInt(url.searchParams.get("hours"), 1, 24, 4);
   const limit = clampInt(url.searchParams.get("limit"), 1, 200, 50);
 
-  // Build a basic window.
-  const end = nowUtcIso();
-  const start = isoMinusHours(end, hours);
+  // Build a Toast-formatted UTC window with millis & numeric offset
+  const end = nowToastIsoUtc();
+  const start = minusHoursToastIsoUtc(end, hours);
 
   try {
-    // NOTE: We use a conservative minGapMs and the "global" pacing scope.
-    // If Toast exposes per-endpoint limits later, we can split scopes.
-    const data = await toastGet<any>(env, "/orders/v2/orders", {
-      startDate: start,
-      endDate: end,
-      // Some Toast tenants honor limit/pageSize; if ignored, we'll trim locally.
-      pageSize: String(limit),
-    }, { scope: "global", minGapMs: 650 });
+    // Conservative pacing on global scope
+    const data = await toastGet<any>(
+      env,
+      "/orders/v2/orders",
+      {
+        startDate: start,
+        endDate: end,
+        pageSize: String(limit), // if Toast ignores, we trim below
+      },
+      { scope: "global", minGapMs: 650 }
+    );
 
-    // Shape can vary; try to find the list.
-    const list: any[] = Array.isArray(data?.orders) ? data.orders
-                    : Array.isArray(data?.elements) ? data.elements
-                    : Array.isArray(data) ? data
-                    : [];
+    const list: any[] = Array.isArray(data?.orders)
+      ? data.orders
+      : Array.isArray(data?.elements)
+      ? data.elements
+      : Array.isArray(data)
+      ? data
+      : [];
 
     const compact: CompactOrder[] = list.slice(0, limit).map((o) => ({
       id: o?.guid ?? o?.id ?? null,
@@ -59,7 +64,7 @@ export default async function handleOrdersLatest(env: EnvDeps, request: Request)
       window: { start, end, hours },
       count: compact.length,
       data: compact,
-      raw: data, // keep raw for now; we’ll drop later once FE is finalized
+      raw: data, // keep raw for now
     });
   } catch (e: any) {
     const status = Number(/failed:\s*(\d{3})\b/.exec(e?.message || "")?.[1] ?? "502");

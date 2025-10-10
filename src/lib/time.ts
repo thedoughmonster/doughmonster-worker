@@ -1,26 +1,29 @@
 // /src/lib/time.ts
 // Path: src/lib/time.ts
 
-/** ISO like 2025-10-10T23:25:00Z (no millis) */
-export function nowUtcIso(): string {
-  return toIsoNoMs(new Date());
+/**
+ * Toast requires: yyyy-MM-dd'T'HH:mm:ss.SSSZ
+ * Example: 2016-01-01T14:13:12.000+0400
+ * We'll emit UTC with +0000.
+ */
+
+export function nowToastIsoUtc(): string {
+  return toToastIsoUtc(new Date());
 }
 
-/** Subtract hours from an ISO string (UTC) and return ISO (UTC, no ms). */
-export function isoMinusHours(iso: string, hours: number): string {
-  const d = new Date(iso);
+export function minusHoursToastIsoUtc(isoLike: string, hours: number): string {
+  const d = new Date(isoLike);
   d.setUTCHours(d.getUTCHours() - hours);
-  return toIsoNoMs(d);
+  return toToastIsoUtc(d);
 }
 
-function toIsoNoMs(d: Date): string {
-  // Ensure trailing 'Z' and strip milliseconds
-  return new Date(Date.UTC(
-    d.getUTCFullYear(),
-    d.getUTCMonth(),
-    d.getUTCDate(),
-    d.getUTCHours(),
-    d.getUTCMinutes(),
-    d.getUTCSeconds()
-  )).toISOString().replace(/\.\d{3}Z$/, "Z");
+function toToastIsoUtc(d: Date): string {
+  const yyyy = d.getUTCFullYear();
+  const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const HH = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  // Milliseconds are required; we’ll standardize to .000
+  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.000+0000`;
 }
