@@ -12,15 +12,13 @@ import {
 } from "../../../config/orders";
 
 /**
- * GET /api/orders/by-date?date=YYYY-MM-DD
- *      [&tzOffset=+0000|-0400]
- *      [&startHour=6&endHour=8]      // MUST be ≤ 2 hours total
- *      [&includeEmpty=1]             // debug: keep empty results
- *
- * Enforces a hard 2-hour limit to avoid Worker 1102 resource errors.
- * Defaults to 06:00–08:00 local unless overridden.
+ * GET /api/orders/by-date?date=YYYY-MM-DD[&tzOffset=±HHmm][&startHour=H&endHour=H][&includeEmpty=1]
+ * Route: /api/orders/by-date
+ * - Hard cap: ≤ 2 hours (2 hourly slices).
+ * - Heavy debug: failures return structured JSON with route names & masked details.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
+  const ROUTE = "/api/orders/by-date";
   try {
     const url = new URL(request.url);
     const date = url.searchParams.get("date");
@@ -28,31 +26,26 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     const includeEmpty = url.searchParams.get("includeEmpty") === "1";
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return json({ ok: false, error: "Missing or invalid 'date' (expected YYYY-MM-DD)." }, 400);
+      return j(400, { ok: false, route: ROUTE, error: "Missing/invalid 'date' (YYYY-MM-DD)" });
     }
     if (!/^[+-]\d{4}$/.test(tzOffset)) {
-      return json({ ok: false, error: "Invalid 'tzOffset' (expected like +0000, -0400, -0500)." }, 400);
+      return j(400, { ok: false, route: ROUTE, error: "Invalid 'tzOffset' (like +0000, -0400)" });
     }
 
     const startHour = clampInt(url.searchParams.get("startHour"), 0, 23, DEFAULT_START_HOUR);
     const endHour = clampInt(url.searchParams.get("endHour"), 1, 24, DEFAULT_END_HOUR);
 
     if (endHour <= startHour) {
-      return json({ ok: false, error: "'endHour' must be greater than 'startHour'." }, 400);
+      return j(400, { ok: false, route: ROUTE, error: "'endHour' must be greater than 'startHour'." });
     }
-
-    // Hard cap: <= 2 hourly slices
     if (endHour - startHour > MAX_SLICES_PER_REQUEST) {
-      return json(
-        {
-          ok: false,
-          error: "Requested window too large; max 2 hours per request.",
-          limitHours: MAX_SLICES_PER_REQUEST,
-          hint: `Try: /api/orders/by-date?date=${date}&tzOffset=${tzOffset}&startHour=${startHour}&endHour=${startHour +
-            MAX_SLICES_PER_REQUEST}`,
-        },
-        400
-      );
+      return j(400, {
+        ok: false,
+        route: ROUTE,
+        error: "Requested window too large; max 2 hours per request.",
+        limitHours: MAX_SLICES_PER_REQUEST,
+        hint: `Use endHour <= startHour + ${MAX_SLICES_PER_REQUEST}`,
+      });
     }
 
     const { startToast, endToast, slices } = buildLocalHourSlicesWithinDay(
@@ -64,25 +57,39 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     );
 
     if (slices.length > MAX_SLICES_PER_REQUEST) {
-      return json(
-        {
-          ok: false,
-          error: "Requested window expands beyond 2 hourly slices.",
-          slices: slices.length,
-          limit: MAX_SLICES_PER_REQUEST,
-        },
-        400
-      );
+      return j(400, {
+        ok: false,
+        route: ROUTE,
+        error: "Requested window expands beyond 2 hourly slices.",
+        slices: slices.length,
+        limit: MAX_SLICES_PER_REQUEST,
+      });
     }
 
     const raw: any[] = [];
     let requests = 0;
 
     for (const [start, end] of slices) {
-      await paceBeforeToastCall("orders", 1100); // keep under per-sec + endpoint limits
-      const res = await getOrdersWindow(env, start, end);
-      requests++;
-      if (Array.isArray(res?.data)) raw.push(...res.data);
+      await paceBeforeToastCall("orders", 1100);
+      try {
+        const res = await getOrdersWindow(env, start, end);
+        requests++;
+        if (Array.isArray(res?.data)) raw.push(...res.data);
+      } catch (e: any) {
+        // If the lower-level error is JSON, pass it through with our route label.
+        try {
+          const parsed = JSON.parse(e?.message ?? "");
+          return j(502, { ...parsed, where: "orders-window", callerRoute: ROUTE });
+        } catch {
+          return j(502, {
+            ok: false,
+            route: ROUTE,
+            where: "orders-window",
+            error: e?.message || String(e),
+            window: { start, end },
+          });
+        }
+      }
     }
 
     const filtered = includeEmpty
@@ -94,12 +101,12 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
           return false;
         });
 
-    return json({
+    return j(200, {
       ok: true,
+      route: ROUTE,
       day: date,
       tzOffset,
       hours: { startHour, endHour },
-      window: { start: startToast, end: endToast },
       slices: slices.length,
       requests,
       count: filtered.length,
@@ -108,12 +115,18 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       includedEmpty: includeEmpty,
     });
   } catch (err: any) {
-    return json({ ok: false, error: err?.message || String(err) }, 500);
+    // Final net to ensure we always return structured debug
+    return j(500, {
+      ok: false,
+      route: ROUTE,
+      where: "unhandled",
+      error: err?.message || String(err),
+    });
   }
 }
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
+function j(status: number, body: unknown) {
+  return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: { "Content-Type": "application/json; charset=utf-8" },
   });
