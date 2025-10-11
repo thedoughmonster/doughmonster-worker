@@ -3,7 +3,7 @@
 
 import { paceBeforeToastCall } from "../../../lib/pacer";
 import { buildLocalHourSlicesWithinDay, clampInt } from "../../../lib/time";
-import { getOrdersWindow } from "../../../lib/toastOrders.ts"; // <-- explicit .ts
+import { getOrdersWindow } from "../../../lib/toastOrders";
 import {
   DEFAULT_START_HOUR,
   DEFAULT_END_HOUR,
@@ -14,8 +14,11 @@ import {
 /**
  * GET /api/orders/by-date?date=YYYY-MM-DD
  *      [&tzOffset=+0000|-0400]
- *      [&startHour=6&endHour=8]      // local-hours window (0–24), MUST be ≤ 2 hours total
+ *      [&startHour=6&endHour=8]      // MUST be ≤ 2 hours total
  *      [&includeEmpty=1]             // debug: keep empty results
+ *
+ * Enforces a hard 2-hour limit to avoid Worker 1102 resource errors.
+ * Defaults to 06:00–08:00 local unless overridden.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   try {
@@ -38,7 +41,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       return json({ ok: false, error: "'endHour' must be greater than 'startHour'." }, 400);
     }
 
-    // Enforce hard 2-hour max (<= 2 slices @ 60 minutes)
+    // Hard cap: <= 2 hourly slices
     if (endHour - startHour > MAX_SLICES_PER_REQUEST) {
       return json(
         {
@@ -76,7 +79,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     let requests = 0;
 
     for (const [start, end] of slices) {
-      await paceBeforeToastCall("orders", 1100);
+      await paceBeforeToastCall("orders", 1100); // keep under per-sec + endpoint limits
       const res = await getOrdersWindow(env, start, end);
       requests++;
       if (Array.isArray(res?.data)) raw.push(...res.data);
