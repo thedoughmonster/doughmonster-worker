@@ -1,133 +1,112 @@
 // /src/routes/api/orders/by-date.ts
 // Path: src/routes/api/orders/by-date.ts
 
-import type { EnvDeps } from "../../../lib/toastApi";
-import { toastGet } from "../../../lib/toastApi";
+import { paceBeforeToastCall } from "../../../lib/pacer";
+import { buildLocalHourSlicesWithinDay, clampInt } from "../../../lib/time";
+import { getOrdersWindow } from "../../../lib/toastOrders";
 import {
-  clampInt,
-  numOrNull,
-  buildDaySlicesWithOffset,
-} from "../../../lib/time";
+  DEFAULT_START_HOUR,
+  DEFAULT_END_HOUR,
+  MAX_SLICES_PER_REQUEST,
+  DEFAULT_TZ_OFFSET,
+} from "../../../config/orders";
 
-type CompactItem = {
-  name: string | null;
-  quantity: number | null;
-  modifiers?: Array<{ name: string | null; quantity: number | null }>;
-};
-
-type CompactOrder = {
-  id: string | number | null;
-  businessDate?: string | null;
-  openedAt?: string | null;
-  updatedAt?: string | null;
-  checkTotal?: number | null;
-  items?: CompactItem[];
-};
-
-export default async function handleOrdersByDate(env: EnvDeps, request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  const date = (url.searchParams.get("date") || "").trim(); // YYYY-MM-DD
-  const tzOffset = (url.searchParams.get("tzOffset") || "+0000").trim(); // e.g. -0400 / -0500
-  const limit = clampInt(url.searchParams.get("limit"), 1, 2000, 500);
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return Response.json(
-      { ok: false, error: "Provide ?date=YYYY-MM-DD (e.g., 2025-10-09)" },
-      { status: 400 }
-    );
-  }
-  if (!/^[+-]\d{4}$/.test(tzOffset)) {
-    return Response.json(
-      { ok: false, error: "Provide ?tzOffset like -0400 or -0500" },
-      { status: 400 }
-    );
-  }
-
-  const { startToast, endToast, slices } = buildDaySlicesWithOffset(date, tzOffset, 60);
-
-  const all: any[] = [];
-  let requests = 0;
-
+/**
+ * GET /api/orders/by-date?date=YYYY-MM-DD
+ *      [&tzOffset=+0000|-0400]
+ *      [&startHour=6&endHour=20]     // local-hours window (0–24)
+ *      [&includeEmpty=1]             // debug: keep empty results
+ *
+ * Safer defaults:
+ *  - Defaults to local-hours 06:00 → 20:00 (14 slices) instead of 24 hours.
+ *  - Enforces MAX_SLICES_PER_REQUEST to avoid Worker 1102 resource errors.
+ */
+export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   try {
-    for (const [start, end] of slices) {
-      if (all.length >= limit) break;
+    const url = new URL(request.url);
+    const date = url.searchParams.get("date");
+    const tzOffset = url.searchParams.get("tzOffset") || DEFAULT_TZ_OFFSET;
+    const includeEmpty = url.searchParams.get("includeEmpty") === "1";
 
-      const data = await toastGet<any>(
-        env,
-        "/orders/v2/orders",
-        {
-          startDate: start,
-          endDate: end,
-          pageSize: String(limit),
-        },
-        { scope: "orders", minGapMs: 800 }
-      );
-      requests++;
-
-      const list: any[] = Array.isArray(data?.orders)
-        ? data.orders
-        : Array.isArray(data?.elements)
-        ? data.elements
-        : Array.isArray(data)
-        ? data
-        : [];
-
-      for (const o of list) {
-        all.push(o);
-        if (all.length >= limit) break;
-      }
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return json({ ok: false, error: "Missing or invalid 'date' (expected YYYY-MM-DD)." }, 400);
+    }
+    if (!/^[+-]\d{4}$/.test(tzOffset)) {
+      return json({ ok: false, error: "Invalid 'tzOffset' (expected like +0000, -0400, -0500)." }, 400);
     }
 
-    const compact: CompactOrder[] = all.slice(0, limit).map((o) => ({
-      id: o?.guid ?? o?.id ?? null,
-      businessDate: o?.businessDate ?? null,
-      openedAt: o?.openedDate ?? o?.openedAt ?? null,
-      updatedAt: o?.lastModifiedDate ?? o?.updatedAt ?? null,
-      checkTotal: numOrNull(o?.check?.total ?? o?.checkTotal),
-      items: extractItems(o),
-    }));
+    const startHour = clampInt(url.searchParams.get("startHour"), 0, 23, DEFAULT_START_HOUR);
+    const endHour = clampInt(url.searchParams.get("endHour"), 1, 24, DEFAULT_END_HOUR);
 
-    return Response.json({
+    if (endHour <= startHour) {
+      return json({ ok: false, error: "'endHour' must be greater than 'startHour'." }, 400);
+    }
+
+    const { startToast, endToast, slices } = buildLocalHourSlicesWithinDay(
+      date,
+      tzOffset,
+      startHour,
+      endHour,
+      60
+    );
+
+    if (slices.length > MAX_SLICES_PER_REQUEST) {
+      return json(
+        {
+          ok: false,
+          error: "Requested window too large for a single call.",
+          slices: slices.length,
+          limit: MAX_SLICES_PER_REQUEST,
+          hint: `Reduce hours. Example: /api/orders/by-date?date=${date}&tzOffset=${tzOffset}&startHour=${startHour}&endHour=${Math.min(
+            startHour + MAX_SLICES_PER_REQUEST,
+            endHour
+          )}`,
+        },
+        400
+      );
+    }
+
+    const raw: any[] = [];
+    let requests = 0;
+
+    for (const [start, end] of slices) {
+      await paceBeforeToastCall("orders", 1100); // pace to stay under Toast per-sec limits
+      const res = await getOrdersWindow(env, start, end);
+      requests++;
+      if (Array.isArray(res?.data)) raw.push(...res.data);
+    }
+
+    // Filter out empties by default
+    const filtered = includeEmpty
+      ? raw
+      : raw.filter((o) => {
+          if (!o || typeof o !== "object") return false;
+          if (o.id) return true;
+          if (Array.isArray(o.items) && o.items.length > 0) return true;
+          return false;
+        });
+
+    return json({
       ok: true,
       day: date,
       tzOffset,
+      hours: { startHour, endHour },
       window: { start: startToast, end: endToast },
       slices: slices.length,
       requests,
-      count: compact.length,
-      data: compact,
-      rawCount: all.length,
+      count: filtered.length,
+      data: filtered,
+      rawCount: raw.length,
+      includedEmpty: includeEmpty,
     });
-  } catch (e: any) {
-    const status = Number(/Toast (\d{3})/.exec(e?.message || "")?.[1] ?? "502");
-    return Response.json({ ok: false, error: e?.message || "Orders by date failed" }, { status });
+  } catch (err: any) {
+    return json({ ok: false, error: err?.message || String(err) }, 500);
   }
 }
 
-function extractItems(o: any): CompactItem[] {
-  const lines: any[] = Array.isArray(o?.check?.lineItems) ? o.check.lineItems
-                    : Array.isArray(o?.lineItems) ? o.lineItems
-                    : [];
-  return lines.map((li) => ({
-    name: li?.name ?? li?.displayName ?? null,
-    quantity: numOrNull(li?.quantity ?? 1),
-    modifiers: extractMods(li),
-  }));
-}
-
-function extractMods(li: any): Array<{ name: string | null; quantity: number | null }> {
-  const groups: any[] = Array.isArray(li?.modifiers) ? li.modifiers
-                    : Array.isArray(li?.modifierGroups) ? li.modifierGroups
-                    : [];
-  const out: Array<{ name: string | null; quantity: number | null }> = [];
-  for (const g of groups) {
-    if (Array.isArray(g?.modifiers)) {
-      for (const m of g.modifiers) {
-        out.push({ name: m?.name ?? m?.displayName ?? null, quantity: numOrNull(m?.quantity ?? 1) });
-      }
-    } else if (g?.name) {
-      out.push({ name: g.name ?? null, quantity: numOrNull(g?.quantity ?? 1) });
-    }
-  }
-  return out;
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
 }

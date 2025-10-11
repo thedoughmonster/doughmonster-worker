@@ -82,6 +82,52 @@ export function buildDaySlicesWithOffset(
   return { startToast, endToast, slices };
 }
 
+/**
+ * Build slices **within a local-hours window** of a given day.
+ * Example: startHour=6, endHour=20 creates slices from 06:00…19:59 inclusive.
+ */
+export function buildLocalHourSlicesWithinDay(
+  yyyyMmDd: string,
+  tzOffset: string,
+  startHour: number,
+  endHour: number,
+  sliceMinutes = 60
+): { startToast: string; endToast: string; slices: Array<[string, string]> } {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(yyyyMmDd)) {
+    throw new Error(`Invalid date '${yyyyMmDd}', expected YYYY-MM-DD`);
+  }
+  if (!/^[+-]\d{4}$/.test(tzOffset)) {
+    throw new Error(`Invalid tzOffset '${tzOffset}', expected like -0400/-0500`);
+  }
+  if (!(Number.isInteger(startHour) && Number.isInteger(endHour))) {
+    throw new Error("startHour and endHour must be integers (0–24).");
+  }
+  if (startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || endHour <= startHour) {
+    throw new Error("Hour window must satisfy: 0 ≤ startHour < endHour ≤ 24.");
+  }
+
+  const HH = (h: number) => String(h).padStart(2, "0");
+  const startToast = `${yyyyMmDd}T${HH(startHour)}:00:00.000${tzOffset}`;
+  // Inclusive end at the last second of the previous minute of endHour
+  const endToast = `${yyyyMmDd}T${HH(endHour - 1)}:59:59.000${tzOffset}`;
+
+  const slices: Array<[string, string]> = [];
+  let cursor = startToast;
+
+  while (compareToast(cursor, endToast) < 0) {
+    const next = addMinutesToastString(cursor, sliceMinutes);
+    if (compareToast(next, endToast) >= 0) {
+      slices.push([cursor, endToast]);
+      break;
+    } else {
+      slices.push([cursor, next]);
+      cursor = next;
+    }
+  }
+
+  return { startToast, endToast, slices };
+}
+
 /** Add minutes to a Toast-format string (yyyy-MM-ddTHH:mm:ss.SSS±HHmm) preserving the same numeric offset. */
 function addMinutesToastString(toastIso: string, minutes: number): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})([+-]\d{4})$/.exec(toastIso);
@@ -156,7 +202,7 @@ function compareToast(a: string, b: string): number {
       Number(S),
       Number(ms)
     );
-    };
+  };
   const A = toMs(a), B = toMs(b);
   return A === B ? 0 : A < B ? -1 : 1;
 }
