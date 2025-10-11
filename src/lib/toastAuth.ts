@@ -9,7 +9,9 @@ const TOKEN_KEY = "toast_machine_token_v1";
 function assertKV(env: EnvDeps) {
   const kv = (env as any).TOKEN_KV;
   if (!kv || typeof kv.get !== "function" || typeof kv.put !== "function") {
-    throw new Error("TOKEN_KV binding missing or invalid. Check wrangler.toml [[kv_namespaces]] and dashboard bindings.");
+    throw new Error(
+      "TOKEN_KV binding missing or invalid. Check wrangler.toml [[kv_namespaces]] and dashboard bindings."
+    );
   }
   return kv as KVNamespace;
 }
@@ -17,31 +19,33 @@ function assertKV(env: EnvDeps) {
 export async function getAccessToken(env: EnvDeps): Promise<string> {
   const kv = assertKV(env);
 
-  // try cache first
-  const cached = await kv.get(TOKEN_KEY, "json").catch(() => null) as
+  // 1) Try cached token
+  const cached = (await kv.get(TOKEN_KEY, "json").catch(() => null)) as
     | { accessToken: string; expiresAt: number }
     | null;
-
   const now = Date.now();
   if (cached?.accessToken && cached.expiresAt && cached.expiresAt - now > 60_000) {
     return cached.accessToken;
   }
 
-  // pace before auth
+  // 2) Request a new token (pace to avoid global per-sec limits)
   await paceBeforeToastCall("global", 600);
 
-  const authUrl = env.TOAST_AUTH_URL;
+  const authUrl = env.TOAST_AUTH_URL; // e.g. https://ws-api.toasttab.com/authentication/login
   const clientId = (env as any).TOAST_CLIENT_ID as string | undefined;
   const clientSecret = (env as any).TOAST_CLIENT_SECRET as string | undefined;
 
-  if (!clientId || !clientSecret || !authUrl) {
-    throw new Error("Missing Toast auth secrets. Ensure TOAST_CLIENT_ID, TOAST_CLIENT_SECRET, TOAST_AUTH_URL are set (secrets/vars).");
+  if (!authUrl || !clientId || !clientSecret) {
+    throw new Error(
+      "Missing Toast auth config. Ensure TOAST_AUTH_URL, TOAST_CLIENT_ID, TOAST_CLIENT_SECRET are set."
+    );
   }
 
   const body = {
     clientId,
     clientSecret,
-    grant_type: "client_credentials",
+    // Required by Toast for machine-to-machine clients
+    userAccessType: "TOAST_MACHINE_CLIENT",
   };
 
   const r = await fetch(authUrl, {
@@ -50,7 +54,6 @@ export async function getAccessToken(env: EnvDeps): Promise<string> {
     body: JSON.stringify(body),
   });
 
-  // honor rate-limit if present
   const retryAfter = r.headers?.get?.("retry-after") ?? null;
   if (r.status === 429) {
     await paceBeforeToastCall("global", 1000, retryAfter);
@@ -58,21 +61,39 @@ export async function getAccessToken(env: EnvDeps): Promise<string> {
   }
 
   if (!r.ok) {
+    // show server message to help debugging
     const text = await r.text().catch(() => "");
     throw new Error(`Toast auth failed: ${r.status} ${text}`);
   }
 
-  const data = (await r.json()) as { access_token: string; expires_in?: number };
-  const accessToken = data?.access_token;
-  if (!accessToken) throw new Error("Toast auth response missing access_token.");
+  type AuthResponse = {
+    token?: {
+      tokenType?: string; // should be "Bearer"
+      accessToken?: string;
+      expiresIn?: number; // seconds
+      scope?: string;
+      idToken?: string;
+      refreshToken?: string;
+    };
+    status?: string; // "SUCCESS"
+  };
 
-  const ttlSec = Math.max(120, Math.min(3600, Number(data.expires_in ?? 1800)));
+  const data = (await r.json()) as AuthResponse;
+
+  const accessToken = data?.token?.accessToken;
+  const tokenType = (data?.token?.tokenType || "Bearer").trim();
+  const ttlSec = Math.max(120, Math.min(86400, Number(data?.token?.expiresIn ?? 1800)));
+
+  if (!(accessToken && tokenType.toLowerCase() === "bearer")) {
+    throw new Error("Toast auth response missing bearer accessToken.");
+  }
+
   const expiresAt = now + ttlSec * 1000;
 
   await kv.put(
     TOKEN_KEY,
     JSON.stringify({ accessToken, expiresAt }),
-    { expirationTtl: ttlSec - 60 } // refresh 1 min early
+    { expirationTtl: Math.max(60, ttlSec - 60) } // refresh 1 minute early
   );
 
   return accessToken;
