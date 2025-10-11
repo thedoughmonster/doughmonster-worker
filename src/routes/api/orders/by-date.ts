@@ -14,12 +14,12 @@ import {
 /**
  * GET /api/orders/by-date?date=YYYY-MM-DD
  *      [&tzOffset=+0000|-0400]
- *      [&startHour=6&endHour=20]     // local-hours window (0–24)
+ *      [&startHour=6&endHour=8]      // local-hours window (0–24), MUST be ≤ 2 hours total
  *      [&includeEmpty=1]             // debug: keep empty results
  *
- * Safer defaults:
- *  - Defaults to local-hours 06:00 → 20:00 (14 slices) instead of 24 hours.
- *  - Enforces MAX_SLICES_PER_REQUEST to avoid Worker 1102 resource errors.
+ * Rules:
+ *  - Default window is 06:00 → 08:00 local (2 hours).
+ *  - Hard limit: ≤ 2 hourly slices (<= 2 hours). Larger requests return 400.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   try {
@@ -42,6 +42,20 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       return json({ ok: false, error: "'endHour' must be greater than 'startHour'." }, 400);
     }
 
+    // Enforce hard 2-hour max (<= 2 slices @ 60 minutes)
+    if (endHour - startHour > MAX_SLICES_PER_REQUEST) {
+      return json(
+        {
+          ok: false,
+          error: "Requested window too large; max 2 hours per request.",
+          limitHours: MAX_SLICES_PER_REQUEST,
+          hint: `Try: /api/orders/by-date?date=${date}&tzOffset=${tzOffset}&startHour=${startHour}&endHour=${startHour +
+            MAX_SLICES_PER_REQUEST}`,
+        },
+        400
+      );
+    }
+
     const { startToast, endToast, slices } = buildLocalHourSlicesWithinDay(
       date,
       tzOffset,
@@ -50,17 +64,14 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       60
     );
 
+    // Double-safety: if slice generator returned >2, reject.
     if (slices.length > MAX_SLICES_PER_REQUEST) {
       return json(
         {
           ok: false,
-          error: "Requested window too large for a single call.",
+          error: "Requested window expands beyond 2 hourly slices.",
           slices: slices.length,
           limit: MAX_SLICES_PER_REQUEST,
-          hint: `Reduce hours. Example: /api/orders/by-date?date=${date}&tzOffset=${tzOffset}&startHour=${startHour}&endHour=${Math.min(
-            startHour + MAX_SLICES_PER_REQUEST,
-            endHour
-          )}`,
         },
         400
       );
@@ -70,7 +81,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     let requests = 0;
 
     for (const [start, end] of slices) {
-      await paceBeforeToastCall("orders", 1100); // pace to stay under Toast per-sec limits
+      await paceBeforeToastCall("orders", 1100); // keep under per-sec and endpoint limits
       const res = await getOrdersWindow(env, start, end);
       requests++;
       if (Array.isArray(res?.data)) raw.push(...res.data);
