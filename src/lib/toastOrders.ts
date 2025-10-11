@@ -20,9 +20,10 @@ function looksLikeUuid(v: string | undefined | null): boolean {
 
 /**
  * Fetch Toast Orders v2 data for one window.
- * - Adds strong debug context on every failure.
- * - Sends `restaurant-external-id` header (currently using TOAST_RESTAURANT_GUID).
+ * - Sends **Toast-Restaurant-External-ID** header (required by Toast).
+ * - Uses TOAST_RESTAURANT_GUID for both query and required header.
  * - Expects Toast timestamps: yyyy-MM-dd'T'HH:mm:ss.SSS±HHmm
+ * - Heavy debug on all failures.
  */
 export async function getOrdersWindow(
   env: Record<string, any>,
@@ -33,43 +34,11 @@ export async function getOrdersWindow(
   const base = env.TOAST_API_BASE;
   const restaurantGuid = env.TOAST_RESTAURANT_GUID;
 
-  // Optional override: if you *also* have S_TOAST_ORDERS_EXTERNAL_ID set as a secret,
-  // we’ll prefer that for the header. Otherwise we use the restaurant GUID.
-  const externalIdForHeader =
-    env.S_TOAST_ORDERS_EXTERNAL_ID && String(env.S_TOAST_ORDERS_EXTERNAL_ID).trim().length > 0
-      ? String(env.S_TOAST_ORDERS_EXTERNAL_ID).trim()
-      : restaurantGuid;
-
   if (!base) {
-    throw new Error(
-      JSON.stringify({
-        ok: false,
-        route,
-        where: "preflight",
-        error: "TOAST_API_BASE is not set",
-      })
-    );
+    throw new Error(JSON.stringify({ ok: false, route, where: "preflight", error: "TOAST_API_BASE is not set" }));
   }
   if (!restaurantGuid) {
-    throw new Error(
-      JSON.stringify({
-        ok: false,
-        route,
-        where: "preflight",
-        error: "TOAST_RESTAURANT_GUID is not set",
-      })
-    );
-  }
-  if (!externalIdForHeader) {
-    throw new Error(
-      JSON.stringify({
-        ok: false,
-        route,
-        where: "preflight",
-        error:
-          "No value available for `restaurant-external-id` header (expected TOAST_RESTAURANT_GUID or S_TOAST_ORDERS_EXTERNAL_ID).",
-      })
-    );
+    throw new Error(JSON.stringify({ ok: false, route, where: "preflight", error: "TOAST_RESTAURANT_GUID is not set" }));
   }
 
   // Gentle pacing (stay under per-sec + endpoint limits).
@@ -80,14 +49,7 @@ export async function getOrdersWindow(
   try {
     token = await getAccessToken(env);
   } catch (e: any) {
-    throw new Error(
-      JSON.stringify({
-        ok: false,
-        route,
-        where: "auth",
-        error: e?.message || String(e),
-      })
-    );
+    throw new Error(JSON.stringify({ ok: false, route, where: "auth", error: e?.message || String(e) }));
   }
 
   // Build URL
@@ -96,11 +58,13 @@ export async function getOrdersWindow(
   url.searchParams.set("startDate", startToast);
   url.searchParams.set("endDate", endToast);
 
-  // Build headers (DO NOT log full token)
+  // Correct header name required by Toast:
+  const headerName = "Toast-Restaurant-External-ID";
+
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
     Accept: "application/json",
-    "restaurant-external-id": externalIdForHeader,
+    [headerName]: restaurantGuid,
   };
 
   const requestDebug = {
@@ -109,13 +73,10 @@ export async function getOrdersWindow(
     method: "GET",
     url: url.toString(),
     sentHeaders: {
-      // show masked info only
       authorization: `Bearer ${mask(token, 10, 6)}`,
       accept: headers.Accept,
-      "restaurant-external-id": mask(externalIdForHeader, 8, 6),
-      // quick sanity flags
-      externalIdLooksLikeUuid: looksLikeUuid(externalIdForHeader),
-      externalIdEqualsRestaurantGuid: externalIdForHeader === restaurantGuid,
+      [headerName]: mask(restaurantGuid, 8, 6),
+      externalIdLooksLikeUuid: looksLikeUuid(restaurantGuid),
     },
     query: {
       restaurantGuidMasked: mask(restaurantGuid, 8, 6),
@@ -129,13 +90,7 @@ export async function getOrdersWindow(
   try {
     res = await fetch(url.toString(), { method: "GET", headers });
   } catch (e: any) {
-    throw new Error(
-      JSON.stringify({
-        ...requestDebug,
-        where: "network",
-        error: e?.message || String(e),
-      })
-    );
+    throw new Error(JSON.stringify({ ...requestDebug, where: "network", error: e?.message || String(e) }));
   }
 
   const status = res.status;
@@ -152,36 +107,18 @@ export async function getOrdersWindow(
   };
 
   if (status === 429) {
-    throw new Error(
-      JSON.stringify({
-        ...baseErr,
-        error: "Toast rate limit (429)",
-      })
-    );
+    throw new Error(JSON.stringify({ ...baseErr, error: "Toast rate limit (429)" }));
   }
 
   let parsed: any = null;
   try {
     parsed = text ? JSON.parse(text) : null;
   } catch {
-    // Not JSON; bubble exact payload
-    throw new Error(
-      JSON.stringify({
-        ...baseErr,
-        error: `Non-JSON response from Toast`,
-      })
-    );
+    throw new Error(JSON.stringify({ ...baseErr, error: `Non-JSON response from Toast` }));
   }
 
   if (!res.ok) {
-    // Bubble Toast error with all context
-    throw new Error(
-      JSON.stringify({
-        ...baseErr,
-        error: `Toast ${route} failed`,
-        toastError: parsed,
-      })
-    );
+    throw new Error(JSON.stringify({ ...baseErr, error: `Toast ${route} failed`, toastError: parsed }));
   }
 
   // Normalize to { data: [] }
@@ -197,8 +134,8 @@ export async function getOrdersWindow(
     debug: {
       route,
       url: url.toString(),
-      externalIdEqualsRestaurantGuid: externalIdForHeader === restaurantGuid,
-      externalIdLooksLikeUuid: looksLikeUuid(externalIdForHeader),
+      headerUsed: headerName,
+      externalIdLooksLikeUuid: looksLikeUuid(restaurantGuid),
     },
   };
 }
