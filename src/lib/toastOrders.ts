@@ -1,176 +1,146 @@
 // /src/lib/toastOrders.ts
-// Path: src/lib/toastOrders.ts
-
+// lines: 1-~end (new full file; replaces previous toastOrders.ts)
 import { getAccessToken } from "./toastAuth";
 import { paceBeforeToastCall } from "./pacer";
+import { buildIsoWindowSlices } from "./time";
+import { httpJson } from "./http";
 
-/** Mask helper for secrets/ids in logs (keep format hints while safe). */
-function mask(val: string | undefined | null, keepStart = 8, keepEnd = 4): string {
-  if (!val) return "<empty>";
-  const s = String(val);
-  if (s.length <= keepStart + keepEnd) return s.replace(/./g, "•");
-  return `${s.slice(0, keepStart)}…${s.slice(-keepEnd)}`;
-}
-
-/** Basic UUID check (Toast GUIDs look like UUIDs). */
-function looksLikeUuid(v: string | undefined | null): boolean {
-  if (!v) return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
-
-export type OrdersWindowResult = {
-  data: any[];
-  raw?: unknown;
-  status?: number;
-  debug?: any;
+export type OrdersWindowOpts = {
+  startISO: string; // inclusive ISO-8601 with offset, e.g. 2025-10-10T06:00:00.000-0400
+  endISO: string;   // inclusive end-ish we’ll clamp per slice
+  sliceMinutes?: number; // default 60 (Toast hard limit)
+  detail?: "ids" | "full"; // "full" uses /ordersBulk
+  debug?: boolean;
 };
 
-/** Default expansions to get “complete enough” orders. Adjust later as needed. */
-const DEFAULT_EXPAND = [
-  "checks",
-  "items",
-  "payments",
-  "discounts",
-  "serviceCharges",
-  "customers",
-  "employee",
-] as const;
+type Env = {
+  TOAST_API_BASE: string;
+  TOAST_RESTAURANT_GUID: string;
+};
 
-/** Build a CSV expand string from array or string. */
-function toExpandCSV(expand?: string | string[] | null): string | undefined {
-  if (!expand) return DEFAULT_EXPAND.join(",");
-  if (Array.isArray(expand)) return expand.join(",");
-  return expand;
-}
-
-/**
- * Fetch Toast Orders v2 data for one window.
- * - Sends **Toast-Restaurant-External-ID** header (required by Toast).
- * - Uses TOAST_RESTAURANT_GUID for both query and required header.
- * - Supports `expand` to retrieve full order payloads.
- * - Expects timestamps: yyyy-MM-dd'T'HH:mm:ss.SSS±HHmm
- * - Heavy debug on all failures.
- */
-export async function getOrdersWindow(
-  env: Record<string, any>,
-  startToast: string,
-  endToast: string,
-  expand?: string | string[] | null
-): Promise<OrdersWindowResult> {
-  const route = "/orders/v2/orders";
-  const base = env.TOAST_API_BASE;
-  const restaurantGuid = env.TOAST_RESTAURANT_GUID;
-
-  if (!base) {
-    throw new Error(JSON.stringify({ ok: false, route, where: "preflight", error: "TOAST_API_BASE is not set" }));
-  }
-  if (!restaurantGuid) {
-    throw new Error(JSON.stringify({ ok: false, route, where: "preflight", error: "TOAST_RESTAURANT_GUID is not set" }));
-  }
-
-  // Gentle pacing (stay under per-sec + endpoint limits).
-  await paceBeforeToastCall("orders", 900);
-
-  // Token
-  let token = "";
-  try {
-    token = await getAccessToken(env);
-  } catch (e: any) {
-    throw new Error(JSON.stringify({ ok: false, route, where: "auth", error: e?.message || String(e) }));
-  }
-
-  // Build URL
-  const url = new URL(route, base);
-  url.searchParams.set("restaurantGuid", restaurantGuid);
-  url.searchParams.set("startDate", startToast);
-  url.searchParams.set("endDate", endToast);
-  const expandCsv = toExpandCSV(expand);
-  if (expandCsv) url.searchParams.set("expand", expandCsv);
-
-  // Correct header name required by Toast
-  const headerName = "Toast-Restaurant-External-ID";
-
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-    [headerName]: restaurantGuid,
+type DebugSlice = {
+  sliceWindow: { start: string; end: string };
+  toast: {
+    route: string;
+    url: string;
+    headerUsed: "Toast-Restaurant-External-ID";
   };
+  status: number;
+  returned: number;
+};
 
-  const requestDebug = {
-    ok: false,
-    route,
-    method: "GET",
-    url: url.toString(),
-    sentHeaders: {
-      authorization: `Bearer ${mask(token, 10, 6)}`,
-      accept: headers.Accept,
-      [headerName]: mask(restaurantGuid, 8, 6),
-      externalIdLooksLikeUuid: looksLikeUuid(restaurantGuid),
-    },
-    query: {
-      restaurantGuidMasked: mask(restaurantGuid, 8, 6),
-      startDate: startToast,
-      endDate: endToast,
-      expand: expandCsv || "<none>",
-    },
-  };
+export async function getOrdersWindow(env: Env, opts: OrdersWindowOpts) {
+  const {
+    startISO,
+    endISO,
+    sliceMinutes = 60,
+    detail = "ids",
+    debug = false,
+  } = opts;
 
-  // Fire request
-  let res: Response;
-  try {
-    res = await fetch(url.toString(), { method: "GET", headers });
-  } catch (e: any) {
-    throw new Error(JSON.stringify({ ...requestDebug, where: "network", error: e?.message || String(e) }));
-  }
+  const token = await getAccessToken(env);
+  const slices = buildIsoWindowSlices(startISO, endISO, sliceMinutes);
 
-  const status = res.status;
-  const text = await res.text();
-  const baseErr = {
-    ...requestDebug,
-    status,
-    responseHeaders: {
-      "retry-after": res.headers.get("retry-after"),
-      "content-type": res.headers.get("content-type"),
-      "cf-ray": res.headers.get("cf-ray"),
-    },
-    bodyPreview: text?.slice(0, 800),
-  };
+  const all: any[] = [];
+  const debugSlices: DebugSlice[] = [];
 
-  if (status === 429) {
-    throw new Error(JSON.stringify({ ...baseErr, error: "Toast rate limit (429)" }));
-  }
+  for (const [i, win] of slices.entries()) {
+    await paceBeforeToastCall("orders"); // 1 rps “global” pacer
 
-  let parsed: any = null;
-  try {
-    parsed = text ? JSON.parse(text) : null;
-  } catch {
-    throw new Error(JSON.stringify({ ...baseErr, error: `Non-JSON response from Toast` }));
-  }
+    const route =
+      detail === "full" ? "/orders/v2/ordersBulk" : "/orders/v2/orders";
 
-  if (!res.ok) {
-    throw new Error(JSON.stringify({ ...baseErr, error: `Toast ${route} failed`, toastError: parsed }));
-  }
+    const query =
+      detail === "full"
+        ? new URLSearchParams({
+            startDate: win.start,
+            endDate: win.end,
+            pageSize: "100",
+          })
+        : new URLSearchParams({
+            startDate: win.start,
+            endDate: win.end,
+            restaurantGuid: env.TOAST_RESTAURANT_GUID, // kept for back-compat, but header is authoritative
+          });
 
-  // Normalize to { data: [] }
-  let data: any[] = [];
-  if (Array.isArray(parsed)) data = parsed;
-  else if (Array.isArray(parsed?.orders)) data = parsed.orders;
-  else if (Array.isArray(parsed?.data)) data = parsed.data;
-  else if (parsed && typeof parsed === "object") {
-    // some responses return { results: [] }
-    if (Array.isArray(parsed.results)) data = parsed.results;
+    const url = `${env.TOAST_API_BASE}${route}?${query.toString()}`;
+
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
+    };
+
+    const res = await fetch(url, { headers });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // keep as text for debugging
+    }
+
+    if (debug) {
+      debugSlices.push({
+        sliceWindow: win,
+        toast: {
+          route,
+          url,
+          headerUsed: "Toast-Restaurant-External-ID",
+        },
+        status: res.status,
+        returned: Array.isArray(json) ? json.length : json ? 1 : 0,
+      });
+    }
+
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after") || "1");
+      throw {
+        ok: false,
+        error: "Rate limited; please retry later.",
+        route,
+        status: 429,
+        retryAfter,
+      };
+    }
+
+    if (!res.ok) {
+      throw {
+        ok: false,
+        error: `Toast ${route} failed`,
+        route,
+        status: res.status,
+        bodyPreview: text?.slice(0, 4000),
+      };
+    }
+
+    if (detail === "full") {
+      // Expecting array of full Order objects
+      if (Array.isArray(json)) {
+        all.push(...json);
+      } else if (json) {
+        all.push(json);
+      }
+    } else {
+      // “ids” mode: map to order GUIDs if present, otherwise fall back
+      const ids =
+        Array.isArray(json) && json.length && typeof json[0] === "object"
+          ? json.map((o: any) => o.guid ?? o.id ?? o)
+          : Array.isArray(json)
+          ? json
+          : json
+          ? [json]
+          : [];
+      all.push(...ids);
+    }
   }
 
   return {
-    data,
-    raw: parsed,
-    status,
-    debug: {
-      route,
-      url: url.toString(),
-      headerUsed: headerName,
-      expandUsed: expandCsv || "<none>",
-      externalIdLooksLikeUuid: looksLikeUuid(restaurantGuid),
-    },
+    ok: true,
+    detail,
+    slices: slices.length,
+    count: all.length,
+    data: all,
+    ...(debug ? { debugSlices } : null),
   };
 }
