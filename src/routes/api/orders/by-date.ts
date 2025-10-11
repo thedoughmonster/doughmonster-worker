@@ -3,7 +3,7 @@
 
 import { paceBeforeToastCall } from "../../../lib/pacer";
 import { buildLocalHourSlicesWithinDay, clampInt } from "../../../lib/time";
-import { getOrdersWindow } from "../../../lib/toastOrders";
+import { getOrdersWindow } from "../../../lib/toastOrders.ts"; // <-- explicit .ts
 import {
   DEFAULT_START_HOUR,
   DEFAULT_END_HOUR,
@@ -16,10 +16,6 @@ import {
  *      [&tzOffset=+0000|-0400]
  *      [&startHour=6&endHour=8]      // local-hours window (0–24), MUST be ≤ 2 hours total
  *      [&includeEmpty=1]             // debug: keep empty results
- *
- * Rules:
- *  - Default window is 06:00 → 08:00 local (2 hours).
- *  - Hard limit: ≤ 2 hourly slices (<= 2 hours). Larger requests return 400.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   try {
@@ -64,7 +60,6 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       60
     );
 
-    // Double-safety: if slice generator returned >2, reject.
     if (slices.length > MAX_SLICES_PER_REQUEST) {
       return json(
         {
@@ -81,13 +76,12 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     let requests = 0;
 
     for (const [start, end] of slices) {
-      await paceBeforeToastCall("orders", 1100); // keep under per-sec and endpoint limits
+      await paceBeforeToastCall("orders", 1100);
       const res = await getOrdersWindow(env, start, end);
       requests++;
       if (Array.isArray(res?.data)) raw.push(...res.data);
     }
 
-    // Filter out empties by default
     const filtered = includeEmpty
       ? raw
       : raw.filter((o) => {
