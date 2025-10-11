@@ -10,44 +10,35 @@ export default {
   async fetch(request: Request, env: any) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const origin = request.headers.get("Origin") || "*";
 
     // Debug routes
     if (request.method === "GET" && path === "/api/debug/auth") {
-      const res = await handleAuth(env, request);
-      return withCors(res, origin);
+      return await handleAuth(env, request);
     }
 
     if (request.method === "GET" && path === "/api/debug/bindings") {
-      const res = await handleBindings(env, request);
-      return withCors(res, origin);
+      return await handleBindings(env, request);
     }
 
     // Menu metadata
     if (request.method === "GET" && path === "/api/menu/metadata") {
-      const res = await handleMenuMetadata(env, request);
-      return withCors(res, origin);
+      return await handleMenuMetadata(env, request);
     }
 
     // Orders (6-hour default)
     if (request.method === "GET" && path === "/api/orders/by-date") {
-      const res = await handleOrdersByDate(env, request);
-      return withCors(res, origin);
+      return await handleOrdersByDate(env, request);
     }
 
     // Orders (multi-hour flexible range)
     if (request.method === "GET" && path === "/api/orders/by-range") {
-      const res = await handleOrdersByRange(env, request);
-      return withCors(res, origin);
+      return await handleOrdersByRange(env, request);
     }
 
     // Default 404
-    return withCors(
-      new Response(JSON.stringify({ ok: false, error: "Not Found", path }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      }),
-      origin
+    return new Response(
+      JSON.stringify({ ok: false, error: "Not Found", path }),
+      { status: 404, headers: { "Content-Type": "application/json" } }
     );
   },
 };
