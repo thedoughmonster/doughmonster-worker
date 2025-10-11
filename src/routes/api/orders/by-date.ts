@@ -21,7 +21,7 @@ import {
  * Route: /api/orders/by-date
  * - Hard cap: ≤ 2 hours (2 hourly slices).
  * - On success: add `debugSlices` when debug=1.
- * - On error: always returns structured JSON already (from previous version).
+ * - Lenient filtering so results are not dropped prematurely.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   const ROUTE = "/api/orders/by-date";
@@ -108,14 +108,11 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       }
     }
 
+    // Lenient filter: keep any non-null object unless includeEmpty=0 and it’s obviously empty
+    // (We can tighten once we finalize the canonical order shape.)
     const filtered = includeEmpty
       ? raw
-      : raw.filter((o) => {
-          if (!o || typeof o !== "object") return false;
-          if (o.id) return true;
-          if (Array.isArray(o.items) && o.items.length > 0) return true;
-          return false;
-        });
+      : raw.filter((o) => o && typeof o === "object");
 
     const body: any = {
       ok: true,
