@@ -18,18 +18,45 @@ function looksLikeUuid(v: string | undefined | null): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
+export type OrdersWindowResult = {
+  data: any[];
+  raw?: unknown;
+  status?: number;
+  debug?: any;
+};
+
+/** Default expansions to get “complete enough” orders. Adjust later as needed. */
+const DEFAULT_EXPAND = [
+  "checks",
+  "items",
+  "payments",
+  "discounts",
+  "serviceCharges",
+  "customers",
+  "employee",
+] as const;
+
+/** Build a CSV expand string from array or string. */
+function toExpandCSV(expand?: string | string[] | null): string | undefined {
+  if (!expand) return DEFAULT_EXPAND.join(",");
+  if (Array.isArray(expand)) return expand.join(",");
+  return expand;
+}
+
 /**
  * Fetch Toast Orders v2 data for one window.
  * - Sends **Toast-Restaurant-External-ID** header (required by Toast).
  * - Uses TOAST_RESTAURANT_GUID for both query and required header.
- * - Expects Toast timestamps: yyyy-MM-dd'T'HH:mm:ss.SSS±HHmm
+ * - Supports `expand` to retrieve full order payloads.
+ * - Expects timestamps: yyyy-MM-dd'T'HH:mm:ss.SSS±HHmm
  * - Heavy debug on all failures.
  */
 export async function getOrdersWindow(
   env: Record<string, any>,
   startToast: string,
-  endToast: string
-): Promise<{ data: any[]; raw?: unknown; status?: number; debug?: any }> {
+  endToast: string,
+  expand?: string | string[] | null
+): Promise<OrdersWindowResult> {
   const route = "/orders/v2/orders";
   const base = env.TOAST_API_BASE;
   const restaurantGuid = env.TOAST_RESTAURANT_GUID;
@@ -57,8 +84,10 @@ export async function getOrdersWindow(
   url.searchParams.set("restaurantGuid", restaurantGuid);
   url.searchParams.set("startDate", startToast);
   url.searchParams.set("endDate", endToast);
+  const expandCsv = toExpandCSV(expand);
+  if (expandCsv) url.searchParams.set("expand", expandCsv);
 
-  // Correct header name required by Toast:
+  // Correct header name required by Toast
   const headerName = "Toast-Restaurant-External-ID";
 
   const headers: Record<string, string> = {
@@ -82,6 +111,7 @@ export async function getOrdersWindow(
       restaurantGuidMasked: mask(restaurantGuid, 8, 6),
       startDate: startToast,
       endDate: endToast,
+      expand: expandCsv || "<none>",
     },
   };
 
@@ -103,7 +133,7 @@ export async function getOrdersWindow(
       "content-type": res.headers.get("content-type"),
       "cf-ray": res.headers.get("cf-ray"),
     },
-    bodyPreview: text?.slice(0, 500),
+    bodyPreview: text?.slice(0, 800),
   };
 
   if (status === 429) {
@@ -126,6 +156,10 @@ export async function getOrdersWindow(
   if (Array.isArray(parsed)) data = parsed;
   else if (Array.isArray(parsed?.orders)) data = parsed.orders;
   else if (Array.isArray(parsed?.data)) data = parsed.data;
+  else if (parsed && typeof parsed === "object") {
+    // some responses return { results: [] }
+    if (Array.isArray(parsed.results)) data = parsed.results;
+  }
 
   return {
     data,
@@ -135,6 +169,7 @@ export async function getOrdersWindow(
       route,
       url: url.toString(),
       headerUsed: headerName,
+      expandUsed: expandCsv || "<none>",
       externalIdLooksLikeUuid: looksLikeUuid(restaurantGuid),
     },
   };

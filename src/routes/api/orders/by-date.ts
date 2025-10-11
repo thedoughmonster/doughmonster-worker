@@ -15,6 +15,7 @@ import {
  * GET /api/orders/by-date?date=YYYY-MM-DD
  *      [&tzOffset=±HHmm]
  *      [&startHour=H&endHour=H]      // MUST be ≤ 2 hours total
+ *      [&expand=checks,items,...]    // optional expansions; defaults applied if omitted
  *      [&debug=1]                    // include per-slice debug payloads
  *
  * Route: /api/orders/by-date
@@ -53,6 +54,11 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       });
     }
 
+    // optional expand param passthrough
+    // supports: ?expand=checks,items,payments  (comma separated)
+    const expandParam = url.searchParams.get("expand");
+    const expand = expandParam ? expandParam.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+
     const { startToast, endToast, slices } = buildLocalHourSlicesWithinDay(
       date,
       tzOffset,
@@ -79,7 +85,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     for (const [start, end] of slices) {
       await paceBeforeToastCall("orders", 1100);
       try {
-        const res = await getOrdersWindow(env, start, end);
+        const res = await getOrdersWindow(env, start, end, expand);
         requests++;
         if (Array.isArray(res?.data)) raw.push(...res.data);
         if (includeDebug) {
@@ -101,14 +107,12 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
             route: ROUTE,
             where: "orders-window",
             error: e?.message || String(e),
-            // give window to copy/paste
             window: { start, end },
           });
         }
       }
     }
 
-    // No filtering — return raw as-is
     const data = raw;
 
     const body: any = {
@@ -120,7 +124,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       window: { start: startToast, end: endToast },
       slices: slices.length,
       requests,
-      count: data.length, // equals rawCount now
+      count: data.length,
       data,
       rawCount: raw.length,
     };
