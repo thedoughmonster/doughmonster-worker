@@ -14,9 +14,9 @@ import {
 /**
  * GET /api/orders/by-date?date=YYYY-MM-DD
  *      [&tzOffset=±HHmm]
- *      [&startHour=H&endHour=H]      // MUST be ≤ 2 hours total
- *      [&detail=ids|full]            // default: ids (GUIDs). full => full objects via /ordersBulk
- *      [&debug=1]                    // include per-slice debug
+ *      [&startHour=H&endHour=H]   // MUST be ≤ 2 hours total (hard cap)
+ *      [&detail=ids|full]         // default: full (uses /ordersBulk). ids => GUIDs via /orders
+ *      [&debug=1]                 // include per-slice debug
  *
  * Route: /api/orders/by-date
  */
@@ -27,7 +27,9 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     const date = url.searchParams.get("date");
     const tzOffset = url.searchParams.get("tzOffset") || DEFAULT_TZ_OFFSET;
     const includeDebug = url.searchParams.get("debug") === "1";
-    const detail = (url.searchParams.get("detail") as "ids" | "full") || "ids";
+
+    // 🔄 DEFAULT NOW = "full" detail
+    const detail = (url.searchParams.get("detail") as "ids" | "full") || "full";
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return j(400, { ok: false, route: ROUTE, error: "Missing/invalid 'date' (YYYY-MM-DD)" });
@@ -79,8 +81,8 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       try {
         const res =
           detail === "full"
-            ? await getOrdersWindowFull(env, start, end)
-            : await getOrdersWindow(env, start, end);
+            ? await getOrdersWindowFull(env, start, end) // /ordersBulk
+            : await getOrdersWindow(env, start, end);    // /orders (GUIDs)
 
         requests++;
         if (Array.isArray(res?.data)) out.push(...res.data);
