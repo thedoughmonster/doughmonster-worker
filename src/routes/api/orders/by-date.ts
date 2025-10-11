@@ -15,13 +15,12 @@ import {
  * GET /api/orders/by-date?date=YYYY-MM-DD
  *      [&tzOffset=±HHmm]
  *      [&startHour=H&endHour=H]      // MUST be ≤ 2 hours total
- *      [&includeEmpty=1]             // include empties in `data`
  *      [&debug=1]                    // include per-slice debug payloads
  *
  * Route: /api/orders/by-date
  * - Hard cap: ≤ 2 hours (2 hourly slices).
- * - On success: add `debugSlices` when debug=1.
- * - Lenient filtering so results are not dropped prematurely.
+ * - Returns ALL entries from Toast (no filtering).
+ * - On success: adds `debugSlices` when debug=1.
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   const ROUTE = "/api/orders/by-date";
@@ -29,7 +28,6 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     const url = new URL(request.url);
     const date = url.searchParams.get("date");
     const tzOffset = url.searchParams.get("tzOffset") || DEFAULT_TZ_OFFSET;
-    const includeEmpty = url.searchParams.get("includeEmpty") === "1";
     const includeDebug = url.searchParams.get("debug") === "1";
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -73,6 +71,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       });
     }
 
+    // Accumulate ALL entries from Toast — no filtering.
     const raw: any[] = [];
     const debugSlices: any[] = [];
     let requests = 0;
@@ -102,17 +101,15 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
             route: ROUTE,
             where: "orders-window",
             error: e?.message || String(e),
+            // give window to copy/paste
             window: { start, end },
           });
         }
       }
     }
 
-    // Lenient filter: keep any non-null object unless includeEmpty=0 and it’s obviously empty
-    // (We can tighten once we finalize the canonical order shape.)
-    const filtered = includeEmpty
-      ? raw
-      : raw.filter((o) => o && typeof o === "object");
+    // No filtering — return raw as-is
+    const data = raw;
 
     const body: any = {
       ok: true,
@@ -123,10 +120,9 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
       window: { start: startToast, end: endToast },
       slices: slices.length,
       requests,
-      count: filtered.length,
-      data: filtered,
+      count: data.length, // equals rawCount now
+      data,
       rawCount: raw.length,
-      includedEmpty: includeEmpty,
     };
 
     if (includeDebug) {
