@@ -12,10 +12,16 @@ import {
 } from "../../../config/orders";
 
 /**
- * GET /api/orders/by-date?date=YYYY-MM-DD[&tzOffset=±HHmm][&startHour=H&endHour=H][&includeEmpty=1]
+ * GET /api/orders/by-date?date=YYYY-MM-DD
+ *      [&tzOffset=±HHmm]
+ *      [&startHour=H&endHour=H]      // MUST be ≤ 2 hours total
+ *      [&includeEmpty=1]             // include empties in `data`
+ *      [&debug=1]                    // include per-slice debug payloads
+ *
  * Route: /api/orders/by-date
  * - Hard cap: ≤ 2 hours (2 hourly slices).
- * - Heavy debug: failures return structured JSON with route names & masked details.
+ * - On success: add `debugSlices` when debug=1.
+ * - On error: always returns structured JSON already (from previous version).
  */
 export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
   const ROUTE = "/api/orders/by-date";
@@ -24,6 +30,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     const date = url.searchParams.get("date");
     const tzOffset = url.searchParams.get("tzOffset") || DEFAULT_TZ_OFFSET;
     const includeEmpty = url.searchParams.get("includeEmpty") === "1";
+    const includeDebug = url.searchParams.get("debug") === "1";
 
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return j(400, { ok: false, route: ROUTE, error: "Missing/invalid 'date' (YYYY-MM-DD)" });
@@ -67,6 +74,7 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
     }
 
     const raw: any[] = [];
+    const debugSlices: any[] = [];
     let requests = 0;
 
     for (const [start, end] of slices) {
@@ -75,6 +83,14 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
         const res = await getOrdersWindow(env, start, end);
         requests++;
         if (Array.isArray(res?.data)) raw.push(...res.data);
+        if (includeDebug) {
+          debugSlices.push({
+            sliceWindow: { start, end },
+            toast: res?.debug ?? null,
+            status: res?.status ?? null,
+            returned: Array.isArray(res?.data) ? res!.data.length : 0,
+          });
+        }
       } catch (e: any) {
         // If the lower-level error is JSON, pass it through with our route label.
         try {
@@ -101,21 +117,27 @@ export default async function handleOrdersByDate(env: any, request: Request): Pr
           return false;
         });
 
-    return j(200, {
+    const body: any = {
       ok: true,
       route: ROUTE,
       day: date,
       tzOffset,
       hours: { startHour, endHour },
+      window: { start: startToast, end: endToast },
       slices: slices.length,
       requests,
       count: filtered.length,
       data: filtered,
       rawCount: raw.length,
       includedEmpty: includeEmpty,
-    });
+    };
+
+    if (includeDebug) {
+      body.debugSlices = debugSlices;
+    }
+
+    return j(200, body);
   } catch (err: any) {
-    // Final net to ensure we always return structured debug
     return j(500, {
       ok: false,
       route: ROUTE,
