@@ -1,5 +1,6 @@
 // /src/lib/http.ts
 // Path: src/lib/http.ts
+// Minimal shared HTTP utilities for Worker routes.
 
 export function jsonResponse<T>(data: T, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), {
