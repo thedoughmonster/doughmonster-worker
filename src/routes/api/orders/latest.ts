@@ -9,42 +9,74 @@ type Env = {
   TOAST_RESTAURANT_GUID: string;
 };
 
+function asToastIsoString(v: unknown, label: string): string {
+  if (typeof v === "string") return v;
+  if (v instanceof Date) return v.toISOString().replace("Z", "+0000");
+  // Final fallback — stringify and *throw* so we see it in logs
+  throw new Error(`Expected ${label} to be Toast ISO string, got: ${Object.prototype.toString.call(v)} -> ${String(v)}`);
+}
+
 /**
  * GET /api/orders/latest?minutes=30&detail=full|ids&debug=1
- * - Caps minutes to [1..120] (you said you never need > 2 hours)
- * - Defaults to full orders via ordersBulk (detail=full)
- * - Includes debug slices when ?debug=1
+ * - Caps minutes to [1..120]
+ * - detail=full (default) returns expanded orders; detail=ids returns only IDs
+ * - Debug echoes computed window so we can see exactly what we send
  */
 export default async function handleOrdersLatest(env: Env, request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  const debug = url.searchParams.get("debug") === "1";
+  try {
+    const url = new URL(request.url);
+    const debug = url.searchParams.get("debug") === "1";
+    const minutes = clampInt(url.searchParams.get("minutes"), 1, 120, 30);
+    const detailParam = (url.searchParams.get("detail") || "full").toLowerCase();
+    const detail: "full" | "ids" = detailParam === "ids" ? "ids" : "full";
 
-  // minutes: default 30, clamp to [1..120]
-  const minutes = clampInt(url.searchParams.get("minutes"), 1, 120, 30);
+    // Compute window as *strings* (force-cast defensively)
+    const endISO = asToastIsoString(nowToastIsoUtc(), "endISO");
+    const startISO = asToastIsoString(minusMinutesToastIsoUtc(minutes, endISO), "startISO");
 
-  // detail: "full" (default) or "ids"
-  const detailParam = (url.searchParams.get("detail") || "full").toLowerCase();
-  const detail: "full" | "ids" = detailParam === "ids" ? "ids" : "full";
+    // Optional early debug preview (no network) — toggle by uncommenting:
+    // if (debug) {
+    //   return new Response(JSON.stringify({ ok: true, route: "/api/orders/latest", minutes, detail, startISO, endISO }), {
+    //     status: 200,
+    //     headers: { "content-type": "application/json" },
+    //   });
+    // }
 
-  // Build UTC Toast ISO window [now - minutes, now]
-  const endISO = nowToastIsoUtc();
-  const startISO = minusMinutesToastIsoUtc(minutes, endISO);
+    const result = await getOrdersWindow(env, {
+      startISO,
+      endISO,
+      detail,
+      debug,
+      where: "orders-latest",
+      callerRoute: "/api/orders/latest",
+    });
 
-  const result = await getOrdersWindow(env, {
-    startISO,
-    endISO,
-    detail,          // "full" uses ordersBulk; "ids" uses the light path
-    debug,
-    where: "orders-latest",
-    callerRoute: "/api/orders/latest",
-  });
+    // If library already returns a Response, pass it through
+    if (result instanceof Response) return result;
 
-  // result already comes back as a Response in the existing lib
-  if (result instanceof Response) return result;
-
-  // If your getOrdersWindow returns a data object instead, normalize it:
-  return new Response(JSON.stringify(result), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+    // Otherwise, normalize to a JSON response
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        route: "/api/orders/latest",
+        minutes,
+        detail,
+        startISO,
+        endISO,
+        ...result,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  } catch (err: any) {
+    const msg = typeof err?.message === "string" ? err.message : String(err);
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        route: "/api/orders/latest",
+        error: msg,
+        stack: err?.stack,
+      }),
+      { status: 500, headers: { "content-type": "application/json" } }
+    );
+  }
 }
