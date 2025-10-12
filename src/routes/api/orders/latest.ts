@@ -1,56 +1,85 @@
 // src/routes/api/orders/latest.ts
-// Path: src/routes/api/orders/latest.ts
+// Returns full Toast orders from the last ?minutes= (default 60, max 120)
+// Response includes both order IDs and full order objects, plus rich debug.
 
 import { jsonResponse } from "../../../lib/http";
-import { clampInt, nowToastIsoUtc, minusMinutesToastIsoUtc } from "../../../lib/time";
-import { getOrdersWindow } from "../../../lib/toastOrders";
+import { getOrdersWindowFull } from "../../../lib/toastOrders";
 
 type Bindings = {
   TOAST_API_BASE: string;
   TOAST_RESTAURANT_GUID: string;
 };
 
-export default async function handleOrdersLatest(env: Bindings, request: Request): Promise<Response> {
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+// Toast expects: yyyy-MM-dd'T'HH:mm:ss.SSSZ (e.g. 2025-10-10T14:13:12.000+0000)
+// We format in UTC with +0000.
+function toToastIsoUtc(d: Date): string {
+  const pad = (x: number, len = 2) => String(x).padStart(len, "0");
+  const yyyy = d.getUTCFullYear();
+  const MM = pad(d.getUTCMonth() + 1);
+  const dd = pad(d.getUTCDate());
+  const HH = pad(d.getUTCHours());
+  const mm = pad(d.getUTCMinutes());
+  const ss = pad(d.getUTCSeconds());
+  const mmm = pad(d.getUTCMilliseconds(), 3);
+  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
+}
+
+export default async function handleOrdersLatest(env: Bindings, request: Request) {
   try {
     const url = new URL(request.url);
+    const minutesParam = url.searchParams.get("minutes");
+    const detail = (url.searchParams.get("detail") || "full").toLowerCase();
+    const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
+    const withDebug = url.searchParams.has("debug") || url.searchParams.get("debug") === "1";
 
-    // Lookback window (default 60, cap at 120)
-    const minutes = clampInt(parseInt(url.searchParams.get("minutes") || "60", 10), 1, 120);
+    const now = new Date();
+    const start = new Date(now.getTime() - minutes * 60_000);
 
-    // Full by default; opt out with ?lean=1
-    const lean = url.searchParams.get("lean") === "1";
-    const expand = lean
-      ? undefined
-      : ["checks", "items", "payments", "discounts", "serviceCharges", "customers", "employee"];
+    const startDateIso = toToastIsoUtc(start);
+    const endDateIso = toToastIsoUtc(now);
 
-    const endIso = nowToastIsoUtc();
-    const startIso = minusMinutesToastIsoUtc(minutes, endIso);
-
-    const debug = url.searchParams.get("debug") === "1";
-
-    const result = await getOrdersWindow(env, {
-      startDateIso: startIso,
-      endDateIso: endIso,
-      expand,
-      debugMeta: debug ? { callerRoute: "/api/orders/latest" } : undefined,
+    // Always fetch full orders for this endpoint.
+    const res = await getOrdersWindowFull(env, {
+      startDateIso,
+      endDateIso,
+      debugMeta: { callerRoute: "/api/orders/latest" },
     });
 
-    return jsonResponse({
+    const body: any = {
       ok: true,
       route: "/api/orders/latest",
       minutes,
-      window: { start: startIso, end: endIso },
-      detail: lean ? "lean" : "full",
-      expandUsed: expand ?? null,
-      ...result, // includes data, count, raw/debugSlices from getOrdersWindow
-    });
+      window: { start: startDateIso, end: endDateIso },
+      detail: "full",
+      expandUsed: [
+        "checks",
+        "items",
+        "payments",
+        "discounts",
+        "serviceCharges",
+        "customers",
+        "employee",
+      ],
+      count: Array.isArray(res.data) ? res.data.length : 0,
+      ids: res.ids,
+      data: res.data, // full order objects
+    };
+
+    if (withDebug) body.slice = res.slice;
+
+    return jsonResponse(body);
   } catch (err: any) {
+    const msg =
+      typeof err?.message === "string" ? err.message : (err ? String(err) : "Unknown error");
     return jsonResponse(
       {
         ok: false,
         route: "/api/orders/latest",
-        error: err?.message || String(err),
-        stack: err?.stack,
+        error: msg,
       },
       { status: 500 }
     );
