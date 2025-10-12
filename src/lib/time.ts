@@ -21,6 +21,29 @@ export function toToastOffset(offset: string): string {
   return offset;
 }
 
+/** Convert a JS ISO (YYYY-MM-DDTHH:mm:ss.SSSZ or ±HH:MM) to Toast ISO (±HHmm, or +0000). */
+function toToastIso(iso: string): string {
+  if (iso.endsWith("Z")) return iso.replace("Z", "+0000"); // Z → +0000
+  return iso.replace(/([+-]\d{2}):(\d{2})$/, "$1$2");       // ±HH:MM → ±HHMM
+}
+
+/** Convert a Toast ISO (±HHmm) to a JS-compatible ISO (±HH:MM). */
+function toJsIso(iso: string): string {
+  return iso.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+}
+
+/** Now, as Toast ISO in UTC (YYYY-MM-DDTHH:mm:ss.SSS+0000). */
+export function nowToastIsoUtc(): string {
+  return toToastIso(new Date().toISOString());
+}
+
+/** (from || now) minus N minutes, returned as Toast ISO in UTC. */
+export function minusMinutesToastIsoUtc(minutes: number, from?: string): string {
+  const base = from ? new Date(toJsIso(from)) : new Date();
+  const d = new Date(base.getTime() - minutes * 60_000);
+  return toToastIso(d.toISOString());
+}
+
 /**
  * Build 60-minute toast-formatted slices for a local day window.
  * Inputs: date "YYYY-MM-DD", tzOffset "±HHmm", startHour [0..23], endHour [1..24], stepMinutes (default 60)
@@ -39,20 +62,16 @@ export function buildLocalHourSlicesWithinDay(
 } {
   const off = toToastOffset(tzOffset);
 
-  // Build Date objects in the provided local offset by constructing ISO with that offset.
-  // Example: 2025-10-10T06:00:00.000-0400
   const mk = (h: number, m: number, s: number, ms: number) =>
     `${date}T${pad2(h)}:${pad2(m)}:${pad2(s)}.${pad3(ms)}${off}`;
 
   const startToast = mk(startHour, 0, 0, 0);
   const endToast = mk(endHour - 1, 59, 59, 0);
 
-  // Generate hourly (or stepMinutes) slices fully within [startHour, endHour)
   const slices: [string, string][] = [];
   let h = startHour;
   while (h < endHour) {
     const sliceStart = mk(h, 0, 0, 0);
-    // cap each slice to stepMinutes; subtract 1s to keep Toast inclusive edges happy
     const nextH = Math.min(h + Math.ceil(stepMinutes / 60), endHour);
     const isFullHour = stepMinutes >= 60;
     const endMin = isFullHour ? 59 : ((stepMinutes % 60) || 60) - 1; // 59 for full hour
@@ -62,7 +81,6 @@ export function buildLocalHourSlicesWithinDay(
         : `${date}T${pad2(h)}:${pad2(endMin)}:59.000${off}`;
 
     slices.push([sliceStart, sliceEnd]);
-
     h = nextH;
   }
 
@@ -71,29 +89,23 @@ export function buildLocalHourSlicesWithinDay(
 
 /**
  * Slice an arbitrary ISO start/end (with offsets) into ≤60-minute windows.
- * Input examples:
+ * Examples:
  *   start = "2025-10-10T06:00:00.000-0400"
  *   end   = "2025-10-10T07:59:59.000-0400"
  *
- * Returns an array of { start, end } strings formatted for Toast (preserving the original offsets).
- * The last slice end is clamped to the given end.
+ * Returns [{ start, end }], preserving original offsets and subtracting 1s from each slice end.
  */
 export function buildIsoWindowSlices(
   startISO: string,
   endISO: string,
   stepMinutes = 60
 ): Array<{ start: string; end: string }> {
-  // Basic validation — both must look like ISO with offset ±HHmm
   const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$/;
   if (!isoRe.test(startISO) || !isoRe.test(endISO)) {
     throw new Error(
       `Invalid ISO inputs. Expect "YYYY-MM-DDTHH:mm:ss.SSS±HHmm". start=${startISO} end=${endISO}`
     );
   }
-
-  // Convert to a Date by transforming ±HHmm to ±HH:MM (JS Date requirement)
-  const toJsIso = (s: string) => s.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
-  const toToastIso = (s: string) => s.replace(/([+-]\d{2}):(\d{2})$/, "$1$2");
 
   const start = new Date(toJsIso(startISO));
   const end = new Date(toJsIso(endISO));
@@ -109,7 +121,6 @@ export function buildIsoWindowSlices(
       start: toToastIso(sliceStart.toISOString()),
       end: toToastIso(sliceEnd.toISOString()),
     });
-    // next slice starts exactly at previous end + 1s
     const next = new Date(sliceEnd.getTime() + 1000);
     if (next >= end) break;
     sliceStart = next;
@@ -118,7 +129,7 @@ export function buildIsoWindowSlices(
   return out;
 }
 
-// ---- small format helpers ----
+// ---- tiny helpers ----
 function pad2(n: number) {
   return String(n).padStart(2, "0");
 }
