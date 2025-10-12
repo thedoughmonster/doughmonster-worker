@@ -1,87 +1,89 @@
 // /src/worker.ts
 // Path: src/worker.ts
 
-import type { EnvDeps } from "./lib/toastApi";
-import handleMenu from "./routes/api/menu/index";
-import handleOrdersRange from "./routes/api/orders/range";
+import handleToken from "./routes/api/debug/token";
+import handleBindings from "./routes/api/debug/bindings";
+import handleRateLimitDebug from "./routes/api/debug/rl";
+import handleAuthStats from "./routes/api/debug/auth-stats";
+
+import handleMenuIndex from "./routes/api/menu/index";
+import handleMenuMetadata from "./routes/api/menu/metadata";
+
 import handleOrdersByDate from "./routes/api/orders/by-date";
-import handleBindings from "./routes/api/debug/bindings"; // keeps the bindings check you used
+import handleOrdersByRange from "./routes/api/orders/by-range";
+import handleOrdersLatest from "./routes/api/orders/latest";
 
-export type Env = EnvDeps;
+type Env = {
+  // Secrets & env
+  TOAST_API_BASE: string;
+  TOAST_AUTH_URL: string;
+  TOAST_CLIENT_ID: string;
+  TOAST_CLIENT_SECRET: string;
+  TOAST_RESTAURANT_GUID: string;
 
-/** Tiny CORS helper (safe defaults for dev tools). */
-function withCors(r: Response, origin: string) {
-  const hdr = new Headers(r.headers);
-  hdr.set("Access-Control-Allow-Origin", origin || "*");
-  hdr.set("Access-Control-Allow-Methods", "GET, OPTIONS");
-  hdr.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  return new Response(r.body, { status: r.status, headers: hdr });
-}
-
-function okJson(data: unknown, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-  });
-}
+  // KV namespaces
+  TOKEN_KV: KVNamespace;
+  CACHE_KV: KVNamespace;
+};
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-    const origin = request.headers.get("Origin") ?? "*";
-
-    // CORS preflight
-    if (request.method === "OPTIONS") {
-      return withCors(
-        new Response(null, {
-          status: 204,
-          headers: {
-            "Access-Control-Max-Age": "600",
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Methods": "GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          },
-        }),
-        origin
-      );
-    }
+    const path = url.pathname;
 
     try {
-      // Health
-      if (request.method === "GET" && path === "/api/health") {
-        return withCors(okJson({ ok: true, service: "doughmonster-worker" }), origin);
+      // ---- DEBUG ----
+      if (request.method === "GET" && path === "/api/debug/token") {
+        return await handleToken(env, request);
       }
-
-      // Debug: bindings
       if (request.method === "GET" && path === "/api/debug/bindings") {
-        const res = await handleBindings(env);
-        return withCors(res, origin);
+        return await handleBindings(env, request);
+      }
+      if (request.method === "GET" && path === "/api/debug/rl") {
+        return await handleRateLimitDebug(env, request);
+      }
+      if (request.method === "GET" && path === "/api/debug/auth-stats") {
+        return await handleAuthStats(env, request);
       }
 
-      // Menu
+      // ---- MENU ----
       if (request.method === "GET" && path === "/api/menu") {
-        const res = await handleMenu(env, request);
-        return withCors(res, origin);
+        return await handleMenuIndex(env, request);
+      }
+      if (request.method === "GET" && path === "/api/menu/metadata") {
+        return await handleMenuMetadata(env, request);
       }
 
-      // Orders by date (your existing slicer)
+      // ---- ORDERS ----
       if (request.method === "GET" && path === "/api/orders/by-date") {
-        const res = await handleOrdersByDate(env, request);
-        return withCors(res, origin);
+        return await handleOrdersByDate(env, request);
+      }
+      if (request.method === "GET" && path === "/api/orders/by-range") {
+        return await handleOrdersByRange(env, request);
+      }
+      if (request.method === "GET" && path === "/api/orders/latest") {
+        return await handleOrdersLatest(env, request);
       }
 
-      // Orders range (your existing multi-hour slicer)
-      if (request.method === "GET" && path === "/api/orders/range") {
-        const res = await handleOrdersRange(env, request);
-        return withCors(res, origin);
-      }
-
-      // 404
-      return withCors(okJson({ ok: false, error: "Not Found", path }, 404), origin);
+      // 404 JSON
+      return new Response(
+        JSON.stringify({ ok: false, error: "Not Found", path }, null, 2),
+        { status: 404, headers: { "content-type": "application/json" } }
+      );
     } catch (err: any) {
-      const msg = typeof err?.message === "string" ? err.message : "Internal Error";
-      return withCors(okJson({ ok: false, error: msg }, 500), origin);
+      return new Response(
+        JSON.stringify(
+          {
+            ok: false,
+            error: err?.message || String(err),
+            stack: err?.stack,
+            path,
+          },
+          null,
+          2
+        ),
+        { status: 500, headers: { "content-type": "application/json" } }
+      );
     }
   },
 };
