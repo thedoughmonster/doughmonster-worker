@@ -2,9 +2,7 @@
 // Path: src/routes/api/orders/latest.ts
 
 import { jsonResponse } from "../../../lib/http";
-import { clampInt } from "../../../lib/time";
-import { nowToastIsoUtc } from "../../../lib/time/now";
-import { minusMinutesToastIsoUtc } from "../../../lib/time/minus";
+import { clampInt, nowToastIsoUtc, minusMinutesToastIsoUtc } from "../../../lib/time";
 import { getOrdersWindow } from "../../../lib/toastOrders";
 
 type Bindings = {
@@ -16,14 +14,14 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
   try {
     const url = new URL(request.url);
 
-    // How far back to look (default 60, max 120)
+    // Lookback window (default 60, cap at 120)
     const minutes = clampInt(parseInt(url.searchParams.get("minutes") || "60", 10), 1, 120);
 
-    // Full-by-default; opt out with ?lean=1
+    // Full by default; opt out with ?lean=1
     const lean = url.searchParams.get("lean") === "1";
     const expand = lean
       ? undefined
-      : ["checks","items","payments","discounts","serviceCharges","customers","employee"];
+      : ["checks", "items", "payments", "discounts", "serviceCharges", "customers", "employee"];
 
     const endIso = nowToastIsoUtc();
     const startIso = minusMinutesToastIsoUtc(minutes, endIso);
@@ -37,7 +35,6 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
       debugMeta: debug ? { callerRoute: "/api/orders/latest" } : undefined,
     });
 
-    // Ensure we include the orders array (`result.data`) and counts
     return jsonResponse({
       ok: true,
       route: "/api/orders/latest",
@@ -45,7 +42,7 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
       window: { start: startIso, end: endIso },
       detail: lean ? "lean" : "full",
       expandUsed: expand ?? null,
-      ...result, // <- includes data, count, raw, debugSlices if provided by getOrdersWindow
+      ...result, // includes data, count, raw/debugSlices from getOrdersWindow
     });
   } catch (err: any) {
     return jsonResponse(
@@ -53,7 +50,7 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
         ok: false,
         route: "/api/orders/latest",
         error: err?.message || String(err),
-        stack: err?.stack || undefined,
+        stack: err?.stack,
       },
       { status: 500 }
     );
