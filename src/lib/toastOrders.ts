@@ -1,136 +1,167 @@
 // /src/lib/toastOrders.ts
-// Lines: 1-200 — Toast Orders helpers (IDs or full orders), with deep debug.
+// Path: src/lib/toastOrders.ts
+// Thin wrappers around /orders/v2/orders with strict start/end usage and rich debug.
 
 import { toastGet } from "./toastApi";
 import { paceBeforeToastCall } from "./pacer";
 
-export type OrdersOptions = {
-  includeEmpty?: boolean;
-  debug?: boolean;
-  // When true we request expanded/full orders from Toast and return full objects instead of IDs.
-  full?: boolean;
-};
+type DebugFlag = boolean | undefined;
 
-// Minimal shape we rely on. Toast returns much more; we pass through when full=true.
-export type ToastOrderLite = { guid: string };
-export type ToastOrderFull = Record<string, unknown>;
+export interface SliceMeta {
+  route: "/orders/v2/orders";
+  url: string;
+  headerUsed: "Toast-Restaurant-External-ID";
+  expandUsed: string | null;
+  externalIdLooksLikeUuid: boolean;
+}
 
-type SliceResult<T> = {
+export interface WindowSliceDebug {
+  sliceWindow: { start: string; end: string };
+  toast: SliceMeta;
   status: number;
   returned: number;
-  orders: T[];
-  debug?: {
-    route: string;
-    url: string;
-    headerUsed: "Toast-Restaurant-External-ID";
-    expandUsed: string | null;
-    externalIdLooksLikeUuid: boolean;
-  };
-};
+  error?: unknown;
+}
 
-const ROUTE = "/orders/v2/orders";
+function looksLikeUuid(id: string | undefined): boolean {
+  return !!id && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+}
 
-// Build the query used for each slice. Pure.
-function buildQuery(
-  restaurantGuid: string,
+function compactIds(arr: unknown[]): string[] {
+  const out: string[] = [];
+  for (const x of arr) {
+    if (x && typeof x === "object") {
+      const any = x as any;
+      const id = any.guid ?? any.id ?? any.orderGuid ?? any.orderId;
+      if (typeof id === "string") out.push(id);
+    }
+  }
+  return out;
+}
+
+function ensureEndInclusive(endIso: string): string {
+  // Toast accepts either HH:mm:ss.SSSZ; we send precise end (already correct if caller sliced).
+  return endIso;
+}
+
+async function doOrdersFetch(
+  env: Env,
   startIso: string,
   endIso: string,
-  expand: string | null
+  expand: string | null,
+  debug?: DebugFlag
 ) {
-  const base: Record<string, string> = {
-    restaurantGuid,
+  await paceBeforeToastCall(env, "/orders/v2/orders"); // global pacer
+
+  const query = {
+    restaurantGuid: env.TOAST_RESTAURANT_GUID,
     startDate: startIso,
-    endDate: endIso,
+    endDate: ensureEndInclusive(endIso),
+    ...(expand ? { expand } : {}),
   };
-  if (expand) base.expand = expand;
-  return base;
+
+  const res = await toastGet(env, "/orders/v2/orders", query, { debug });
+
+  return res;
 }
 
 export async function getOrdersWindow(
   env: Env,
   startIso: string,
   endIso: string,
-  opts: OrdersOptions = {}
-): Promise<{
-  count: number;
-  ids: string[];
-  slice: SliceResult<string>;
-}> {
-  const expand = null; // IDs-only mode
-  await paceBeforeToastCall(env, ROUTE);
+  opts: { debug?: DebugFlag } = {}
+): Promise<{ ids: string[]; slice: WindowSliceDebug }> {
+  const expand = null; // id-only fast path
+  const res = await doOrdersFetch(env, startIso, endIso, expand, opts.debug);
 
-  const query = buildQuery(env.TOAST_RESTAURANT_GUID, startIso, endIso, expand);
-
-  const res = await toastGet(env, ROUTE, query, {
-    where: "orders-window",
-    callerRoute: "internal:getOrdersWindow",
-  });
-
-  // res.data could be undefined if Toast returns 200 with empty array; normalize.
-  const list = Array.isArray(res.data) ? (res.data as ToastOrderLite[]) : [];
-  const ids = list
-    .map((o) => o?.guid)
-    .filter((v): v is string => typeof v === "string" && v.length > 0);
-
-  const slice: SliceResult<string> = {
-    status: res.status ?? 200,
-    returned: list.length,
-    orders: ids,
-    debug: opts.debug
-      ? {
-          route: ROUTE,
-          url: res.url ?? "",
-          headerUsed: "Toast-Restaurant-External-ID",
-          expandUsed: expand,
-          externalIdLooksLikeUuid:
-            /^[0-9a-fA-F-]{36}$/.test(env.TOAST_RESTAURANT_GUID || ""),
-        }
-      : undefined,
+  const meta: SliceMeta = {
+    route: "/orders/v2/orders",
+    url: (res as any).url,
+    headerUsed: "Toast-Restaurant-External-ID",
+    expandUsed: expand,
+    externalIdLooksLikeUuid: looksLikeUuid(env.TOAST_RESTAURANT_GUID),
   };
 
-  return { count: ids.length, ids, slice };
+  if (!res.ok) {
+    return {
+      ids: [],
+      slice: {
+        sliceWindow: { start: startIso, end: endIso },
+        toast: meta,
+        status: res.status,
+        returned: 0,
+        error: {
+          status: res.status,
+          url: res.url,
+          responseHeaders: res.responseHeaders,
+          body: res.body ?? null,
+          message: res.error,
+        },
+      },
+    };
+  }
+
+  const payload = (res.json as any) ?? { orders: [] };
+  const orders = Array.isArray(payload) ? payload : payload.orders ?? [];
+  const ids = compactIds(orders);
+  return {
+    ids,
+    slice: {
+      sliceWindow: { start: startIso, end: endIso },
+      toast: meta,
+      status: res.status,
+      returned: ids.length,
+    },
+  };
 }
 
 export async function getOrdersWindowFull(
   env: Env,
   startIso: string,
   endIso: string,
-  opts: OrdersOptions = {}
-): Promise<{
-  count: number;
-  orders: ToastOrderFull[];
-  slice: SliceResult<ToastOrderFull>;
-}> {
-  // Ask Toast for expanded/full orders.
+  opts: { debug?: DebugFlag } = {}
+): Promise<{ orders: unknown[]; slice: WindowSliceDebug }> {
+  // “Full” include fields typically needed for analytics/receipts
   const expand =
     "checks,items,payments,discounts,serviceCharges,customers,employee";
+  const res = await doOrdersFetch(env, startIso, endIso, expand, opts.debug);
 
-  await paceBeforeToastCall(env, ROUTE);
-
-  const query = buildQuery(env.TOAST_RESTAURANT_GUID, startIso, endIso, expand);
-
-  const res = await toastGet(env, ROUTE, query, {
-    where: "orders-window",
-    callerRoute: "internal:getOrdersWindowFull",
-  });
-
-  const orders = Array.isArray(res.data) ? (res.data as ToastOrderFull[]) : [];
-
-  const slice: SliceResult<ToastOrderFull> = {
-    status: res.status ?? 200,
-    returned: orders.length,
-    orders,
-    debug: opts.debug
-      ? {
-          route: ROUTE,
-          url: res.url ?? "",
-          headerUsed: "Toast-Restaurant-External-ID",
-          expandUsed: expand,
-          externalIdLooksLikeUuid:
-            /^[0-9a-fA-F-]{36}$/.test(env.TOAST_RESTAURANT_GUID || ""),
-        }
-      : undefined,
+  const meta: SliceMeta = {
+    route: "/orders/v2/orders",
+    url: (res as any).url,
+    headerUsed: "Toast-Restaurant-External-ID",
+    expandUsed: expand,
+    externalIdLooksLikeUuid: looksLikeUuid(env.TOAST_RESTAURANT_GUID),
   };
 
-  return { count: orders.length, orders, slice };
+  if (!res.ok) {
+    return {
+      orders: [],
+      slice: {
+        sliceWindow: { start: startIso, end: endIso },
+        toast: meta,
+        status: res.status,
+        returned: 0,
+        error: {
+          status: res.status,
+          url: res.url,
+          responseHeaders: res.responseHeaders,
+          body: res.body ?? null,
+          message: res.error,
+        },
+      },
+    };
+  }
+
+  const payload = (res.json as any) ?? { orders: [] };
+  const orders = Array.isArray(payload) ? payload : payload.orders ?? [];
+  return {
+    orders,
+    slice: {
+      sliceWindow: { start: startIso, end: endIso },
+      toast: meta,
+      status: res.status,
+      returned: Array.isArray(orders) ? orders.length : 0,
+    },
+  };
 }

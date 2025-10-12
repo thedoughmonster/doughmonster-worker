@@ -1,97 +1,92 @@
 // /src/lib/toastApi.ts
 // Path: src/lib/toastApi.ts
+// Low-level Toast fetch helpers with structured errors (no double-stringify)
 
-import { pace } from "./pacer";
-import { getAccessToken } from "./toastAuth";
+export type Json = Record<string, unknown> | unknown[];
 
-export interface EnvDeps {
-  TOAST_API_BASE: string;
-  TOAST_AUTH_URL: string;
-  TOAST_RESTAURANT_GUID: string;
-  TOAST_CLIENT_ID: string;
-  TOAST_CLIENT_SECRET: string;
-  TOKEN_KV: KVNamespace;
-  CACHE_KV: KVNamespace;
+export interface FetchOpts {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  headers?: Record<string, string>;
+  query?: Record<string, string | number | boolean | null | undefined>;
+  body?: unknown;
+  debug?: boolean;
 }
 
-type FetchOpts = {
-  scope?: "global" | "menu" | "orders";
-  minGapMs?: number;
-  query?: Record<string, string | number | boolean | undefined | null>;
-  method?: "GET" | "POST";
-  body?: unknown;
-};
+export interface ToastResultOk {
+  ok: true;
+  status: number;
+  url: string;
+  json: Json | null;
+  text: string | null;
+  responseHeaders: Record<string, string>;
+}
 
-/** Builds a URL with query params. Pure. */
-function buildUrl(base: string, path: string, query?: FetchOpts["query"]): string {
-  const root = base.endsWith("/") ? base : base + "/";
-  const u = new URL(path.replace(/^\//, ""), root);
+export interface ToastResultErr {
+  ok: false;
+  status: number;
+  url: string;
+  responseHeaders: Record<string, string>;
+  body: { json?: Json; text?: string } | null;
+  error: string; // short summary, not a JSON string
+}
+
+export type ToastResult = ToastResultOk | ToastResultErr;
+
+function buildUrl(base: string, route: string, query?: FetchOpts["query"]): string {
+  const u = new URL(route.startsWith("http") ? route : `${base.replace(/\/$/, "")}/${route.replace(/^\//, "")}`);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
+      if (v === null || v === undefined) continue;
+      u.searchParams.set(k, String(v));
     }
   }
   return u.toString();
 }
 
-/**
- * Toast GET with pacing + 429 handling + auth token.
- * Caller may set scope & minGapMs; we default conservatively.
- */
-export async function toastGet<T>(
-  env: EnvDeps,
-  path: string,
+function collectHeaders(resp: Response): Record<string, string> {
+  const out: Record<string, string> = {};
+  resp.headers.forEach((v, k) => (out[k.toLowerCase()] = v));
+  return out;
+}
+
+export async function toastGet(
+  env: Env,
+  route: string,
   query?: FetchOpts["query"],
-  opts?: Omit<FetchOpts, "query" | "method" | "body">
-): Promise<T> {
-  const scope = opts?.scope ?? "global";
-  // Defaults tuned to earlier findings:
-  // - Menus: 1 req/sec hard limit → 1100ms
-  // - Orders: global limit ~2 req/sec → 800ms is safer
-  const minGapMs =
-    opts?.minGapMs ??
-    (scope === "menu" ? 1100 : scope === "orders" ? 800 : 750);
+  opts: Omit<FetchOpts, "method" | "body"> = {}
+): Promise<ToastResult> {
+  const url = buildUrl(env.TOAST_API_BASE, route, query);
 
-  // Pace BEFORE the request to avoid tripping the per-second caps.
-  await pace(scope, minGapMs);
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    authorization: `Bearer ${await (await import("./toastAuth")).getAccessToken(env)}`,
+    "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID, // required by Toast
+    ...(opts.headers ?? {}),
+  };
 
-  const accessToken = await getAccessToken(env);
+  const resp = await fetch(url, { method: "GET", headers });
 
-  const url = buildUrl(env.TOAST_API_BASE, path, query);
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
-    },
-  });
-
-  // If we got throttled, honor Retry-After and retry once.
-  if (res.status === 429) {
-    const retryAfter = res.headers.get("Retry-After");
-    await pace(scope, minGapMs, retryAfter);
-    const res2 = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
-      },
-    });
-    if (!res2.ok) {
-      const body2 = await res2.text();
-      throw new Error(`Toast ${res2.status} after retry: ${body2}`);
-    }
-    return (await res2.json()) as T;
+  const responseHeaders = collectHeaders(resp);
+  let text: string | null = null;
+  let json: Json | null = null;
+  const raw = await resp.text();
+  text = raw || null;
+  try {
+    if (raw) json = JSON.parse(raw);
+  } catch {
+    // non-JSON body; keep text
   }
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Toast ${res.status}: ${body}`);
+  if (!resp.ok) {
+    return {
+      ok: false,
+      status: resp.status,
+      url,
+      responseHeaders,
+      body: json ? { json } : text ? { text } : null,
+      error: `Toast error ${resp.status} on ${route}`,
+    };
   }
 
-  return (await res.json()) as T;
+  return { ok: true, status: resp.status, url, json, text, responseHeaders };
 }
