@@ -1,20 +1,20 @@
 // src/routes/api/orders/latest.ts
-// Returns full Toast orders from the last ?minutes= (default 60, max 120)
-// Adds rich debug with ?debug=1 to inspect shapes, keys, and samples.
+// Fetch full Toast orders for the last ?minutes= (default 60, max 120) with expand.
+// Add ?debug=1 to see detailed request/response diagnostics.
 
 import { jsonResponse } from "../../../lib/http";
-import { getOrdersWindowFull } from "../../../lib/toastOrders";
+import { getAccessToken } from "../../../lib/toastAuth";
 
 type Bindings = {
-  TOAST_API_BASE: string;
-  TOAST_RESTAURANT_GUID: string;
+  TOAST_API_BASE: string;              // e.g. https://ws-api.toasttab.com
+  TOAST_RESTAURANT_GUID: string;       // your restaurant GUID (already set as secret)
 };
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-// Toast format: yyyy-MM-dd'T'HH:mm:ss.SSSZ (UTC, +0000)
+// Toast requires yyyy-MM-dd'T'HH:mm:ss.SSSZ with +0000 suffix for UTC
 function toToastIsoUtc(d: Date): string {
   const pad = (x: number, len = 2) => String(x).padStart(len, "0");
   const yyyy = d.getUTCFullYear();
@@ -28,7 +28,7 @@ function toToastIsoUtc(d: Date): string {
 }
 
 function looksLikeGuidArray(arr: unknown[]): boolean {
-  return arr.length > 0 && arr.every(v => typeof v === "string");
+  return arr.length > 0 && arr.every((v) => typeof v === "string");
 }
 
 function topKeysOf(value: unknown, max = 20): string[] | null {
@@ -39,33 +39,90 @@ function topKeysOf(value: unknown, max = 20): string[] | null {
 }
 
 export default async function handleOrdersLatest(env: Bindings, request: Request) {
-  try {
-    const url = new URL(request.url);
-    const minutesParam = url.searchParams.get("minutes");
-    const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
-    const withDebug = url.searchParams.has("debug") || url.searchParams.get("debug") === "1";
+  const url = new URL(request.url);
+  const minutesParam = url.searchParams.get("minutes");
+  const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
+  const wantDebug = url.searchParams.has("debug") || url.searchParams.get("debug") === "1";
 
+  try {
+    // Build window
     const now = new Date();
     const start = new Date(now.getTime() - minutes * 60_000);
-
     const startDateIso = toToastIsoUtc(start);
     const endDateIso = toToastIsoUtc(now);
 
-    // Always fetch "full" – i.e., with expand=checks,items,payments,discounts,serviceCharges,customers,employee
-    const res = await getOrdersWindowFull(env, {
-      startDateIso,
-      endDateIso,
-      debugMeta: { callerRoute: "/api/orders/latest" },
+    // Toast expand list for "full" orders
+    const expand = [
+      "checks",
+      "items",
+      "payments",
+      "discounts",
+      "serviceCharges",
+      "customers",
+      "employee",
+    ];
+
+    // Build URL
+    const base = env.TOAST_API_BASE.replace(/\/+$/, "");
+    const route = "/orders/v2/orders";
+    const qp = new URLSearchParams({
+      restaurantGuid: env.TOAST_RESTAURANT_GUID,
+      startDate: encodeURIComponent(startDateIso), // keep characters safe
+      endDate: encodeURIComponent(endDateIso),
+      expand: expand.join(","),
     });
 
-    // The library’s contract should be: { ids: string[], data: any[], slice?: any }
-    // But if it still maps to GUIDs, our debug will make it obvious.
-    const ids = Array.isArray(res?.ids) ? res.ids : [];
-    const data = Array.isArray(res?.data) ? res.data : [];
+    // NOTE: we encode ISO (contains +) once more to be super-safe in CF Worker URL construction
+    const toastUrl = `${base}${route}?${qp.toString()}`;
 
+    // Auth header
+    const token = await getAccessToken(env);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      // Toast header accepts either kebab or pascal; using their doc style:
+      "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
+    };
+
+    const resp = await fetch(toastUrl, { headers, method: "GET" });
+    const status = resp.status;
+    const text = await resp.text();
+
+    // Try parse JSON but keep original text for debugging
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // leave json = null
+    }
+
+    if (!resp.ok) {
+      // error path with max detail
+      const body = {
+        ok: false,
+        route: "/api/orders/latest",
+        minutes,
+        window: { start: startDateIso, end: endDateIso },
+        error: `Toast error ${status} on ${route}`,
+        toast: {
+          route,
+          url: toastUrl,
+          headerUsed: "Toast-Restaurant-External-ID",
+          expandUsed: expand.join(","),
+          responseStatus: status,
+          responseHeaders: Object.fromEntries(resp.headers.entries()),
+          bodyPreview: text?.slice(0, 1000) ?? null,
+        },
+      };
+      return jsonResponse(body, { status });
+    }
+
+    // Success: Toast returns an array of order objects (expected for v2 list)
+    const data = Array.isArray(json) ? json : [];
     const count = data.length;
+    const ids = data.map((o: any) => o?.guid).filter(Boolean);
+
     const sample = count > 0 ? data[0] : null;
-    const looksLikeIdsOnly = Array.isArray(data) && looksLikeGuidArray(data);
     const firstType = sample === null ? "null" : Array.isArray(sample) ? "array" : typeof sample;
     const firstKeys = topKeysOf(sample);
 
@@ -75,35 +132,29 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
       minutes,
       window: { start: startDateIso, end: endDateIso },
       detail: "full",
-      // What we *intend* to use on the Toast request:
-      expandUsed: [
-        "checks",
-        "items",
-        "payments",
-        "discounts",
-        "serviceCharges",
-        "customers",
-        "employee",
-      ],
+      expandUsed: expand,
       count,
       ids,
-      data, // Expect full order objects here
+      data, // full order objects here
     };
 
-    if (withDebug) {
+    if (wantDebug) {
       body.debug = {
+        request: {
+          route,
+          url: toastUrl,
+          headerUsed: "Toast-Restaurant-External-ID",
+        },
         lengths: { ids: ids.length, data: data.length },
         shapes: {
           dataArray: Array.isArray(data),
-          looksLikeIdsOnly,
+          looksLikeIdsOnly: looksLikeGuidArray(data),
           firstType,
           firstKeys,
         },
         samples: {
           first: sample,
         },
-        // Pass through lower-level toast/slice debugging if provided by lib:
-        slice: res?.slice ?? null,
       };
     }
 
