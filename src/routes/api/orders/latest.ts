@@ -1,6 +1,6 @@
 // src/routes/api/orders/latest.ts
 // Returns full Toast orders from the last ?minutes= (default 60, max 120)
-// Response includes both order IDs and full order objects, plus rich debug.
+// Adds rich debug with ?debug=1 to inspect shapes, keys, and samples.
 
 import { jsonResponse } from "../../../lib/http";
 import { getOrdersWindowFull } from "../../../lib/toastOrders";
@@ -14,8 +14,7 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-// Toast expects: yyyy-MM-dd'T'HH:mm:ss.SSSZ (e.g. 2025-10-10T14:13:12.000+0000)
-// We format in UTC with +0000.
+// Toast format: yyyy-MM-dd'T'HH:mm:ss.SSSZ (UTC, +0000)
 function toToastIsoUtc(d: Date): string {
   const pad = (x: number, len = 2) => String(x).padStart(len, "0");
   const yyyy = d.getUTCFullYear();
@@ -28,11 +27,21 @@ function toToastIsoUtc(d: Date): string {
   return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
 }
 
+function looksLikeGuidArray(arr: unknown[]): boolean {
+  return arr.length > 0 && arr.every(v => typeof v === "string");
+}
+
+function topKeysOf(value: unknown, max = 20): string[] | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.keys(value as Record<string, unknown>).slice(0, max);
+  }
+  return null;
+}
+
 export default async function handleOrdersLatest(env: Bindings, request: Request) {
   try {
     const url = new URL(request.url);
     const minutesParam = url.searchParams.get("minutes");
-    const detail = (url.searchParams.get("detail") || "full").toLowerCase();
     const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
     const withDebug = url.searchParams.has("debug") || url.searchParams.get("debug") === "1";
 
@@ -42,12 +51,23 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
     const startDateIso = toToastIsoUtc(start);
     const endDateIso = toToastIsoUtc(now);
 
-    // Always fetch full orders for this endpoint.
+    // Always fetch "full" – i.e., with expand=checks,items,payments,discounts,serviceCharges,customers,employee
     const res = await getOrdersWindowFull(env, {
       startDateIso,
       endDateIso,
       debugMeta: { callerRoute: "/api/orders/latest" },
     });
+
+    // The library’s contract should be: { ids: string[], data: any[], slice?: any }
+    // But if it still maps to GUIDs, our debug will make it obvious.
+    const ids = Array.isArray(res?.ids) ? res.ids : [];
+    const data = Array.isArray(res?.data) ? res.data : [];
+
+    const count = data.length;
+    const sample = count > 0 ? data[0] : null;
+    const looksLikeIdsOnly = Array.isArray(data) && looksLikeGuidArray(data);
+    const firstType = sample === null ? "null" : Array.isArray(sample) ? "array" : typeof sample;
+    const firstKeys = topKeysOf(sample);
 
     const body: any = {
       ok: true,
@@ -55,6 +75,7 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
       minutes,
       window: { start: startDateIso, end: endDateIso },
       detail: "full",
+      // What we *intend* to use on the Toast request:
       expandUsed: [
         "checks",
         "items",
@@ -64,12 +85,27 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
         "customers",
         "employee",
       ],
-      count: Array.isArray(res.data) ? res.data.length : 0,
-      ids: res.ids,
-      data: res.data, // full order objects
+      count,
+      ids,
+      data, // Expect full order objects here
     };
 
-    if (withDebug) body.slice = res.slice;
+    if (withDebug) {
+      body.debug = {
+        lengths: { ids: ids.length, data: data.length },
+        shapes: {
+          dataArray: Array.isArray(data),
+          looksLikeIdsOnly,
+          firstType,
+          firstKeys,
+        },
+        samples: {
+          first: sample,
+        },
+        // Pass through lower-level toast/slice debugging if provided by lib:
+        slice: res?.slice ?? null,
+      };
+    }
 
     return jsonResponse(body);
   } catch (err: any) {
