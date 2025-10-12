@@ -1,8 +1,6 @@
 // src/lib/toastOrders.ts
-// Path: src/lib/toastOrders.ts
-//
 // Single responsibility: hit Toast Orders v2 with a correct query.
-// - Always pass startDate/endDate as ISO strings (Toast format)
+// - Always pass startDate/endDate as Toast-formatted ISO strings (string, not objects)
 // - Join expand[]=... into a comma-separated string
 // - Send the Toast-Restaurant-External-ID header
 // - Return rich debug so you can see exactly what was sent/received
@@ -14,35 +12,51 @@ type Bindings = {
   TOAST_RESTAURANT_GUID: string;
 };
 
-type OrdersWindowOpts = {
+export type OrdersWindowOpts = {
   startDateIso: string;                // e.g. 2025-10-10T10:00:00.000+0000
   endDateIso: string;                  // e.g. 2025-10-10T11:00:00.000+0000
   expand?: string[];                   // e.g. ["checks","items","payments",...]
   debugMeta?: Record<string, unknown>; // optional: callerRoute, etc.
 };
 
-/**
- * Core call: fetch orders for a window.
- * Returns IDs and (if expand provided) the raw orders array.
- */
+type ToastDebugSlice = {
+  sliceWindow: { startDateIso: string; endDateIso: string; expand: string[] | null };
+  toast: {
+    route: string;
+    url: string;
+    headerUsed: "Toast-Restaurant-External-ID";
+    expandUsed: string | null;
+    externalIdLooksLikeUuid: boolean;
+  };
+  status: number;
+  returned: number;
+  error?: {
+    status: number;
+    url: string;
+    responseHeaders: Record<string, string>;
+    body: { json?: unknown; text?: string };
+    message: string;
+  };
+};
+
 export async function getOrdersWindow(
   env: Bindings,
   opts: OrdersWindowOpts
 ): Promise<{
   ok: true;
   ids: string[];
-  data?: any[]; // present when expand is used (full orders)
-  slice: any;   // debug payload for observability
+  data?: any[]; // present when expand was used (full orders)
+  slice: ToastDebugSlice; // debug payload
 }> {
   const route = "/orders/v2/orders";
 
-  // Validate/normalize inputs early
+  // Normalize input to plain strings
   const startDate = String(opts.startDateIso);
   const endDate = String(opts.endDateIso);
   const expandParam = opts.expand && opts.expand.length > 0 ? opts.expand.join(",") : undefined;
 
   const params = new URLSearchParams();
-  // You *can* include restaurantGuid in query; header is the critical one though.
+  // query param is fine; the header is the key requirement
   params.set("restaurantGuid", env.TOAST_RESTAURANT_GUID);
   params.set("startDate", startDate);
   params.set("endDate", endDate);
@@ -52,17 +66,14 @@ export async function getOrdersWindow(
 
   const token = await getAccessToken(env);
   const headers = new Headers({
-    "Authorization": `Bearer ${token}`,
-    "Accept": "application/json",
-    // Header name Toast expects:
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
     "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
   });
 
-  // Perform the request
   const res = await fetch(url, { headers, method: "GET" });
 
-  // Build an always-useful debug slice
-  const debugSlice: any = {
+  const debugSlice: ToastDebugSlice = {
     sliceWindow: { startDateIso: startDate, endDateIso: endDate, expand: opts.expand ?? null },
     toast: {
       route,
@@ -75,50 +86,80 @@ export async function getOrdersWindow(
     returned: 0,
   };
 
-  // Handle non-2xx with a clear, non-double-stringified error
   if (!res.ok) {
     let bodyJson: any = null;
+    let bodyText: string | undefined;
     try {
       bodyJson = await res.json();
     } catch {
-      // ignore JSON parse errors (could be HTML)
+      try {
+        bodyText = await res.text();
+      } catch { /* ignore */ }
     }
+
     debugSlice.error = {
       status: res.status,
       url,
       responseHeaders: Object.fromEntries(res.headers.entries()),
-      body: bodyJson ? { json: bodyJson } : { text: await res.text() },
+      body: bodyJson ? { json: bodyJson } : { text: bodyText ?? "(no body)" },
       message: `Toast error ${res.status} on ${route}`,
     };
 
-    // Return a 400-series as a structured failure to caller (routes add their own Response wrapper)
-    return Promise.reject(
-      new Error(
-        JSON.stringify({
-          ok: false,
-          error: `Toast ${route} failed`,
-          status: res.status,
-          route,
-          url,
-          headerUsed: "Toast-Restaurant-External-ID",
-          externalIdLooksLikeUuid: debugSlice.toast.externalIdLooksLikeUuid,
-          bodyPreview: bodyJson ? JSON.stringify(bodyJson) : "(non-JSON body)",
-        })
-      )
+    // Throw a single-stringified error that routes can pass through
+    throw new Error(
+      JSON.stringify({
+        ok: false,
+        error: `Toast ${route} failed`,
+        status: res.status,
+        route,
+        url,
+        headerUsed: "Toast-Restaurant-External-ID",
+        externalIdLooksLikeUuid: debugSlice.toast.externalIdLooksLikeUuid,
+        bodyPreview: bodyJson ? JSON.stringify(bodyJson) : bodyText ?? "(no body)",
+      })
     );
   }
 
   const json = (await res.json()) as any[];
   debugSlice.returned = Array.isArray(json) ? json.length : 0;
 
-  // IDs list
   const ids = Array.isArray(json) ? json.map((o) => o?.guid).filter(Boolean) : [];
 
   return {
     ok: true,
     ids,
-    // When expand was requested we presume full order bodies are wanted
-    data: expandParam ? json : undefined,
+    data: expandParam ? json : undefined, // only include full orders if expand requested
     slice: debugSlice,
+  };
+}
+
+/**
+ * Back-compat wrapper for existing routes that import `getOrdersWindowFull`.
+ * It enforces `expand` to request full orders and always returns `data`.
+ */
+export async function getOrdersWindowFull(
+  env: Bindings,
+  opts: Omit<OrdersWindowOpts, "expand">
+): Promise<{
+  ok: true;
+  ids: string[];
+  data: any[];                // always present
+  slice: ToastDebugSlice;
+}> {
+  const expand = [
+    "checks",
+    "items",
+    "payments",
+    "discounts",
+    "serviceCharges",
+    "customers",
+    "employee",
+  ];
+  const res = await getOrdersWindow(env, { ...opts, expand });
+  return {
+    ok: true,
+    ids: res.ids,
+    data: res.data ?? [],
+    slice: res.slice,
   };
 }
