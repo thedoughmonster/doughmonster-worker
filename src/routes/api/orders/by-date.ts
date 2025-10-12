@@ -1,145 +1,130 @@
 // /src/routes/api/orders/by-date.ts
 // Path: src/routes/api/orders/by-date.ts
 
-import { paceBeforeToastCall } from "../../../lib/pacer";
 import { buildLocalHourSlicesWithinDay, clampInt } from "../../../lib/time";
 import { getOrdersWindow, getOrdersWindowFull } from "../../../lib/toastOrders";
-import {
-  DEFAULT_START_HOUR,
-  DEFAULT_END_HOUR,
-  MAX_SLICES_PER_REQUEST,
-  DEFAULT_TZ_OFFSET,
-} from "../../../config/orders";
 
-/**
- * GET /api/orders/by-date?date=YYYY-MM-DD
- *      [&tzOffset=±HHmm]
- *      [&startHour=H&endHour=H]   // MUST be ≤ 2 hours total (hard cap)
- *      [&detail=ids|full]         // default: full (uses /ordersBulk). ids => GUIDs via /orders
- *      [&debug=1]                 // include per-slice debug
- *
- * Route: /api/orders/by-date
- */
-export default async function handleOrdersByDate(env: any, request: Request): Promise<Response> {
-  const ROUTE = "/api/orders/by-date";
-  try {
-    const url = new URL(request.url);
-    const date = url.searchParams.get("date");
-    const tzOffset = url.searchParams.get("tzOffset") || DEFAULT_TZ_OFFSET;
-    const includeDebug = url.searchParams.get("debug") === "1";
+type Env = {
+  TOAST_RESTAURANT_GUID: string;
+};
 
-    // 🔄 DEFAULT NOW = "full" detail
-    const detail = (url.searchParams.get("detail") as "ids" | "full") || "full";
-
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return j(400, { ok: false, route: ROUTE, error: "Missing/invalid 'date' (YYYY-MM-DD)" });
-    }
-    if (!/^[+-]\d{4}$/.test(tzOffset)) {
-      return j(400, { ok: false, route: ROUTE, error: "Invalid 'tzOffset' (like +0000, -0400)" });
-    }
-
-    const startHour = clampInt(url.searchParams.get("startHour"), 0, 23, DEFAULT_START_HOUR);
-    const endHour = clampInt(url.searchParams.get("endHour"), 1, 24, DEFAULT_END_HOUR);
-
-    if (endHour <= startHour) {
-      return j(400, { ok: false, route: ROUTE, error: "'endHour' must be greater than 'startHour'." });
-    }
-    if (endHour - startHour > MAX_SLICES_PER_REQUEST) {
-      return j(400, {
-        ok: false,
-        route: ROUTE,
-        error: "Requested window too large; max 2 hours per request.",
-        limitHours: MAX_SLICES_PER_REQUEST,
-        hint: `Use endHour <= startHour + ${MAX_SLICES_PER_REQUEST}`,
-      });
-    }
-
-    const { startToast, endToast, slices } = buildLocalHourSlicesWithinDay(
-      date,
-      tzOffset,
-      startHour,
-      endHour,
-      60
-    );
-
-    if (slices.length > MAX_SLICES_PER_REQUEST) {
-      return j(400, {
-        ok: false,
-        route: ROUTE,
-        error: "Requested window expands beyond 2 hourly slices.",
-        slices: slices.length,
-        limit: MAX_SLICES_PER_REQUEST,
-      });
-    }
-
-    const out: any[] = [];
-    const debugSlices: any[] = [];
-    let requests = 0;
-
-    for (const [start, end] of slices) {
-      await paceBeforeToastCall("orders", 1100);
-      try {
-        const res =
-          detail === "full"
-            ? await getOrdersWindowFull(env, start, end) // /ordersBulk
-            : await getOrdersWindow(env, start, end);    // /orders (GUIDs)
-
-        requests++;
-        if (Array.isArray(res?.data)) out.push(...res.data);
-
-        if (includeDebug) {
-          debugSlices.push({
-            sliceWindow: { start, end },
-            toast: res?.debug ?? null,
-            status: res?.status ?? null,
-            returned: Array.isArray(res?.data) ? res!.data.length : 0,
-          });
-        }
-      } catch (e: any) {
-        try {
-          const parsed = JSON.parse(e?.message ?? "");
-          return j(502, { ...parsed, where: "orders-window", callerRoute: ROUTE });
-        } catch {
-          return j(502, {
-            ok: false,
-            route: ROUTE,
-            where: "orders-window",
-            error: e?.message || String(e),
-            window: { start, end },
-          });
-        }
-      }
-    }
-
-    const body: any = {
-      ok: true,
-      route: ROUTE,
-      day: date,
-      tzOffset,
-      detail,
-      hours: { startHour, endHour },
-      window: { start: startToast, end: endToast },
-      slices: slices.length,
-      requests,
-      count: out.length,
-      data: out,
-    };
-    if (includeDebug) body.debugSlices = debugSlices;
-
-    return j(200, body);
-  } catch (err: any) {
-    return j(500, {
-      ok: false,
-      route: ROUTE,
-      where: "unhandled",
-      error: err?.message || String(err),
-    });
-  }
+function jres(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-function j(status: number, body: unknown) {
-  return new Response(JSON.stringify(body, null, 2), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
+export default async function handleOrdersByDate(env: Env, request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const day = url.searchParams.get("date");           // YYYY-MM-DD (required)
+  const tzOffset = url.searchParams.get("tzOffset") || "+0000"; // e.g. -0400
+  const startHour = clampInt(url.searchParams.get("startHour"), 0, 23, 0);
+  const endHour = clampInt(url.searchParams.get("endHour"), 1, 24, Math.min(startHour + 2, 24));
+  const detailParam = (url.searchParams.get("detail") || "ids").toLowerCase();
+  const detail: "ids" | "full" = detailParam === "full" ? "full" : "ids";
+  const debug = url.searchParams.get("debug") === "1";
+
+  // Basic validation
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return jres({
+      ok: false,
+      route: "/api/orders/by-date",
+      where: "validate",
+      error: "Missing or invalid ?date=YYYY-MM-DD",
+    }, 400);
+  }
+
+  // Build hour-aligned slices within the day using local tzOffset
+  const hourSlices = buildLocalHourSlicesWithinDay(day, tzOffset, startHour, endHour);
+  if (!hourSlices.length) {
+    return jres({
+      ok: true,
+      route: "/api/orders/by-date",
+      day,
+      tzOffset,
+      hours: { startHour, endHour },
+      window: null,
+      slices: 0,
+      requests: 0,
+      count: 0,
+      data: [],
+      rawCount: 0,
+      includedEmpty: false,
+      debugSlices: debug ? [] : undefined,
+      note: "No hour slices were generated (check hours range).",
+    });
+  }
+
+  // Aggregate results per-slice
+  const allData: any[] = [];
+  const debugSlices: any[] = [];
+  let rawCount = 0;
+
+  // Overall window = first slice start .. last slice end
+  const overallWindow = {
+    start: hourSlices[0].startISO,
+    end: hourSlices[hourSlices.length - 1].endISO,
+  };
+
+  for (const slice of hourSlices) {
+    try {
+      const fn = detail === "full" ? getOrdersWindowFull : getOrdersWindow;
+      const res = await fn(
+        env as any,
+        {
+          startISO: slice.startISO,
+          endISO: slice.endISO,
+          // detail is set by fn() choice above; keep debug metadata
+          debug,
+          where: "orders-window",
+          callerRoute: "/api/orders/by-date",
+        } as any
+      );
+
+      // If an error bubbled up as a Response, short-circuit and return it.
+      if (res instanceof Response) {
+        return res;
+      }
+
+      // Defensive: ensure shape
+      const sliceData = Array.isArray(res.data) ? res.data : [];
+      const sliceCount = typeof res.rawCount === "number" ? res.rawCount : sliceData.length;
+
+      rawCount += sliceCount;
+      if (sliceData.length) {
+        allData.push(...sliceData);
+      }
+
+      if (debug && Array.isArray(res.debugSlices)) {
+        debugSlices.push(...res.debugSlices);
+      }
+    } catch (err: any) {
+      // Hard failure for this slice -> return a detailed error response
+      return jres({
+        ok: false,
+        route: "/api/orders/by-date",
+        where: "slice-fetch",
+        slice,
+        error: err?.message || String(err),
+        stack: err?.stack || null,
+      }, 500);
+    }
+  }
+
+  return jres({
+    ok: true,
+    route: "/api/orders/by-date",
+    day,
+    tzOffset,
+    hours: { startHour, endHour },
+    window: overallWindow,
+    slices: hourSlices.length,
+    requests: hourSlices.length,
+    count: allData.length,
+    data: allData,
+    rawCount,
+    includedEmpty: false,
+    ...(debug ? { debugSlices } : {}),
   });
 }
