@@ -1,53 +1,40 @@
 // /src/routes/api/orders/latest.ts
 // Path: src/routes/api/orders/latest.ts
 
-import { clampInt, nowToastIsoUtc, minusMinutesToastIsoUtc } from "../../../lib/time";
+import { nowToastIsoUtc, minusMinutesToastIsoUtc, clampInt } from "../../../lib/time";
 import { getOrdersWindow } from "../../../lib/toastOrders";
 
 type Env = {
-  TOAST_API_BASE: string;
   TOAST_RESTAURANT_GUID: string;
 };
 
-type LatestDetail = "full" | "ids";
-
-/** Assert a value is a Toast ISO string: "YYYY-MM-DDTHH:mm:ss.SSS±HHmm" */
-function assertToastIsoString(v: unknown, label: string): string {
-  if (typeof v !== "string") {
-    throw new Error(`Expected ${label} to be string, got ${Object.prototype.toString.call(v)} => ${String(v)}`);
-  }
-  // Basic format check; don’t over-constrain
-  const ok = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$/.test(v);
-  if (!ok) throw new Error(`Invalid ${label} format, expected Toast ISO (±HHmm): ${v}`);
-  return v;
+/** Small JSON helper (no double-stringify). */
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 /**
  * GET /api/orders/latest?minutes=30&detail=full|ids&debug=1
- * - minutes capped to [1..120], default 30
- * - detail=full (default) | ids
- * - responds with computed start/end + passthrough from getOrdersWindow
+ * - minutes: how far back from "now" to look (default 30, 1..120)
+ * - detail:  "full" (expanded orders) or "ids" (just GUIDs), default "full"
+ * - debug:   include per-slice diagnostics
  */
 export default async function handleOrdersLatest(env: Env, request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
-    const debug = url.searchParams.get("debug") === "1";
     const minutes = clampInt(url.searchParams.get("minutes"), 1, 120, 30);
+    const detail = (url.searchParams.get("detail") === "ids" ? "ids" : "full") as "ids" | "full";
+    const debug = url.searchParams.get("debug") === "1";
 
-    const detailParam = (url.searchParams.get("detail") || "full").toLowerCase();
-    const detail: LatestDetail = detailParam === "ids" ? "ids" : "full";
+    // Build ISO strings (must be strings, not Date objects)
+    const endISO = nowToastIsoUtc();                 // e.g. 2025-10-12T13:37:42.123+0000
+    const startISO = minusMinutesToastIsoUtc(minutes, endISO);
 
-    // 🔒 Compute Toast ISO strings (never Objects)
-    // nowToastIsoUtc() returns a Toast ISO string with +0000
-    const endISO = assertToastIsoString(nowToastIsoUtc(), "endISO");
-    const startISO = assertToastIsoString(minusMinutesToastIsoUtc(minutes, endISO), "startISO");
-
-    // Optional preflight debug (uncomment if you want zero-hit preview)
-    // if (debug) {
-    //   return json({ ok: true, route: "/api/orders/latest", minutes, detail, startISO, endISO, previewOnly: true });
-    // }
-
-    const result = await getOrdersWindow(env, {
+    // Call the window fetcher. It returns either a Response (on error) or a data object on success.
+    const result = await getOrdersWindow(env as any, {
       startISO,
       endISO,
       detail,
@@ -56,34 +43,31 @@ export default async function handleOrdersLatest(env: Env, request: Request): Pr
       callerRoute: "/api/orders/latest",
     });
 
-    // If library already produces a Response, return it as-is
+    // If getOrdersWindow returned a Response, forward it as-is (already proper JSON/no extra escaping).
     if (result instanceof Response) return result;
 
+    // Success shape
     return json({
       ok: true,
       route: "/api/orders/latest",
       minutes,
+      window: { start: startISO, end: endISO },
       detail,
-      startISO,
-      endISO,
-      ...result,
+      count: result.count,
+      data: result.data,
+      rawCount: result.rawCount,
+      ...(debug ? { debugSlices: result.debugSlices } : {}),
     });
   } catch (err: any) {
+    // Clean error object; do not stringfy nested JSON again.
     return json(
       {
         ok: false,
         route: "/api/orders/latest",
-        error: typeof err?.message === "string" ? err.message : String(err),
-        stack: err?.stack,
+        error: err?.message ?? String(err),
+        stack: err?.stack ?? null,
       },
       500
     );
   }
-}
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
 }
