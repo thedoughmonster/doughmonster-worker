@@ -1,7 +1,7 @@
 // /src/routes/api/orders/latest.ts
 // Path: src/routes/api/orders/latest.ts
 
-import { nowToastIsoUtc, minusMinutesToastIsoUtc, clampInt } from "../../../lib/time";
+import { clampInt, nowToastIsoUtc, minusMinutesToastIsoUtc } from "../../../lib/time";
 import { getOrdersWindow } from "../../../lib/toastOrders";
 
 type Env = {
@@ -9,37 +9,42 @@ type Env = {
   TOAST_RESTAURANT_GUID: string;
 };
 
-function asToastIsoString(v: unknown, label: string): string {
-  if (typeof v === "string") return v;
-  if (v instanceof Date) return v.toISOString().replace("Z", "+0000");
-  // Final fallback — stringify and *throw* so we see it in logs
-  throw new Error(`Expected ${label} to be Toast ISO string, got: ${Object.prototype.toString.call(v)} -> ${String(v)}`);
+type LatestDetail = "full" | "ids";
+
+/** Assert a value is a Toast ISO string: "YYYY-MM-DDTHH:mm:ss.SSS±HHmm" */
+function assertToastIsoString(v: unknown, label: string): string {
+  if (typeof v !== "string") {
+    throw new Error(`Expected ${label} to be string, got ${Object.prototype.toString.call(v)} => ${String(v)}`);
+  }
+  // Basic format check; don’t over-constrain
+  const ok = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$/.test(v);
+  if (!ok) throw new Error(`Invalid ${label} format, expected Toast ISO (±HHmm): ${v}`);
+  return v;
 }
 
 /**
  * GET /api/orders/latest?minutes=30&detail=full|ids&debug=1
- * - Caps minutes to [1..120]
- * - detail=full (default) returns expanded orders; detail=ids returns only IDs
- * - Debug echoes computed window so we can see exactly what we send
+ * - minutes capped to [1..120], default 30
+ * - detail=full (default) | ids
+ * - responds with computed start/end + passthrough from getOrdersWindow
  */
 export default async function handleOrdersLatest(env: Env, request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
     const debug = url.searchParams.get("debug") === "1";
     const minutes = clampInt(url.searchParams.get("minutes"), 1, 120, 30);
+
     const detailParam = (url.searchParams.get("detail") || "full").toLowerCase();
-    const detail: "full" | "ids" = detailParam === "ids" ? "ids" : "full";
+    const detail: LatestDetail = detailParam === "ids" ? "ids" : "full";
 
-    // Compute window as *strings* (force-cast defensively)
-    const endISO = asToastIsoString(nowToastIsoUtc(), "endISO");
-    const startISO = asToastIsoString(minusMinutesToastIsoUtc(minutes, endISO), "startISO");
+    // 🔒 Compute Toast ISO strings (never Objects)
+    // nowToastIsoUtc() returns a Toast ISO string with +0000
+    const endISO = assertToastIsoString(nowToastIsoUtc(), "endISO");
+    const startISO = assertToastIsoString(minusMinutesToastIsoUtc(minutes, endISO), "startISO");
 
-    // Optional early debug preview (no network) — toggle by uncommenting:
+    // Optional preflight debug (uncomment if you want zero-hit preview)
     // if (debug) {
-    //   return new Response(JSON.stringify({ ok: true, route: "/api/orders/latest", minutes, detail, startISO, endISO }), {
-    //     status: 200,
-    //     headers: { "content-type": "application/json" },
-    //   });
+    //   return json({ ok: true, route: "/api/orders/latest", minutes, detail, startISO, endISO, previewOnly: true });
     // }
 
     const result = await getOrdersWindow(env, {
@@ -51,32 +56,34 @@ export default async function handleOrdersLatest(env: Env, request: Request): Pr
       callerRoute: "/api/orders/latest",
     });
 
-    // If library already returns a Response, pass it through
+    // If library already produces a Response, return it as-is
     if (result instanceof Response) return result;
 
-    // Otherwise, normalize to a JSON response
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        route: "/api/orders/latest",
-        minutes,
-        detail,
-        startISO,
-        endISO,
-        ...result,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    return json({
+      ok: true,
+      route: "/api/orders/latest",
+      minutes,
+      detail,
+      startISO,
+      endISO,
+      ...result,
+    });
   } catch (err: any) {
-    const msg = typeof err?.message === "string" ? err.message : String(err);
-    return new Response(
-      JSON.stringify({
+    return json(
+      {
         ok: false,
         route: "/api/orders/latest",
-        error: msg,
+        error: typeof err?.message === "string" ? err.message : String(err),
         stack: err?.stack,
-      }),
-      { status: 500, headers: { "content-type": "application/json" } }
+      },
+      500
     );
   }
+}
+
+function json(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
