@@ -1,208 +1,127 @@
 // /src/lib/time.ts
 // Path: src/lib/time.ts
 
-/** Return current time as Toast ISO: yyyy-MM-dd'T'HH:mm:ss.SSSZ (UTC, +0000). */
-export function nowToastIsoUtc(): string {
-  return toToastIsoUtc(new Date());
+/** Clamp a possibly-nullish string number into [min,max], with a default fallback. */
+export function clampInt(
+  value: string | null,
+  min: number,
+  max: number,
+  fallback: number
+): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-/** Subtract minutes from a Toast ISO string (or ISO-like), return Toast ISO UTC. */
-export function minusMinutesToastIsoUtc(isoLike: string, minutes: number): string {
-  const d = new Date(isoLike);
-  d.setUTCMinutes(d.getUTCMinutes() - minutes);
-  return toToastIsoUtc(d);
-}
-
-/** Add minutes to a Toast ISO string (or ISO-like), return Toast ISO UTC. */
-export function toastsUtcAddMinutes(isoLike: string, minutes: number): string {
-  const d = new Date(isoLike);
-  d.setUTCMinutes(d.getUTCMinutes() + minutes);
-  return toToastIsoUtc(d);
-}
-
-/** Clamp an integer-like query param. */
-export function clampInt(raw: string | null, min: number, max: number, dflt: number): number {
-  const n = Number(raw ?? dflt);
-  if (!Number.isFinite(n)) return dflt;
-  return Math.min(max, Math.max(min, Math.floor(n)));
-}
-
-/** Coerce to number or null. */
-export function numOrNull(v: any): number | null {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Format Date as Toast UTC ISO with +0000 offset and .000 ms. */
-function toToastIsoUtc(d: Date): string {
-  const yyyy = d.getUTCFullYear();
-  const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const HH = String(d.getUTCHours()).padStart(2, "0");
-  const mm = String(d.getUTCMinutes()).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
-  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.000+0000`;
+/** Ensure a ±HHmm offset string (e.g. -0400, +0000, +0530). Throws on invalid. */
+export function toToastOffset(offset: string): string {
+  if (!/^[+-]\d{4}$/.test(offset)) {
+    throw new Error(`Invalid tz offset: ${offset} (expected ±HHmm)`);
+  }
+  return offset;
 }
 
 /**
- * Build a single day window and hourly (<=sliceMinutes) slices using a fixed numeric offset like "-0400".
- * We don’t infer DST; caller must supply the correct offset for that calendar date.
- *
- * Returns Toast-format start/end and an array of [start,end] pairs covering the day.
- */
-export function buildDaySlicesWithOffset(
-  yyyyMmDd: string,
-  tzOffset: string,
-  sliceMinutes: number
-): { startToast: string; endToast: string; slices: Array<[string, string]> } {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(yyyyMmDd)) {
-    throw new Error(`Invalid date '${yyyyMmDd}', expected YYYY-MM-DD`);
-  }
-  if (!/^[+-]\d{4}$/.test(tzOffset)) {
-    throw new Error(`Invalid tzOffset '${tzOffset}', expected like -0400/-0500`);
-  }
-
-  const startToast = `${yyyyMmDd}T00:00:00.000${tzOffset}`;
-  const endToast = `${yyyyMmDd}T23:59:59.000${tzOffset}`;
-
-  const slices: Array<[string, string]> = [];
-  let cursor = startToast;
-
-  while (compareToast(cursor, endToast) < 0) {
-    const next = addMinutesToastString(cursor, sliceMinutes);
-    if (compareToast(next, endToast) >= 0) {
-      slices.push([cursor, endToast]);
-      break;
-    } else {
-      slices.push([cursor, next]);
-      cursor = next;
-    }
-  }
-
-  return { startToast, endToast, slices };
-}
-
-/**
- * Build slices **within a local-hours window** of a given day.
- * Example: startHour=6, endHour=20 creates slices from 06:00…19:59 inclusive.
+ * Build 60-minute toast-formatted slices for a local day window.
+ * Inputs: date "YYYY-MM-DD", tzOffset "±HHmm", startHour [0..23], endHour [1..24], stepMinutes (default 60)
+ * Returns: toast-formatted strings "YYYY-MM-DDTHH:mm:ss.SSS±HHmm"
  */
 export function buildLocalHourSlicesWithinDay(
-  yyyyMmDd: string,
+  date: string,
   tzOffset: string,
   startHour: number,
   endHour: number,
-  sliceMinutes = 60
-): { startToast: string; endToast: string; slices: Array<[string, string]> } {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(yyyyMmDd)) {
-    throw new Error(`Invalid date '${yyyyMmDd}', expected YYYY-MM-DD`);
-  }
-  if (!/^[+-]\d{4}$/.test(tzOffset)) {
-    throw new Error(`Invalid tzOffset '${tzOffset}', expected like -0400/-0500`);
-  }
-  if (!(Number.isInteger(startHour) && Number.isInteger(endHour))) {
-    throw new Error("startHour and endHour must be integers (0–24).");
-  }
-  if (startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || endHour <= startHour) {
-    throw new Error("Hour window must satisfy: 0 ≤ startHour < endHour ≤ 24.");
-  }
+  stepMinutes = 60
+): {
+  startToast: string;
+  endToast: string;
+  slices: [string, string][];
+} {
+  const off = toToastOffset(tzOffset);
 
-  const HH = (h: number) => String(h).padStart(2, "0");
-  const startToast = `${yyyyMmDd}T${HH(startHour)}:00:00.000${tzOffset}`;
-  // Inclusive end at the last second of the previous minute of endHour
-  const endToast = `${yyyyMmDd}T${HH(endHour - 1)}:59:59.000${tzOffset}`;
+  // Build Date objects in the provided local offset by constructing ISO with that offset.
+  // Example: 2025-10-10T06:00:00.000-0400
+  const mk = (h: number, m: number, s: number, ms: number) =>
+    `${date}T${pad2(h)}:${pad2(m)}:${pad2(s)}.${pad3(ms)}${off}`;
 
-  const slices: Array<[string, string]> = [];
-  let cursor = startToast;
+  const startToast = mk(startHour, 0, 0, 0);
+  const endToast = mk(endHour - 1, 59, 59, 0);
 
-  while (compareToast(cursor, endToast) < 0) {
-    const next = addMinutesToastString(cursor, sliceMinutes);
-    if (compareToast(next, endToast) >= 0) {
-      slices.push([cursor, endToast]);
-      break;
-    } else {
-      slices.push([cursor, next]);
-      cursor = next;
-    }
+  // Generate hourly (or stepMinutes) slices fully within [startHour, endHour)
+  const slices: [string, string][] = [];
+  let h = startHour;
+  while (h < endHour) {
+    const sliceStart = mk(h, 0, 0, 0);
+    // cap each slice to stepMinutes; subtract 1s to keep Toast inclusive edges happy
+    const nextH = Math.min(h + Math.ceil(stepMinutes / 60), endHour);
+    const isFullHour = stepMinutes >= 60;
+    const endMin = isFullHour ? 59 : ((stepMinutes % 60) || 60) - 1; // 59 for full hour
+    const sliceEnd =
+      nextH > h + 1 || isFullHour
+        ? mk(h, 59, 59, 0)
+        : `${date}T${pad2(h)}:${pad2(endMin)}:59.000${off}`;
+
+    slices.push([sliceStart, sliceEnd]);
+
+    h = nextH;
   }
 
   return { startToast, endToast, slices };
 }
 
-/** Add minutes to a Toast-format string (yyyy-MM-ddTHH:mm:ss.SSS±HHmm) preserving the same numeric offset. */
-function addMinutesToastString(toastIso: string, minutes: number): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})([+-]\d{4})$/.exec(toastIso);
-  if (!m) return toastIso;
+/**
+ * Slice an arbitrary ISO start/end (with offsets) into ≤60-minute windows.
+ * Input examples:
+ *   start = "2025-10-10T06:00:00.000-0400"
+ *   end   = "2025-10-10T07:59:59.000-0400"
+ *
+ * Returns an array of { start, end } strings formatted for Toast (preserving the original offsets).
+ * The last slice end is clamped to the given end.
+ */
+export function buildIsoWindowSlices(
+  startISO: string,
+  endISO: string,
+  stepMinutes = 60
+): Array<{ start: string; end: string }> {
+  // Basic validation — both must look like ISO with offset ±HHmm
+  const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$/;
+  if (!isoRe.test(startISO) || !isoRe.test(endISO)) {
+    throw new Error(
+      `Invalid ISO inputs. Expect "YYYY-MM-DDTHH:mm:ss.SSS±HHmm". start=${startISO} end=${endISO}`
+    );
+  }
 
-  const [, Y, Mo, D, H, Mi, S, ms, off] = m;
-  const sign = off.startsWith("-") ? -1 : 1;
-  const oh = Number(off.slice(1, 3));
-  const om = Number(off.slice(3, 5));
-  const totalOffsetMinutes = sign * (oh * 60 + om);
+  // Convert to a Date by transforming ±HHmm to ±HH:MM (JS Date requirement)
+  const toJsIso = (s: string) => s.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  const toToastIso = (s: string) => s.replace(/([+-]\d{2}):(\d{2})$/, "$1$2");
 
-  // Convert to real UTC instant
-  const baseUtc = Date.UTC(
-    Number(Y),
-    Number(Mo) - 1,
-    Number(D),
-    Number(H),
-    Number(Mi) - totalOffsetMinutes,
-    Number(S),
-    Number(ms)
-  );
+  const start = new Date(toJsIso(startISO));
+  const end = new Date(toJsIso(endISO));
+  if (!(start.getTime() < end.getTime())) return [];
 
-  const d = new Date(baseUtc + minutes * 60_000);
+  const out: Array<{ start: string; end: string }> = [];
+  const stepMs = stepMinutes * 60 * 1000;
 
-  // Convert back to local wall clock with same offset
-  const yyyy = d.getUTCFullYear();
-  const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const HH = String(d.getUTCHours() + Math.trunc(totalOffsetMinutes / 60)).padStart(2, "0");
-  const mm = String(d.getUTCMinutes() + (totalOffsetMinutes % 60)).padStart(2, "0");
-  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  let sliceStart = new Date(start.getTime());
+  while (sliceStart < end) {
+    const sliceEnd = new Date(Math.min(sliceStart.getTime() + stepMs - 1000, end.getTime())); // -1s for Toast
+    out.push({
+      start: toToastIso(sliceStart.toISOString()),
+      end: toToastIso(sliceEnd.toISOString()),
+    });
+    // next slice starts exactly at previous end + 1s
+    const next = new Date(sliceEnd.getTime() + 1000);
+    if (next >= end) break;
+    sliceStart = next;
+  }
 
-  // Normalize by re-applying offset inversion to ensure proper carry
-  const back = new Date(
-    Date.UTC(
-      Number(yyyy),
-      Number(MM) - 1,
-      Number(dd),
-      Number(HH),
-      Number(mm) - totalOffsetMinutes,
-      Number(ss),
-      0
-    )
-  );
-
-  const y2 = back.getUTCFullYear();
-  const M2 = String(back.getUTCMonth() + 1).padStart(2, "0");
-  const d2 = String(back.getUTCDate()).padStart(2, "0");
-  const H2 = String(back.getUTCHours() + Math.trunc(totalOffsetMinutes / 60)).padStart(2, "0");
-  const m2 = String(back.getUTCMinutes() + (totalOffsetMinutes % 60)).padStart(2, "0");
-  const s2 = String(back.getUTCSeconds()).padStart(2, "0");
-
-  return `${y2}-${M2}-${d2}T${H2}:${m2}:${s2}.000${off}`;
+  return out;
 }
 
-/** Compare two Toast-format timestamps by converting to epoch ms. */
-function compareToast(a: string, b: string): number {
-  const toMs = (x: string) => {
-    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})([+-]\d{4})$/.exec(x);
-    if (!m) return 0;
-    const [, Y, Mo, D, H, Mi, S, ms, off] = m;
-    const sign = off.startsWith("-") ? -1 : 1;
-    const oh = Number(off.slice(1, 3));
-    const om = Number(off.slice(3, 5));
-    const totalOffsetMinutes = sign * (oh * 60 + om);
-    return Date.UTC(
-      Number(Y),
-      Number(Mo) - 1,
-      Number(D),
-      Number(H),
-      Number(Mi) - totalOffsetMinutes,
-      Number(S),
-      Number(ms)
-    );
-  };
-  const A = toMs(a), B = toMs(b);
-  return A === B ? 0 : A < B ? -1 : 1;
+// ---- small format helpers ----
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+function pad3(n: number) {
+  return String(n).padStart(3, "0");
 }
