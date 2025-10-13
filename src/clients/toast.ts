@@ -90,11 +90,11 @@ export async function getMenuItems(env: AppEnv, params: GetMenuItemsParams = {})
     url.searchParams.set("lastModified", params.lastModified);
   }
 
-  const headers = await getToastHeaders(env);
-
   if (params.pageToken) {
-    headers["Toast-Next-Page-Token"] = params.pageToken;
+    url.searchParams.set("pageToken", params.pageToken);
   }
+
+  const headers = await getToastHeaders(env);
 
   const response = await fetchWithBackoff(url.toString(), { method: "GET", headers });
   const text = await response.text();
@@ -125,15 +125,28 @@ export async function getMenuItems(env: AppEnv, params: GetMenuItemsParams = {})
 
 export interface SalesCategoriesResult {
   categories: any[];
+  nextPageToken: string | null;
   raw: any;
   responseHeaders: Record<string, string>;
 }
 
-export async function getSalesCategories(env: AppEnv): Promise<SalesCategoriesResult> {
+export interface GetSalesCategoriesParams {
+  pageToken?: string | null;
+}
+
+export async function getSalesCategories(
+  env: AppEnv,
+  params: GetSalesCategoriesParams = {}
+): Promise<SalesCategoriesResult> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
-  const url = `${base}/configuration/v2/salesCategories`;
+  const url = new URL(`${base}/configuration/v2/salesCategories`);
+
+  if (params.pageToken) {
+    url.searchParams.set("pageToken", params.pageToken);
+  }
+
   const headers = await getToastHeaders(env);
-  const response = await fetchWithBackoff(url, { method: "GET", headers });
+  const response = await fetchWithBackoff(url.toString(), { method: "GET", headers });
   const text = await response.text();
 
   let json: any = null;
@@ -149,8 +162,12 @@ export async function getSalesCategories(env: AppEnv): Promise<SalesCategoriesRe
     ? json
     : [];
 
+  const nextPageHeader = response.headers.get("Toast-Next-Page-Token");
+  const nextPageToken = nextPageHeader && nextPageHeader.trim().length > 0 ? nextPageHeader : null;
+
   return {
     categories,
+    nextPageToken,
     raw: json,
     responseHeaders: headersToObject(response.headers),
   };
