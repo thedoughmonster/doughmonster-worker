@@ -1,11 +1,13 @@
 // /src/routes/api/debug/auth-stats.ts
 // Path: src/routes/api/debug/auth-stats.ts
 
-export default async function handleAuthStats(env: {
-  TOKEN_KV: KVNamespace;
-}): Promise<Response> {
+import type { ToastEnv } from "../../../lib/env";
+
+type TokenMeta = { accessToken?: string; expiresAt?: number } | null;
+
+export default async function handleAuthStats(env: Pick<ToastEnv, "TOKEN_KV">): Promise<Response> {
   const statsRaw = await env.TOKEN_KV.get("toast_access_token_stats");
-  const token = await env.TOKEN_KV.get("toast_access_token", "json").catch(() => null as any);
+  const token = (await env.TOKEN_KV.get("toast_access_token", "json").catch(() => null)) as TokenMeta;
   const parsed = statsRaw ? JSON.parse(statsRaw) : null;
 
   // Never leak the full token; just show a short preview & expiry

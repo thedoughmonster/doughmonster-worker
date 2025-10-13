@@ -2,13 +2,17 @@
 // Fetch full Toast orders for the last ?minutes= (default 60, max 120) with expand.
 // Add ?debug=1 to see detailed request/response diagnostics.
 
+import type { ToastEnv } from "../../../lib/env";
 import { jsonResponse } from "../../../lib/http";
 import { getAccessToken } from "../../../lib/toastAuth";
 
-type Bindings = {
-  TOAST_API_BASE: string;              // e.g. https://ws-api.toasttab.com
-  TOAST_RESTAURANT_GUID: string;       // your restaurant GUID (already set as secret)
-};
+function headersToObject(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -38,7 +42,7 @@ function topKeysOf(value: unknown, max = 20): string[] | null {
   return null;
 }
 
-export default async function handleOrdersLatest(env: Bindings, request: Request) {
+export default async function handleOrdersLatest(env: ToastEnv, request: Request) {
   const url = new URL(request.url);
   const minutesParam = url.searchParams.get("minutes");
   const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
@@ -110,19 +114,19 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
           headerUsed: "Toast-Restaurant-External-ID",
           expandUsed: expand.join(","),
           responseStatus: status,
-          responseHeaders: Object.fromEntries(resp.headers.entries()),
+          responseHeaders: headersToObject(resp.headers),
           bodyPreview: text?.slice(0, 1000) ?? null,
         },
       };
       return jsonResponse(body, { status });
     }
 
-    // Success: Toast returns an array of order objects (expected for v2 list)
-    const data = Array.isArray(json) ? json : [];
-    const count = data.length;
-    const ids = data.map((o: any) => o?.guid).filter(Boolean);
+    // Success: Toast can return either a bare array or an object with an `orders` array.
+    const dataArray = Array.isArray(json) ? json : Array.isArray(json?.orders) ? json.orders : [];
+    const count = dataArray.length;
+    const ids = dataArray.map((o: any) => o?.guid).filter(Boolean);
 
-    const sample = count > 0 ? data[0] : null;
+    const sample = count > 0 ? dataArray[0] : null;
     const firstType = sample === null ? "null" : Array.isArray(sample) ? "array" : typeof sample;
     const firstKeys = topKeysOf(sample);
 
@@ -135,7 +139,7 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
       expandUsed: expand,
       count,
       ids,
-      data, // full order objects here
+      orders: dataArray, // full order objects here
     };
 
     if (wantDebug) {
@@ -145,10 +149,11 @@ export default async function handleOrdersLatest(env: Bindings, request: Request
           url: toastUrl,
           headerUsed: "Toast-Restaurant-External-ID",
         },
-        lengths: { ids: ids.length, data: data.length },
+        lengths: { ids: ids.length, orders: dataArray.length },
         shapes: {
-          dataArray: Array.isArray(data),
-          looksLikeIdsOnly: looksLikeGuidArray(data),
+          dataIsArray: Array.isArray(json),
+          wrappedOrdersArray: Array.isArray(json?.orders),
+          looksLikeIdsOnly: looksLikeGuidArray(dataArray),
           firstType,
           firstKeys,
         },

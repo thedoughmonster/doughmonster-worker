@@ -5,18 +5,17 @@
 // - Send the Toast-Restaurant-External-ID header
 // - Return rich debug so you can see exactly what was sent/received
 
+import type { ToastApiEnv } from "./env";
 import { getAccessToken } from "./toastAuth";
-
-type Bindings = {
-  TOAST_API_BASE: string;
-  TOAST_RESTAURANT_GUID: string;
-};
+import { paceBeforeToastCall } from "./pacer";
 
 export type OrdersWindowOpts = {
-  startDateIso: string;                // e.g. 2025-10-10T10:00:00.000+0000
-  endDateIso: string;                  // e.g. 2025-10-10T11:00:00.000+0000
-  expand?: string[];                   // e.g. ["checks","items","payments",...]
+  startDateIso: string; // e.g. 2025-10-10T10:00:00.000+0000
+  endDateIso: string; // e.g. 2025-10-10T11:00:00.000+0000
+  expand?: string[]; // e.g. ["checks","items","payments",...]
   debugMeta?: Record<string, unknown>; // optional: callerRoute, etc.
+  paceScope?: "orders" | "global";
+  minGapMs?: number;
 };
 
 type ToastDebugSlice = {
@@ -30,6 +29,7 @@ type ToastDebugSlice = {
   };
   status: number;
   returned: number;
+  meta: Record<string, unknown> | null;
   error?: {
     status: number;
     url: string;
@@ -40,13 +40,14 @@ type ToastDebugSlice = {
 };
 
 export async function getOrdersWindow(
-  env: Bindings,
+  env: ToastApiEnv,
   opts: OrdersWindowOpts
 ): Promise<{
   ok: true;
   ids: string[];
-  data?: any[]; // present when expand was used (full orders)
-  slice: ToastDebugSlice; // debug payload
+  data: any[];
+  slice: ToastDebugSlice;
+  status: number;
 }> {
   const route = "/orders/v2/orders";
 
@@ -63,6 +64,8 @@ export async function getOrdersWindow(
   if (expandParam) params.set("expand", expandParam);
 
   const url = `${env.TOAST_API_BASE}${route}?${params.toString()}`;
+
+  await paceBeforeToastCall(opts.paceScope ?? "orders", opts.minGapMs ?? 1100);
 
   const token = await getAccessToken(env);
   const headers = new Headers({
@@ -84,6 +87,7 @@ export async function getOrdersWindow(
     },
     status: res.status,
     returned: 0,
+    meta: opts.debugMeta ?? null,
   };
 
   if (!res.ok) {
@@ -97,10 +101,15 @@ export async function getOrdersWindow(
       } catch { /* ignore */ }
     }
 
+    const headerPairs: Array<[string, string]> = [];
+    res.headers.forEach((value, key) => {
+      headerPairs.push([key, value]);
+    });
+
     debugSlice.error = {
       status: res.status,
       url,
-      responseHeaders: Object.fromEntries(res.headers.entries()),
+      responseHeaders: Object.fromEntries(headerPairs),
       body: bodyJson ? { json: bodyJson } : { text: bodyText ?? "(no body)" },
       message: `Toast error ${res.status} on ${route}`,
     };
@@ -120,16 +129,25 @@ export async function getOrdersWindow(
     );
   }
 
-  const json = (await res.json()) as any[];
-  debugSlice.returned = Array.isArray(json) ? json.length : 0;
+  const json = (await res.json()) as any;
+  const list: any[] = Array.isArray(json)
+    ? json
+    : Array.isArray(json?.orders)
+    ? json.orders
+    : Array.isArray(json?.elements)
+    ? json.elements
+    : [];
 
-  const ids = Array.isArray(json) ? json.map((o) => o?.guid).filter(Boolean) : [];
+  debugSlice.returned = list.length;
+
+  const ids = list.map((o) => o?.guid).filter(Boolean);
 
   return {
     ok: true,
     ids,
-    data: expandParam ? json : undefined, // only include full orders if expand requested
+    data: expandParam ? list : ids,
     slice: debugSlice,
+    status: res.status,
   };
 }
 
@@ -138,13 +156,15 @@ export async function getOrdersWindow(
  * It enforces `expand` to request full orders and always returns `data`.
  */
 export async function getOrdersWindowFull(
-  env: Bindings,
-  opts: Omit<OrdersWindowOpts, "expand">
+  env: ToastApiEnv,
+  opts: Omit<OrdersWindowOpts, "expand">,
 ): Promise<{
   ok: true;
   ids: string[];
-  data: any[];                // always present
+  data: any[];
+  orders: any[];
   slice: ToastDebugSlice;
+  status: number;
 }> {
   const expand = [
     "checks",
@@ -159,7 +179,9 @@ export async function getOrdersWindowFull(
   return {
     ok: true,
     ids: res.ids,
-    data: res.data ?? [],
+    data: res.data,
+    orders: res.data,
     slice: res.slice,
+    status: res.status,
   };
 }

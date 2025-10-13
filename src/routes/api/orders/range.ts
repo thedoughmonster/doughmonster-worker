@@ -1,45 +1,43 @@
 // /src/routes/api/orders/range.ts
 // Path: src/routes/api/orders/range.ts
 
-import type { EnvDeps } from "../../../lib/toastApi";
+import type { ToastApiEnv } from "../../../lib/env";
 import { toastGet } from "../../../lib/toastApi";
-import {
-  clampInt,
-  nowToastIsoUtc,
-  minusMinutesToastIsoUtc,
-  toastsUtcAddMinutes,
-} from "../../../lib/time";
+import { clampInt, nowToastIsoUtc, minusMinutesToastIsoUtc, buildIsoWindowSlices } from "../../../lib/time";
+import { MAX_SLICES_PER_REQUEST } from "../../../config/orders";
 
-type ToastRangeQ = {
-  startDate?: string;
-  endDate?: string;
-  minutes?: string;
-  pageSize?: string;
-};
-
-export default async function handleOrdersRange(env: EnvDeps, request: Request): Promise<Response> {
+export default async function handleOrdersRange(env: ToastApiEnv, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const minutes = clampInt(url.searchParams.get("minutes"), 1, 1440, 360);
   const limit = clampInt(url.searchParams.get("limit"), 1, 2000, 500);
 
   const end = nowToastIsoUtc();
-  const start = minusMinutesToastIsoUtc(end, minutes);
+  const start = minusMinutesToastIsoUtc(minutes, end);
 
-  // Break into <=60 min slices to satisfy Toast constraint
-  const slices: Array<[string, string]> = [];
-  let cursor = start;
-  while (true) {
-    const next = toastsUtcAddMinutes(cursor, Math.min(60, minutes));
-    slices.push([cursor, next]);
-    if (next >= end) break;
-    cursor = next;
+  const slices = buildIsoWindowSlices(start, end, 60);
+  if (slices.length === 0) {
+    return Response.json(
+      { ok: false, error: "Invalid range; end must be after start" },
+      { status: 400 }
+    );
+  }
+  if (slices.length > MAX_SLICES_PER_REQUEST) {
+    return Response.json(
+      {
+        ok: false,
+        error: "Requested window too large; reduce the duration",
+        limitHours: MAX_SLICES_PER_REQUEST,
+        slices: slices.length,
+      },
+      { status: 400 }
+    );
   }
 
   const all: any[] = [];
   let requests = 0;
 
   try {
-    for (const [s, e] of slices) {
+    for (const { startISO: s, endISO: e } of slices) {
       if (all.length >= limit) break;
 
       const data = await toastGet<any>(

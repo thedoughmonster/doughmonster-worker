@@ -37,6 +37,13 @@ export function minusMinutesToastIsoUtc(minutes: number, endISO?: string): strin
   return toToastIso(new Date(startMs));
 }
 
+/** Add N minutes to a Toast ISO string, returning a Toast ISO string. */
+export function toastsUtcAddMinutes(iso: string, minutes: number): string {
+  const base = new Date(iso.replace(/(\+|\-)\d{4}$/, "Z"));
+  const ms = base.getTime() + minutes * 60_000;
+  return toToastIso(new Date(ms));
+}
+
 /**
  * Build slices between two ISO strings, ensuring each slice is <= maxWindowMinutes (default 60).
  * Returns array of { startISO, endISO } in Toast ISO format.

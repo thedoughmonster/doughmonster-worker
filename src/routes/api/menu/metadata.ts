@@ -1,7 +1,7 @@
 // /src/routes/api/menu/metadata.ts
 // Path: src/routes/api/menu/metadata.ts
 
-import type { EnvDeps } from "../../../lib/toastApi";
+import type { ToastApiEnv } from "../../../lib/env";
 import { toastGet } from "../../../lib/toastApi";
 
 /**
@@ -9,7 +9,7 @@ import { toastGet } from "../../../lib/toastApi";
  * Fetches Toast menu metadata (v3, falls back to v2).
  * Uses default (global) pacing.
  */
-export default async function handleMenuMetadata(env: EnvDeps): Promise<Response> {
+export default async function handleMenuMetadata(env: ToastApiEnv): Promise<Response> {
   try {
     try {
       const data = await toastGet<any>(env, "/menus/v3/metadata");

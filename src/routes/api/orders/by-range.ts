@@ -1,7 +1,7 @@
 // /src/routes/api/orders/by-range.ts
 // Path: src/routes/api/orders/by-range.ts
 
-import { paceBeforeToastCall } from "../../../lib/pacer";
+import type { ToastEnv } from "../../../lib/env";
 import { buildIsoWindowSlices } from "../../../lib/time";
 import { getOrdersWindow, getOrdersWindowFull } from "../../../lib/toastOrders";
 import { MAX_SLICES_PER_REQUEST } from "../../../config/orders";
@@ -17,7 +17,7 @@ import { MAX_SLICES_PER_REQUEST } from "../../../config/orders";
  * - We don’t parse dates server-side beyond building 60m slices.
  * - Hard cap: max 2 slices (<= 2 hours).
  */
-export default async function handleOrdersByRange(env: any, request: Request): Promise<Response> {
+export default async function handleOrdersByRange(env: ToastEnv, request: Request): Promise<Response> {
   const ROUTE = "/api/orders/by-range";
   try {
     const url = new URL(request.url);
@@ -58,25 +58,20 @@ export default async function handleOrdersByRange(env: any, request: Request): P
     let requests = 0;
 
     for (const win of slices) {
-      const { start, end } = win;
-      await paceBeforeToastCall("orders", 1100);
+      const { startISO: start, endISO: end } = win;
 
       try {
         const res =
           detail === "full"
-            ? await getOrdersWindowFull(env, start, end) // /ordersBulk
-            : await getOrdersWindow(env, start, end);    // /orders (GUIDs)
+            ? await getOrdersWindowFull(env, { startDateIso: start, endDateIso: end })
+            : await getOrdersWindow(env, { startDateIso: start, endDateIso: end });
 
         requests++;
-        if (Array.isArray(res?.data)) out.push(...res.data);
+        const chunk = detail === "full" ? res.data : res.ids;
+        out.push(...chunk);
 
         if (includeDebug) {
-          debugSlices.push({
-            sliceWindow: { start, end },
-            toast: res?.debug ?? null,
-            status: res?.status ?? null,
-            returned: Array.isArray(res?.data) ? res!.data.length : 0,
-          });
+          debugSlices.push(res.slice);
         }
       } catch (e: any) {
         // We throw JSON-stringified errors from lib; try to parse for great diagnostics.
