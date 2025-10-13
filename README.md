@@ -27,7 +27,7 @@ Doughmonster Worker is a Cloudflare Worker that proxies a subset of the Toast AP
 - `src/worker.ts` is the entry point. It routes incoming requests to per-endpoint handlers and returns JSON 404/500 responses when necessary.【F:src/worker.ts†L1-L71】
 - Menu and order handlers live under `src/routes/api/**` and share helper libraries in `src/lib/**` for auth, pacing, rate limiting, and HTTP helpers.
 - Toast authentication tokens are cached in `TOKEN_KV`; the worker refreshes and reuses them via `getAccessToken` in `src/lib/toastAuth.ts`. Toast calls are spaced out using `paceBeforeToastCall` to respect vendor rate limits.【F:src/lib/toastAuth.ts†L1-L81】【F:src/lib/pacer.ts†L1-L64】
-- Orders fetches rely on `getOrdersWindow`/`getOrdersWindowFull` to normalize responses and capture diagnostic slices for debugging.【F:src/lib/toastOrders.ts†L1-L156】
+- Orders fetches rely on `getOrdersWindow`/`getOrdersWindowFull` to normalize responses and capture diagnostic slices for debugging, while `/api/orders/latest` now calls the Toast Orders Bulk API directly with built-in pagination, retries, and pacing controls.【F:src/lib/toastOrders.ts†L1-L156】【F:src/routes/api/orders/latest.ts†L1-L144】
 - Rate limiting controls and single-flight helpers use `CACHE_KV` (`src/lib/rateLimit.ts`).【F:src/lib/rateLimit.ts†L1-L41】
 
 ## Environment & bindings
@@ -66,7 +66,7 @@ All endpoints return JSON. Unless noted otherwise, responses are cached only by 
 | ------------- | ----------- | ------------ |
 | `GET /api/orders/by-date` | Aggregates hourly slices for a local day. Requires `date=YYYY-MM-DD`. Optional `tzOffset` (default `+0000`), `startHour`, `endHour`, `detail=ids|full` (`ids` default), `debug=1`. Returns aggregated ids or full orders plus slice metadata. | `date` (required), `tzOffset`, `startHour`, `endHour`, `detail`, `debug`【F:src/routes/api/orders/by-date.ts†L1-L112】 |
 | `GET /api/orders/by-range` | Pulls orders across a precise ISO range (max 2 hours). Requires `start` and `end` in Toast ISO format (`YYYY-MM-DDTHH:mm:ss.SSS±HHmm`). Optional `detail=full|ids` (`full` default) and `debug=1`. Returns combined data and optional debug slices. | `start` (required), `end` (required), `detail`, `debug`【F:src/routes/api/orders/by-range.ts†L1-L109】 |
-| `GET /api/orders/latest` | Fetches full expanded orders for the last `?minutes=` (default 60, max 120). Optional `debug=1` adds request diagnostics. Returns ids, orders array, and metadata about the window. | `minutes`, `debug`【F:src/routes/api/orders/latest.ts†L1-L144】 |
+| `GET /api/orders/latest` | Fetches full expanded orders for the last `?minutes=` (default 60, max 120) using Toast's Orders Bulk API. Handles pagination (100 orders/page), retry-on-429, and returns ids, orders array, and metadata about the window. Optional `debug=1` adds request diagnostics. | `minutes`, `debug`【F:src/routes/api/orders/latest.ts†L1-L144】 |
 
 ### Debug & operations
 | Method & path | Description | Notes |
