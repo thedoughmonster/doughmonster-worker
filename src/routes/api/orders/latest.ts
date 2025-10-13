@@ -69,15 +69,14 @@ export default async function handleOrdersLatest(env: ToastEnv, request: Request
     // Build URL
     const base = env.TOAST_API_BASE.replace(/\/+$/, "");
     const route = "/orders/v2/orders";
-    const qp = new URLSearchParams({
-      restaurantGuid: env.TOAST_RESTAURANT_GUID,
-      startDate: encodeURIComponent(startDateIso), // keep characters safe
-      endDate: encodeURIComponent(endDateIso),
-      expand: expand.join(","),
-    });
-
-    // NOTE: we encode ISO (contains +) once more to be super-safe in CF Worker URL construction
-    const toastUrl = `${base}${route}?${qp.toString()}`;
+    const startDateParam = startDateIso.replace(/\+/g, "%2B");
+    const endDateParam = endDateIso.replace(/\+/g, "%2B");
+    const toastUrl =
+      `${base}${route}` +
+      `?restaurantGuid=${encodeURIComponent(env.TOAST_RESTAURANT_GUID)}` +
+      `&startDate=${startDateParam}` +
+      `&endDate=${endDateParam}` +
+      `&expand=${encodeURIComponent(expand.join(","))}`;
 
     // Auth header
     const token = await getAccessToken(env);
@@ -115,7 +114,7 @@ export default async function handleOrdersLatest(env: ToastEnv, request: Request
           expandUsed: expand.join(","),
           responseStatus: status,
           responseHeaders: headersToObject(resp.headers),
-          bodyPreview: text?.slice(0, 1000) ?? null,
+          body: json ?? (text?.slice(0, 1000) ?? null),
         },
       };
       return jsonResponse(body, { status });
