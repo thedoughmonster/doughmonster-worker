@@ -1,0 +1,265 @@
+import type { AppEnv } from "../../../config/env.js";
+import { getMenuItems, getSalesCategories } from "../../../clients/toast.js";
+import { jsonResponse } from "../../../lib/http.js";
+
+const MAX_PAGES = 500;
+
+export interface MenuDictDeps {
+  getMenuItems: typeof getMenuItems;
+  getSalesCategories: typeof getSalesCategories;
+}
+
+export function createMenuDictHandler(
+  deps: MenuDictDeps = { getMenuItems, getSalesCategories }
+) {
+  return async function handleMenuDict(env: AppEnv, request: Request) {
+    const url = new URL(request.url);
+    const lastModified = sanitizeLastModified(url.searchParams.get("lastModified"));
+
+    try {
+      const startedAt = Date.now();
+      console.log(
+        `[menu/dict] start ${new Date(startedAt).toISOString()} lastModified=${
+          lastModified ?? "none"
+        }`
+      );
+
+      const categoriesResult = await deps.getSalesCategories(env);
+      const categoriesByGuid = buildCategoryMap(categoriesResult.categories ?? []);
+
+      const allItems: any[] = [];
+      let pageToken: string | null = null;
+      let page = 0;
+
+      while (page < MAX_PAGES) {
+        page += 1;
+        const pageResult = await deps.getMenuItems(env, {
+          ...(lastModified ? { lastModified } : {}),
+          ...(pageToken ? { pageToken } : {}),
+        });
+        const pageItems = Array.isArray(pageResult.items) ? pageResult.items : [];
+        allItems.push(...pageItems);
+        pageToken = pageResult.nextPageToken ?? null;
+
+        if (!pageToken) {
+          break;
+        }
+      }
+
+      if (page >= MAX_PAGES && pageToken) {
+        console.warn(`[menu/dict] hit MAX_PAGES=${MAX_PAGES}`);
+      }
+
+      const normalized = allItems
+        .map((item) => normalizeMenuItem(item, categoriesByGuid))
+        .filter((item): item is NormalizedMenuItem => item !== null);
+
+      const finishedAt = Date.now();
+      console.log(
+        `[menu/dict] finish ${new Date(finishedAt).toISOString()} count=${
+          normalized.length
+        } pages=${page} duration=${finishedAt - startedAt}ms`
+      );
+
+      return jsonResponse({
+        ok: true,
+        route: "/api/menu/dict",
+        ...(lastModified ? { lastModified } : {}),
+        count: normalized.length,
+        data: normalized,
+      });
+    } catch (err: any) {
+      const status = typeof err?.status === "number" ? err.status : 500;
+      const snippet = err?.bodySnippet ?? err?.message ?? String(err ?? "Unknown error");
+
+      return jsonResponse(
+        {
+          ok: false,
+          route: "/api/menu/dict",
+          error: typeof snippet === "string" ? snippet : "Unknown error",
+        },
+        { status }
+      );
+    }
+  };
+}
+
+export default createMenuDictHandler();
+
+interface NormalizedMenuItem {
+  guid: string;
+  name: string;
+  basePrice: number | null;
+  salesCategoryName: string | null;
+  multiLocationId: string | null;
+}
+
+function normalizeMenuItem(
+  item: any,
+  categoriesByGuid: Map<string, string | null>
+): NormalizedMenuItem | null {
+  const guid = extractGuid(item);
+  if (!guid) {
+    return null;
+  }
+
+  const name = extractName(item) ?? guid;
+  const basePrice = extractBasePrice(item);
+  const salesCategoryGuid = extractSalesCategoryGuid(item);
+  const salesCategoryName = salesCategoryGuid
+    ? categoriesByGuid.get(salesCategoryGuid) ?? null
+    : null;
+  const multiLocationId = extractMultiLocationId(item);
+
+  return { guid, name, basePrice, salesCategoryName, multiLocationId };
+}
+
+function buildCategoryMap(categories: any[]): Map<string, string | null> {
+  const map = new Map<string, string | null>();
+
+  for (const category of categories) {
+    const guid = extractCategoryGuid(category);
+    if (!guid) {
+      continue;
+    }
+
+    const name = extractCategoryName(category);
+    map.set(guid, name);
+  }
+
+  return map;
+}
+
+function extractGuid(item: any): string | null {
+  const candidates = [item?.guid, item?.menuItemGuid, item?.itemGuid, item?.multiLocationItemGuid];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function extractName(item: any): string | null {
+  const candidates = [item?.name, item?.displayName, item?.menuItemName, item?.shortName];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function extractBasePrice(item: any): number | null {
+  const candidates = [
+    item?.basePrice,
+    item?.price,
+    item?.priceInfo?.basePrice,
+    item?.priceInfo?.price,
+    item?.priceInfo?.amount,
+    item?.priceInfo?.value,
+    item?.defaultPrice,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = toNumber(candidate);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  if (Array.isArray(item?.prices)) {
+    for (const price of item.prices) {
+      const parsed = toNumber(price?.amount ?? price?.price ?? price);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractSalesCategoryGuid(item: any): string | null {
+  const candidates = [
+    item?.salesCategoryGuid,
+    item?.salesCategory?.guid,
+    item?.salesCategory?.salesCategoryGuid,
+    item?.categoryGuid,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function extractMultiLocationId(item: any): string | null {
+  const candidates = [
+    item?.multiLocationId,
+    item?.multiLocationGuid,
+    item?.multiLocationItemId,
+    item?.masterId,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function extractCategoryGuid(category: any): string | null {
+  const candidates = [category?.guid, category?.salesCategoryGuid];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function extractCategoryName(category: any): string | null {
+  const candidates = [category?.name, category?.salesCategoryName, category?.displayName];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  if (value && typeof value === "object") {
+    const maybe = (value as any).amount ?? (value as any).price ?? (value as any).value;
+    if (maybe !== undefined) {
+      return toNumber(maybe);
+    }
+  }
+
+  return null;
+}
+
+function sanitizeLastModified(input: string | null): string | null {
+  if (typeof input !== "string") {
+    return null;
+  }
+
+  const trimmed = input.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
