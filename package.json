@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "rm -rf dist && npm run build --silent && node --test tests/*.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240919.0",

@@ -16,6 +16,3 @@ TOAST_AUTH_URL = "https://ws-api.toasttab.com/authentication/v1/authentication/l
 binding = "TOKEN_KV"
 id = "8dbfe4814b8a43cf80537c6e22d854fb"
 
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "ab64388dbd624db78c5ced317fa3790b"
