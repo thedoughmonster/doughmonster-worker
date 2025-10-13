@@ -2,7 +2,7 @@ import type { AppEnv } from "../../../config/env.js";
 import { getMenuItems, getSalesCategories } from "../../../clients/toast.js";
 import { jsonResponse } from "../../../lib/http.js";
 
-const MAX_PAGES = 500;
+const MAX_PAGES = 50;
 
 export interface MenuDictDeps {
   getMenuItems: typeof getMenuItems;
@@ -24,8 +24,7 @@ export function createMenuDictHandler(
         }`
       );
 
-      const categoriesResult = await deps.getSalesCategories(env);
-      const categoriesByGuid = buildCategoryMap(categoriesResult.categories ?? []);
+      const categoriesByGuid = await loadCategories(deps, env);
 
       const allItems: any[] = [];
       let pageToken: string | null = null;
@@ -54,6 +53,8 @@ export function createMenuDictHandler(
         .map((item) => normalizeMenuItem(item, categoriesByGuid))
         .filter((item): item is NormalizedMenuItem => item !== null);
 
+      const data = buildData(normalized, url.searchParams.get("as"));
+
       const finishedAt = Date.now();
       console.log(
         `[menu/dict] finish ${new Date(finishedAt).toISOString()} count=${
@@ -66,17 +67,40 @@ export function createMenuDictHandler(
         route: "/api/menu/dict",
         ...(lastModified ? { lastModified } : {}),
         count: normalized.length,
-        data: normalized,
+        data,
       });
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
       const snippet = err?.bodySnippet ?? err?.message ?? String(err ?? "Unknown error");
+      const toastRequestId =
+        typeof err?.toastRequestId === "string" && err.toastRequestId.trim().length > 0
+          ? err.toastRequestId
+          : null;
+
+      if (status === 404 && toastEntitlementMissing(snippet)) {
+        if (toastRequestId) {
+          console.warn(`[menu/dict] toastRequestId=${toastRequestId}`);
+        }
+
+        return jsonResponse(
+          {
+            ok: false,
+            route: "/api/menu/dict",
+            error: "toast_configuration_not_available",
+            hint:
+              "Enable Configuration API (config:read) or Menus V2 (menus:read) for this client.",
+            ...(toastRequestId ? { toastRequestId } : {}),
+          },
+          { status }
+        );
+      }
 
       return jsonResponse(
         {
           ok: false,
           route: "/api/menu/dict",
           error: typeof snippet === "string" ? snippet : "Unknown error",
+          ...(toastRequestId ? { toastRequestId } : {}),
         },
         { status }
       );
@@ -85,6 +109,32 @@ export function createMenuDictHandler(
 }
 
 export default createMenuDictHandler();
+
+async function loadCategories(deps: MenuDictDeps, env: AppEnv): Promise<Map<string, string | null>> {
+  const allCategories: any[] = [];
+  let pageToken: string | null = null;
+  let page = 0;
+
+  while (page < MAX_PAGES) {
+    page += 1;
+    const result = await deps.getSalesCategories(env, {
+      ...(pageToken ? { pageToken } : {}),
+    });
+    const pageCategories = Array.isArray(result.categories) ? result.categories : [];
+    allCategories.push(...pageCategories);
+    pageToken = result.nextPageToken ?? null;
+
+    if (!pageToken) {
+      break;
+    }
+  }
+
+  if (page >= MAX_PAGES && pageToken) {
+    console.warn(`[menu/dict] sales categories hit MAX_PAGES=${MAX_PAGES}`);
+  }
+
+  return buildCategoryMap(allCategories);
+}
 
 interface NormalizedMenuItem {
   guid: string;
@@ -262,4 +312,31 @@ function sanitizeLastModified(input: string | null): string | null {
 
   const trimmed = input.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildData(
+  items: NormalizedMenuItem[],
+  asParam: string | null
+): NormalizedMenuItem[] | Record<string, NormalizedMenuItem> {
+  const mode = (asParam ?? "dict").toLowerCase();
+
+  if (mode === "array") {
+    return items;
+  }
+
+  const dict: Record<string, NormalizedMenuItem> = {};
+
+  for (const item of items) {
+    dict[item.guid] = item;
+  }
+
+  return dict;
+}
+
+function toastEntitlementMissing(snippet: unknown): boolean {
+  if (typeof snippet !== "string") {
+    return false;
+  }
+
+  return /"code"\s*:\s*(?:10022|"10022")/.test(snippet);
 }

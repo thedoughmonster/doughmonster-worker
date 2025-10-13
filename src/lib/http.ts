@@ -116,6 +116,12 @@ async function buildResponseError(response: Response): Promise<Error> {
   (error as any).status = response.status;
   (error as any).statusText = response.statusText;
   (error as any).bodySnippet = snippet;
+  const headers = headersToObject(response.headers);
+  (error as any).responseHeaders = headers;
+  const toastRequestId = response.headers.get("Toast-Request-Id") ?? headers["toast-request-id"];
+  if (typeof toastRequestId === "string" && toastRequestId?.trim().length > 0) {
+    (error as any).toastRequestId = toastRequestId;
+  }
   return error;
 }
 
@@ -128,4 +134,12 @@ export function jsonResponse<T>(data: T, init: ResponseInit = {}): Response {
     headers: { "content-type": "application/json; charset=utf-8" },
     ...init,
   });
+}
+
+function headersToObject(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
 }

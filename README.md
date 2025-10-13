@@ -7,7 +7,7 @@ A minimal Cloudflare Worker that proxies Toast orders for Doughmonster and expos
 | ------ | ---- | ----------- | ------- |
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders (default 60 minute window, max 120). Accepts `?minutes=` and optional `?debug=1` for diagnostics. | `curl -s "https://<worker>/api/orders/latest?minutes=30" \| jq` |
-| `GET` | `/api/menu/dict` | Builds a dictionary of menu items `{ guid, name, basePrice, salesCategoryName, multiLocationId }`. Accepts optional `?lastModified=` to filter Toast results. | `curl -s "https://<worker>/api/menu/dict" \| jq '.data[0]'` |
+| `GET` | `/api/menu/dict` | Builds menu item data `{ guid, name, basePrice, salesCategoryName, multiLocationId }`. Accepts optional `?lastModified=` to filter Toast results and `?as=` (`dict` default, `array` for legacy output). | `curl -s "https://<worker>/api/menu/dict?as=array" \| jq '.data[0]'` |
 
 The `/api/orders/latest` payload matches the previous public shape: `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`.
 
