@@ -1,12 +1,12 @@
 // /src/lib/toastAuth.ts
 // Path: src/lib/toastAuth.ts
 
-import type { EnvDeps } from "./toastApi";
+import type { ToastAuthEnv } from "./env";
 import { paceBeforeToastCall } from "./pacer";
 
 const TOKEN_KEY = "toast_machine_token_v1";
 
-function requireTokenKV(env: EnvDeps): KVNamespace {
+function requireTokenKV(env: ToastAuthEnv): KVNamespace {
   const kv = (env as any).TOKEN_KV;
   if (!kv || typeof kv.get !== "function" || typeof kv.put !== "function") {
     throw new Error("TOKEN_KV binding missing or invalid.");
@@ -19,7 +19,7 @@ function requireTokenKV(env: EnvDeps): KVNamespace {
  * Body must include: clientId, clientSecret, userAccessType: "TOAST_MACHINE_CLIENT"
  * Response: { token: { tokenType, accessToken, expiresIn, ... }, status: "SUCCESS" }
  */
-export async function getAccessToken(env: EnvDeps): Promise<string> {
+export async function getAccessToken(env: ToastAuthEnv): Promise<string> {
   const kv = requireTokenKV(env);
 
   // 1) Cached token

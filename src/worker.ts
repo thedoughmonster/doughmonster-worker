@@ -1,6 +1,7 @@
 // /src/worker.ts
 // Path: src/worker.ts
 
+import type { ToastEnv } from "./lib/env";
 import handleToken from "./routes/api/debug/token";
 import handleBindings from "./routes/api/debug/bindings";
 import handleRateLimitDebug from "./routes/api/debug/rl";
@@ -13,37 +14,24 @@ import handleOrdersByDate from "./routes/api/orders/by-date";
 import handleOrdersByRange from "./routes/api/orders/by-range";
 import handleOrdersLatest from "./routes/api/orders/latest";
 
-type Env = {
-  // Secrets & env
-  TOAST_API_BASE: string;
-  TOAST_AUTH_URL: string;
-  TOAST_CLIENT_ID: string;
-  TOAST_CLIENT_SECRET: string;
-  TOAST_RESTAURANT_GUID: string;
-
-  // KV namespaces
-  TOKEN_KV: KVNamespace;
-  CACHE_KV: KVNamespace;
-};
-
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: ToastEnv): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
     try {
       // ---- DEBUG ----
       if (request.method === "GET" && path === "/api/debug/token") {
-        return await handleToken(env, request);
+        return await handleToken(env);
       }
       if (request.method === "GET" && path === "/api/debug/bindings") {
-        return await handleBindings(env, request);
+        return await handleBindings(env);
       }
       if (request.method === "GET" && path === "/api/debug/rl") {
         return await handleRateLimitDebug(env, request);
       }
       if (request.method === "GET" && path === "/api/debug/auth-stats") {
-        return await handleAuthStats(env, request);
+        return await handleAuthStats(env);
       }
 
       // ---- MENU ----
@@ -51,7 +39,7 @@ export default {
         return await handleMenuIndex(env, request);
       }
       if (request.method === "GET" && path === "/api/menu/metadata") {
-        return await handleMenuMetadata(env, request);
+        return await handleMenuMetadata(env);
       }
 
       // ---- ORDERS ----

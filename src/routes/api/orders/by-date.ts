@@ -2,28 +2,23 @@
 // Route: /api/orders/by-date
 // Supports ?date=YYYY-MM-DD&tzOffset=-0400&startHour=6&endHour=8&detail=ids|full&debug=1
 
+import type { ToastEnv } from "../../../lib/env";
 import { jsonResponse } from "../../../lib/http";
-import {
-  buildLocalHourSlicesWithinDay,
-  clampInt,
-} from "../../../lib/time";
-import {
-  getOrdersWindow,
-  getOrdersWindowFull,
-} from "../../../lib/toastOrders";
+import { buildLocalHourSlicesWithinDay, clampInt } from "../../../lib/time";
+import { getOrdersWindow, getOrdersWindowFull } from "../../../lib/toastOrders";
 
 type DetailMode = "ids" | "full";
 
 export default async function handleOrdersByDate(
-  env: Env,
+  env: ToastEnv,
   request: Request
 ): Promise<Response> {
   try {
     const url = new URL(request.url);
     const day = url.searchParams.get("date");
     const tzOffset = url.searchParams.get("tzOffset") ?? "+0000";
-    const startHour = clampInt(Number(url.searchParams.get("startHour") ?? 0), 0, 23);
-    const endHour = clampInt(Number(url.searchParams.get("endHour") ?? 24), 1, 24);
+    const startHour = clampInt(url.searchParams.get("startHour"), 0, 23, 0);
+    const endHour = clampInt(url.searchParams.get("endHour"), 1, 24, 24);
     const debug = url.searchParams.get("debug") === "1";
     const detail: DetailMode =
       (url.searchParams.get("detail") as DetailMode) ?? "ids";
@@ -46,31 +41,41 @@ export default async function handleOrdersByDate(
     }
 
     const slices = buildLocalHourSlicesWithinDay(day, tzOffset, startHour, endHour);
+    if (slices.length === 0) {
+      return jsonResponse(
+        { ok: false, route: "/api/orders/by-date", error: "Requested window produced no slices" },
+        { status: 400 }
+      );
+    }
+
     const debugSlices: any[] = [];
     const aggregate: any[] = [];
     let rawCount = 0;
 
     for (const slice of slices) {
       if (detail === "full") {
-        const { orders, slice: s } = await getOrdersWindowFull(env, slice.startIso, slice.endIso, { debug });
-        rawCount += s.returned;
-        if (debug && s.debug)
-          debugSlices.push({
-            sliceWindow: { start: slice.startIso, end: slice.endIso },
-            ...s,
-          });
-        aggregate.push(...orders);
+        const res = await getOrdersWindowFull(env, {
+          startDateIso: slice.startISO,
+          endDateIso: slice.endISO,
+          debugMeta: debug ? { route: "/api/orders/by-date" } : undefined,
+        });
+        rawCount += res.slice.returned;
+        if (debug) debugSlices.push(res.slice);
+        aggregate.push(...res.data);
       } else {
-        const { ids, slice: s } = await getOrdersWindow(env, slice.startIso, slice.endIso, { debug });
-        rawCount += s.returned;
-        if (debug && s.debug)
-          debugSlices.push({
-            sliceWindow: { start: slice.startIso, end: slice.endIso },
-            ...s,
-          });
-        aggregate.push(...ids);
+        const res = await getOrdersWindow(env, {
+          startDateIso: slice.startISO,
+          endDateIso: slice.endISO,
+          debugMeta: debug ? { route: "/api/orders/by-date" } : undefined,
+        });
+        rawCount += res.slice.returned;
+        if (debug) debugSlices.push(res.slice);
+        aggregate.push(...res.ids);
       }
     }
+
+    const firstSlice = slices[0];
+    const lastSlice = slices[slices.length - 1];
 
     const body: Record<string, unknown> = {
       ok: true,
@@ -79,8 +84,8 @@ export default async function handleOrdersByDate(
       tzOffset,
       hours: { startHour, endHour },
       window: {
-        start: slices[0].startIso,
-        end: slices[slices.length - 1].endIso,
+        start: firstSlice?.startISO ?? null,
+        end: lastSlice?.endISO ?? null,
       },
       slices: slices.length,
       requests: slices.length,

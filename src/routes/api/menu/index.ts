@@ -1,10 +1,10 @@
 // /src/routes/api/menu/index.ts
 // Path: src/routes/api/menu/index.ts
 
-import type { EnvDeps } from "../../../lib/toastApi";
+import type { ToastApiEnv } from "../../../lib/env";
 import { toastGet } from "../../../lib/toastApi";
 
-export default async function handleMenu(env: EnvDeps, _request: Request): Promise<Response> {
+export default async function handleMenu(env: ToastApiEnv, _request: Request): Promise<Response> {
   try {
     // v2 menus, paced at ~1 req/sec
     const data = await toastGet<any>(env, "/menus/v2/menus", undefined, {

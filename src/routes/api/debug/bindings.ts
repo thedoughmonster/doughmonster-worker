@@ -1,9 +1,9 @@
 // /src/routes/api/debug/bindings.ts
 // Path: src/routes/api/debug/bindings.ts
 
-import type { EnvDeps } from "../../../lib/toastApi";
+import type { ToastEnv } from "../../../lib/env";
 
-export default async function handleBindings(env: EnvDeps): Promise<Response> {
+export default async function handleBindings(env: ToastEnv): Promise<Response> {
   const hasTokenKV = !!(env as any).TOKEN_KV && typeof (env as any).TOKEN_KV.get === "function";
   const hasCacheKV = !!(env as any).CACHE_KV && typeof (env as any).CACHE_KV.get === "function";
 
