@@ -5,6 +5,7 @@
 import type { ToastEnv } from "../../../lib/env";
 import { jsonResponse } from "../../../lib/http";
 import { getAccessToken } from "../../../lib/toastAuth";
+import { paceBeforeToastCall } from "../../../lib/pacer";
 
 function headersToObject(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
@@ -31,15 +32,103 @@ function toToastIsoUtc(d: Date): string {
   return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
 }
 
-function looksLikeGuidArray(arr: unknown[]): boolean {
-  return arr.length > 0 && arr.every((v) => typeof v === "string");
+const EXPAND_FULL = [
+  "checks",
+  "items",
+  "payments",
+  "discounts",
+  "serviceCharges",
+  "customers",
+  "employee",
+];
+
+const MAX_RETRIES = 3;
+const PAGE_SIZE = 100;
+const MAX_PAGES = 50; // safety cap (5k orders in a single window is plenty)
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function topKeysOf(value: unknown, max = 20): string[] | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return Object.keys(value as Record<string, unknown>).slice(0, max);
+type OrdersBulkPage = {
+  orders: any[];
+  totalCount?: number;
+  page?: number;
+  pageSize?: number;
+  nextPage?: number | null;
+};
+
+async function fetchOrdersBulkPage(
+  url: string,
+  headers: Headers,
+  page: number
+): Promise<{ page: OrdersBulkPage; raw: any; responseHeaders: Record<string, string> }> {
+  let attempt = 0;
+
+  while (attempt < MAX_RETRIES) {
+    if (attempt > 0) {
+      // simple exponential backoff: 250ms, 500ms
+      await sleep(250 * Math.pow(2, attempt - 1));
+    }
+
+    await paceBeforeToastCall("orders", 220);
+
+    const res = await fetch(url, { method: "GET", headers });
+    const retryAfter = res.headers.get("Retry-After");
+
+    if (res.status === 429) {
+      await paceBeforeToastCall("orders", 220, retryAfter);
+      attempt += 1;
+      continue;
+    }
+
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // leave json = null for error reporting
+    }
+
+    const responseHeaders = headersToObject(res.headers);
+
+    if (!res.ok) {
+      throw {
+        status: res.status,
+        url,
+        body: json ?? (text?.slice(0, 1000) ?? null),
+        responseHeaders,
+      };
+    }
+
+    const orders: any[] = Array.isArray(json?.orders)
+      ? json.orders
+      : Array.isArray(json)
+      ? json
+      : [];
+
+    const pageData: OrdersBulkPage = {
+      orders,
+      totalCount: typeof json?.totalCount === "number" ? json.totalCount : undefined,
+      page: typeof json?.page === "number" ? json.page : page,
+      pageSize: typeof json?.pageSize === "number" ? json.pageSize : PAGE_SIZE,
+      nextPage:
+        typeof json?.nextPage === "number"
+          ? json.nextPage
+          : typeof json?.hasMore === "boolean" && json.hasMore
+          ? page + 1
+          : undefined,
+    };
+
+    return { page: pageData, raw: json, responseHeaders };
   }
-  return null;
+
+  throw {
+    status: 429,
+    url,
+    body: { message: "ordersBulk retry limit exceeded" },
+    responseHeaders: {},
+  };
 }
 
 export default async function handleOrdersLatest(env: ToastEnv, request: Request) {
@@ -49,130 +138,141 @@ export default async function handleOrdersLatest(env: ToastEnv, request: Request
   const wantDebug = url.searchParams.has("debug") || url.searchParams.get("debug") === "1";
 
   try {
-    // Build window
+    const startedAt = Date.now();
     const now = new Date();
     const start = new Date(now.getTime() - minutes * 60_000);
     const startDateIso = toToastIsoUtc(start);
     const endDateIso = toToastIsoUtc(now);
 
-    // Toast expand list for "full" orders
-    const expand = [
-      "checks",
-      "items",
-      "payments",
-      "discounts",
-      "serviceCharges",
-      "customers",
-      "employee",
-    ];
+    console.log(
+      `[orders/latest] start ${new Date(startedAt).toISOString()} window=${startDateIso}→${endDateIso}`
+    );
 
-    // Build URL
     const base = env.TOAST_API_BASE.replace(/\/+$/, "");
-    const route = "/orders/v2/orders";
-    const startDateParam = startDateIso.replace(/\+/g, "%2B");
-    const endDateParam = endDateIso.replace(/\+/g, "%2B");
-    const toastUrl =
-      `${base}${route}` +
-      `?restaurantGuid=${encodeURIComponent(env.TOAST_RESTAURANT_GUID)}` +
-      `&startDate=${startDateParam}` +
-      `&endDate=${endDateParam}` +
-      `&expand=${encodeURIComponent(expand.join(","))}`;
+    const route = "/orders/v2/ordersBulk";
 
-    // Auth header
     const token = await getAccessToken(env);
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${token}`,
-      accept: "application/json",
-      // Toast header accepts either kebab or pascal; using their doc style:
+    const headers = new Headers({
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
       "Toast-Restaurant-External-ID": env.TOAST_RESTAURANT_GUID,
-    };
+    });
 
-    const resp = await fetch(toastUrl, { headers, method: "GET" });
-    const status = resp.status;
-    const text = await resp.text();
+    const pageDebug: Array<{ page: number; url: string; returned: number }> = [];
+    const allOrders: any[] = [];
 
-    // Try parse JSON but keep original text for debugging
-    let json: any = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      // leave json = null
+    let page = 1;
+    let lastPageCount = 0;
+
+    while (page <= MAX_PAGES) {
+      const pageUrl = new URL(`${base}${route}`);
+      pageUrl.searchParams.set("startDate", startDateIso);
+      pageUrl.searchParams.set("endDate", endDateIso);
+      pageUrl.searchParams.set("pageSize", String(PAGE_SIZE));
+      pageUrl.searchParams.set("page", String(page));
+
+      const fullUrl = pageUrl.toString();
+
+      let pageResult: { page: OrdersBulkPage; raw: any; responseHeaders: Record<string, string> };
+
+      try {
+        pageResult = await fetchOrdersBulkPage(fullUrl, headers, page);
+      } catch (err: any) {
+        const status = typeof err?.status === "number" ? err.status : 500;
+        const errorBody = {
+          ok: false,
+          route: "/api/orders/latest",
+          minutes,
+          window: { start: startDateIso, end: endDateIso },
+          error: `Toast error ${status} on ${route}`,
+          toast: {
+            route,
+            url: fullUrl,
+            page,
+            headerUsed: "Toast-Restaurant-External-ID",
+            responseStatus: status,
+            responseHeaders: err?.responseHeaders ?? {},
+            body: err?.body ?? null,
+          },
+        };
+        return jsonResponse(errorBody, { status });
+      }
+
+      const orders = pageResult.page.orders ?? [];
+      pageDebug.push({ page, url: fullUrl, returned: orders.length });
+      allOrders.push(...orders);
+
+      lastPageCount = orders.length;
+
+      const hasMore =
+        (typeof pageResult.page.nextPage === "number" && pageResult.page.nextPage > page) ||
+        orders.length === PAGE_SIZE;
+
+      if (!hasMore) {
+        break;
+      }
+
+      page += 1;
     }
 
-    if (!resp.ok) {
-      // error path with max detail
-      const body = {
-        ok: false,
-        route: "/api/orders/latest",
-        minutes,
-        window: { start: startDateIso, end: endDateIso },
-        error: `Toast error ${status} on ${route}`,
-        toast: {
-          route,
-          url: toastUrl,
-          headerUsed: "Toast-Restaurant-External-ID",
-          expandUsed: expand.join(","),
-          responseStatus: status,
-          responseHeaders: headersToObject(resp.headers),
-          body: json ?? (text?.slice(0, 1000) ?? null),
-        },
-      };
-      return jsonResponse(body, { status });
+    if (page > MAX_PAGES && lastPageCount === PAGE_SIZE) {
+      console.warn(
+        `[orders/latest] hit MAX_PAGES=${MAX_PAGES} for window ${startDateIso}→${endDateIso}`
+      );
     }
 
-    // Success: Toast can return either a bare array or an object with an `orders` array.
-    const dataArray = Array.isArray(json) ? json : Array.isArray(json?.orders) ? json.orders : [];
-    const count = dataArray.length;
-    const ids = dataArray.map((o: any) => o?.guid).filter(Boolean);
+    // Sort by updatedDate desc when available
+    const sorted = allOrders.slice().sort((a, b) => {
+      const aTime = a?.updatedDate ? Date.parse(a.updatedDate) : 0;
+      const bTime = b?.updatedDate ? Date.parse(b.updatedDate) : 0;
+      return bTime - aTime;
+    });
 
-    const sample = count > 0 ? dataArray[0] : null;
-    const firstType = sample === null ? "null" : Array.isArray(sample) ? "array" : typeof sample;
-    const firstKeys = topKeysOf(sample);
+    const ids = Array.from(new Set(sorted.map((o: any) => o?.guid).filter(Boolean)));
 
-    const body: any = {
+    const responseBody: any = {
       ok: true,
       route: "/api/orders/latest",
       minutes,
       window: { start: startDateIso, end: endDateIso },
       detail: "full",
-      expandUsed: expand,
-      count,
+      expandUsed: EXPAND_FULL,
+      count: sorted.length,
       ids,
-      orders: dataArray, // full order objects here
+      orders: ids,
+      data: sorted,
     };
 
     if (wantDebug) {
-      body.debug = {
-        request: {
-          route,
-          url: toastUrl,
-          headerUsed: "Toast-Restaurant-External-ID",
-        },
-        lengths: { ids: ids.length, orders: dataArray.length },
-        shapes: {
-          dataIsArray: Array.isArray(json),
-          wrappedOrdersArray: Array.isArray(json?.orders),
-          looksLikeIdsOnly: looksLikeGuidArray(dataArray),
-          firstType,
-          firstKeys,
-        },
-        samples: {
-          first: sample,
-        },
+      responseBody.debug = {
+        pages: pageDebug,
+        totalReturned: sorted.length,
       };
     }
 
-    return jsonResponse(body);
+    const finishedAt = Date.now();
+    console.log(
+      `[orders/latest] finish ${new Date(finishedAt).toISOString()} count=${sorted.length} pages=${pageDebug.length} duration=${
+        finishedAt - startedAt
+      }ms`
+    );
+
+    return jsonResponse(responseBody);
   } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
     const msg =
-      typeof err?.message === "string" ? err.message : (err ? String(err) : "Unknown error");
+      typeof err?.message === "string"
+        ? err.message
+        : typeof err === "string"
+        ? err
+        : "Unknown error";
     return jsonResponse(
       {
         ok: false,
         route: "/api/orders/latest",
         error: msg,
       },
-      { status: 500 }
+      { status }
     );
   }
 }
