@@ -1,6 +1,6 @@
-import type { AppEnv } from "../../../config/env.js";
-import { getMenuItems, getSalesCategories } from "../../../clients/toast.js";
-import { jsonResponse } from "../../../lib/http.js";
+import type { ToastEnv } from "../../../lib/env";
+import { getMenuItems, getSalesCategories } from "../../../clients/toast";
+import { jsonResponse } from "../../../lib/http";
 
 const MAX_PAGES = 50;
 
@@ -12,7 +12,7 @@ export interface MenuDictDeps {
 export function createMenuDictHandler(
   deps: MenuDictDeps = { getMenuItems, getSalesCategories }
 ) {
-  return async function handleMenuDict(env: AppEnv, request: Request) {
+  return async function handleMenuDict(env: ToastEnv, request: Request) {
     const url = new URL(request.url);
     const lastModified = sanitizeLastModified(url.searchParams.get("lastModified"));
 
@@ -110,7 +110,7 @@ export function createMenuDictHandler(
 
 export default createMenuDictHandler();
 
-async function loadCategories(deps: MenuDictDeps, env: AppEnv): Promise<Map<string, string | null>> {
+async function loadCategories(deps: MenuDictDeps, env: ToastEnv): Promise<Map<string, string | null>> {
   const allCategories: any[] = [];
   let pageToken: string | null = null;
   let page = 0;
