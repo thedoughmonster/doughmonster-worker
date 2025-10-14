@@ -1,5 +1,6 @@
 import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
+import handleMenus from "./routes/api/menus.js";
 import handleOrdersLatest from "./routes/api/orders/latest.js";
 
 export default {
@@ -11,6 +12,10 @@ export default {
     try {
       if (request.method === "GET" && path === "/api/health") {
         return handleHealth();
+      }
+
+      if (request.method === "GET" && path === "/api/menus") {
+        return await handleMenus(env);
       }
 
       if (request.method === "GET" && path === "/api/orders/latest") {
