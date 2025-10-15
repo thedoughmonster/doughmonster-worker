@@ -1,23 +1,19 @@
 import type { AppEnv } from "../../config/env.js";
-import {
-  getMenuMetadata,
-  getPublishedMenus,
-  type MenuMetadataResponse,
-  type PublishedMenuResponse,
-} from "../../clients/toast.js";
+import { getMenuMetadata, getPublishedMenus } from "../../clients/toast.js";
 import { jsonResponse } from "../../lib/http.js";
+import type { ToastMenuMetadata, ToastMenusDocument } from "../../types/toast-menus.js";
 
 interface MenuCacheEntry {
   lastUpdated: string;
-  menu: PublishedMenuResponse | null;
+  menu: ToastMenusDocument | null;
   cachedAt: string;
 }
 
 let menuCache: MenuCacheEntry | null = null;
 
 export interface FetchMenusResult {
-  metadata: MenuMetadataResponse;
-  menu: PublishedMenuResponse | null;
+  metadata: ToastMenuMetadata;
+  menu: ToastMenusDocument | null;
   cacheHit: boolean;
 }
 
