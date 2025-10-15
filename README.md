@@ -1,6 +1,6 @@
 # Doughmonster Worker
 
-A minimal Cloudflare Worker that proxies Toast orders and menus for Doughmonster while exposing a basic health check. The worker owns Toast authentication, retry logic, and pagination so downstream clients only make a single request.
+A Cloudflare Worker that owns Toast authentication, pagination, and response shaping for Doughmonster. It exposes a handful of read-only endpoints so downstream clients only have to make simple HTTP requests.
 
 ## Endpoints
 | Method | Path | Description | Example |
@@ -8,19 +8,27 @@ A minimal Cloudflare Worker that proxies Toast orders and menus for Doughmonster
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders (default 60 minute window, max 120). Accepts `?minutes=` and optional `?debug=1` for diagnostics. | `curl -s "https://<worker>/api/orders/latest?minutes=30" \| jq` |
-| `GET` | `/api/orders/latest-with-menu` | Returns the most recent Toast orders enriched with menu metadata and flattened line items for human-readable output. Supports `?minutes=` (default 60, max 120) and optional `?debug=1`. | `curl -s "https://<worker>/api/orders/latest-with-menu?minutes=30" \| jq` |
+| `GET` | `/api/items-expanded` | Flattens Toast orders into individual line items enriched with menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?start=2024-01-01T00:00:00Z" \| jq` |
 
-The `/api/orders/latest` payload matches the previous public shape: `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`.
+### `/api/orders/latest`
+The handler accepts an optional `?minutes=` query parameter that clamps between 1 and 120 minutes (default 60) and fetches all pages from `orders/v2/ordersBulk` until no more data is available. It returns the familiar payload shape `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`. When `?debug=1` is present an additional `debug.pages` array is included that details each paginated request.
 
-The `/api/orders/latest-with-menu` payload extends the latest orders response with the full enriched order list and a `lineItems` array that exposes flattened selections. Each enriched order includes cross-referenced menu information (item names, modifier groups/options, and pre-modifiers) when available so downstream clients can render human-readable entries without additional Toast lookups.
+### `/api/items-expanded`
+This endpoint is designed for dashboards that need flattened line items. It:
 
-The `/api/menus` response looks like `{ ok, metadata, menu, cacheHit }` where:
+- Accepts optional ISO-8601 `start`/`end` query parameters defining the Toast order window (defaulting to the last 24 hours ending at "now").
+- Supports optional `status` and `locationId` filters and a `limit` (default 500, maximum 5000).
+- Fetches the published menu document once per request to cross-reference item and modifier names.
+- Returns `{ items: ExpandedItem[] }` where each item includes order metadata, timing information, the resolved item/modifier names, special instructions, and price/currency details when available.
+
+### `/api/menus`
+`/api/menus` returns `{ ok, metadata, menu, cacheHit }` where:
 
 - `metadata` mirrors Toast's `menus/v2/metadata` payload so clients can track last update timestamps.
 - `menu` matches the Toast `menus/v2/menus` response or `null` when Toast has no published menu data.
 - `cacheHit` reports whether the worker served the data from its in-memory cache (see below).
 
-### Menu caching strategy
+#### Menu caching strategy
 
 The worker keeps the most recent published menu in memory and reuses it until Toast reports a different `lastUpdated` value. This minimizes Toast API traffic while still returning fresh data as soon as Toast publishes a new menu. The cache is per-worker instance and resets when the worker is cold-started or redeployed.
 
@@ -50,12 +58,3 @@ npm run dev
 wrangler deploy
 ```
 Configure secrets/KV bindings via `wrangler.toml`, `.dev.vars`, or the Cloudflare dashboard before running locally or deploying.
-
-## Changelog (cleanup)
-- Restored menu access via `/api/menus` with lightweight in-memory caching keyed by Toast metadata updates.
-- Replaced the scattered HTTP/auth helpers with a single fetch retry helper, a Toast auth module, and a focused Toast client.
-- Centralized environment validation in `src/config/env.ts` and trimmed unused bindings (menu cache, rate limiting, debug handlers).
-- Added Node-based unit tests for `fetchWithBackoff` and `/api/orders/latest` along with a build config that emits to `dist/` for testing.
-
-## Restoring deprecated code
-No files were moved to `deprecated/`. To recover the old endpoints or helpers, restore them from Git history prior to this cleanup.
