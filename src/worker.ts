@@ -2,6 +2,7 @@ import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
 import handleMenus from "./routes/api/menus.js";
 import handleOrdersLatest from "./routes/api/orders/latest.js";
+import handleItemsExpanded from "./routes/items-expanded.js";
 
 export default {
   async fetch(request: Request, rawEnv: Record<string, unknown>): Promise<Response> {
@@ -20,6 +21,10 @@ export default {
 
       if (request.method === "GET" && path === "/api/orders/latest") {
         return await handleOrdersLatest(env, request);
+      }
+
+      if (request.method === "GET" && path === "/api/items-expanded") {
+        return await handleItemsExpanded(env, request);
       }
 
       return new Response(
