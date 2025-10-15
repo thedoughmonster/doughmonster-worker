@@ -21,6 +21,15 @@ The `/api/menus` response looks like `{ ok, metadata, menu, cacheHit }` where:
 
 The worker keeps the most recent published menu in memory and reuses it until Toast reports a different `lastUpdated` value. This minimizes Toast API traffic while still returning fresh data as soon as Toast publishes a new menu. The cache is per-worker instance and resets when the worker is cold-started or redeployed.
 
+## Toast API schemas and TypeScript types
+
+The repository vendors the official Toast OpenAPI definitions for menus and orders under `src/schemas/`:
+
+- `src/schemas/toast-menus-api.yaml`
+- `src/schemas/toast-orders-api.yaml`
+
+Lightweight TypeScript bindings derived from these schemas live in `src/types/`. When you add a new endpoint or need additional fields, extend the relevant type instead of using `any` and refer back to the YAML schema for the authoritative shape. This keeps runtime code aligned with the upstream API while preserving strict typing across the worker.
+
 ## Environment variables
 | Name | Type | Purpose |
 | ---- | ---- | ------- |

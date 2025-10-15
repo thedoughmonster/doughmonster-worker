@@ -26,9 +26,9 @@ test('orders/latest returns sorted orders with deduped ids', async () => {
       if (params.page === 1) {
         return {
           orders: [
-            { guid: 'order-b', updatedDate: '2023-10-10T12:00:00Z' },
-            { guid: 'order-a', updatedDate: '2023-10-10T13:00:00Z' },
-            { guid: 'order-a', updatedDate: '2023-10-10T11:00:00Z' },
+            { guid: 'order-b', modifiedDate: '2023-10-10T12:00:00Z' },
+            { guid: 'order-a', modifiedDate: '2023-10-10T13:00:00Z' },
+            { guid: 'order-a', modifiedDate: '2023-10-10T11:00:00Z' },
           ],
           nextPage: null,
         };
