@@ -8,11 +8,8 @@ A minimal Cloudflare Worker that proxies Toast orders and menus for Doughmonster
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders (default 60 minute window, max 120). Accepts `?minutes=` and optional `?debug=1` for diagnostics. | `curl -s "https://<worker>/api/orders/latest?minutes=30" \| jq` |
-| `GET` | `/api/orders/latest-with-menu` | Returns the most recent Toast orders enriched with menu metadata and flattened line items for human-readable output. Supports `?minutes=` (default 60, max 120) and optional `?debug=1`. | `curl -s "https://<worker>/api/orders/latest-with-menu?minutes=30" \| jq` |
 
 The `/api/orders/latest` payload matches the previous public shape: `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`.
-
-The `/api/orders/latest-with-menu` payload extends the latest orders response with the full enriched order list and a `lineItems` array that exposes flattened selections. Each enriched order includes cross-referenced menu information (item names, modifier groups/options, and pre-modifiers) when available so downstream clients can render human-readable entries without additional Toast lookups.
 
 The `/api/menus` response looks like `{ ok, metadata, menu, cacheHit }` where:
 
