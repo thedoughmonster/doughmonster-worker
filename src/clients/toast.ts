@@ -1,15 +1,6 @@
 import type { AppEnv } from "../config/env.js";
 import { getToastHeaders } from "../lib/auth.js";
 import { fetchWithBackoff } from "../lib/http.js";
-import type {
-  ToastMenuMetadata,
-  ToastMenusDocument,
-} from "../types/toast-menus.js";
-import type {
-  ToastOrder,
-  ToastOrdersBulkEnvelope,
-  ToastOrdersBulkResponse,
-} from "../types/toast-orders.js";
 
 export interface GetOrdersBulkParams {
   startIso: string;
@@ -19,14 +10,21 @@ export interface GetOrdersBulkParams {
 }
 
 export interface OrdersBulkResult {
-  orders: ToastOrder[];
+  orders: any[];
   totalCount?: number;
   page?: number;
   pageSize?: number;
   nextPage?: number | null;
-  raw: ToastOrdersBulkResponse;
+  raw: any;
   responseHeaders: Record<string, string>;
 }
+
+export interface MenuMetadataResponse {
+  restaurantGuid: string;
+  lastUpdated: string;
+}
+
+export type PublishedMenuResponse = any;
 
 export async function getOrdersBulk(env: AppEnv, params: GetOrdersBulkParams): Promise<OrdersBulkResult> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
@@ -40,63 +38,53 @@ export async function getOrdersBulk(env: AppEnv, params: GetOrdersBulkParams): P
   const response = await fetchWithBackoff(url.toString(), { method: "GET", headers });
   const text = await response.text();
 
-  let json: ToastOrdersBulkResponse = null;
+  let json: any = null;
   try {
-    json = text ? (JSON.parse(text) as ToastOrdersBulkResponse) : null;
+    json = text ? JSON.parse(text) : null;
   } catch {
     json = null;
   }
 
-  const orders = Array.isArray((json as ToastOrdersBulkEnvelope | null)?.orders)
-    ? ((json as ToastOrdersBulkEnvelope).orders ?? [])
+  const orders = Array.isArray(json?.orders)
+    ? json.orders
     : Array.isArray(json)
     ? json
     : [];
 
   const nextPage =
-    typeof (json as ToastOrdersBulkEnvelope | null)?.nextPage === "number"
-      ? (json as ToastOrdersBulkEnvelope).nextPage
-      : typeof (json as ToastOrdersBulkEnvelope | null)?.hasMore === "boolean" &&
-        Boolean((json as ToastOrdersBulkEnvelope).hasMore)
+    typeof json?.nextPage === "number"
+      ? json.nextPage
+      : typeof json?.hasMore === "boolean" && json.hasMore
       ? params.page + 1
       : null;
 
   return {
     orders,
-    totalCount:
-      typeof (json as ToastOrdersBulkEnvelope | null)?.totalCount === "number"
-        ? (json as ToastOrdersBulkEnvelope).totalCount
-        : undefined,
-    page:
-      typeof (json as ToastOrdersBulkEnvelope | null)?.page === "number"
-        ? (json as ToastOrdersBulkEnvelope).page
-        : params.page,
-    pageSize:
-      typeof (json as ToastOrdersBulkEnvelope | null)?.pageSize === "number"
-        ? (json as ToastOrdersBulkEnvelope).pageSize
-        : params.pageSize,
+    totalCount: typeof json?.totalCount === "number" ? json.totalCount : undefined,
+    page: typeof json?.page === "number" ? json.page : params.page,
+    pageSize: typeof json?.pageSize === "number" ? json.pageSize : params.pageSize,
     nextPage,
     raw: json,
     responseHeaders: headersToObject(response.headers),
   };
 }
 
-export async function getOrderById(env: AppEnv, guid: string): Promise<ToastOrder> {
+export async function getOrderById(env: AppEnv, guid: string): Promise<any> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = `${base}/orders/v2/orders/${encodeURIComponent(guid)}`;
   const headers = await getToastHeaders(env);
   const response = await fetchWithBackoff(url, { method: "GET", headers });
-  return (await response.json()) as ToastOrder;
+  return response.json();
 }
 
-export async function getMenuMetadata(env: AppEnv): Promise<ToastMenuMetadata | null> {
+export async function getMenuMetadata(env: AppEnv): Promise<MenuMetadataResponse | null> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = `${base}/menus/v2/metadata`;
   const headers = await getToastHeaders(env);
 
   try {
     const response = await fetchWithBackoff(url, { method: "GET", headers });
-    return (await response.json()) as ToastMenuMetadata;
+    return (await response.json()) as MenuMetadataResponse;
   } catch (err) {
     if (isToastNotFound(err)) {
       return null;
@@ -105,7 +93,7 @@ export async function getMenuMetadata(env: AppEnv): Promise<ToastMenuMetadata | 
   }
 }
 
-export async function getPublishedMenus(env: AppEnv): Promise<ToastMenusDocument | null> {
+export async function getPublishedMenus(env: AppEnv): Promise<PublishedMenuResponse | null> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = `${base}/menus/v2/menus`;
   const headers = await getToastHeaders(env);
@@ -113,7 +101,7 @@ export async function getPublishedMenus(env: AppEnv): Promise<ToastMenusDocument
   try {
     const response = await fetchWithBackoff(url, { method: "GET", headers });
     const text = await response.text();
-    return text ? (JSON.parse(text) as ToastMenusDocument) : null;
+    return text ? JSON.parse(text) : null;
   } catch (err) {
     if (isToastNotFound(err)) {
       return null;

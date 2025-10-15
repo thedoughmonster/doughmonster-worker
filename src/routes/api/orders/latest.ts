@@ -1,7 +1,6 @@
 import type { AppEnv } from "../../../config/env.js";
 import { getOrdersBulk } from "../../../clients/toast.js";
 import { jsonResponse } from "../../../lib/http.js";
-import type { ToastOrder } from "../../../types/toast-orders.js";
 
 const EXPAND_FULL = [
   "checks",
@@ -41,7 +40,7 @@ export function createOrdersLatestHandler(
       );
 
       const pageDebug: Array<{ page: number; url: string; returned: number }> = [];
-      const allOrders: ToastOrder[] = [];
+      const allOrders: any[] = [];
 
       let page = 1;
       let lastPageCount = 0;
@@ -82,14 +81,14 @@ export function createOrdersLatestHandler(
       }
 
       const sorted = allOrders.slice().sort((a, b) => {
-        const aTime = a.modifiedDate ? Date.parse(a.modifiedDate) : 0;
-        const bTime = b.modifiedDate ? Date.parse(b.modifiedDate) : 0;
+        const aTime = a?.updatedDate ? Date.parse(a.updatedDate) : 0;
+        const bTime = b?.updatedDate ? Date.parse(b.updatedDate) : 0;
         return bTime - aTime;
       });
 
-      const ids = Array.from(new Set(sorted.map((order) => order.guid).filter(Boolean)));
+      const ids = Array.from(new Set(sorted.map((order: any) => order?.guid).filter(Boolean)));
 
-      const responseBody: Record<string, unknown> = {
+      const responseBody: any = {
         ok: true,
         route: "/api/orders/latest",
         minutes,
