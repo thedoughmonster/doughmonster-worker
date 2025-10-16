@@ -34,6 +34,7 @@ export interface ExpandedOrderItem {
   menuItemId?: string | null;
   itemName: string;
   quantity: number;
+  fulfillmentStatus: ItemFulfillmentStatus | null;
   modifiers: OrderItemModifier[];
   specialInstructions?: string | null;
   money?: OrderItemMoney;
@@ -104,10 +105,11 @@ export interface OrderDataBlock {
   orderNumber: string | null;
   checkId: string | null;
   status: string | null;
-  fulfillmentStatus: ItemFulfillmentStatus | null;
+  fulfillmentStatus: string | null;
   customerName: string | null;
   orderType: OrderType;
   diningOptionGuid: string | null;
+  deliveryState?: string | null;
   deliveryInfo?: Record<string, unknown>;
   curbsidePickupInfo?: Record<string, unknown>;
   table?: Record<string, unknown>;
@@ -119,15 +121,7 @@ export interface OrderDataBlock {
 
 export interface ExpandedOrder {
   orderData: OrderDataBlock;
-  orderId: string;
-  orderNumber?: string | null;
-  checkId?: string | null;
-  status?: string | null;
   currency?: string | null;
-  customerName?: string | null;
-  orderType: OrderType;
-  location: { locationId?: string | null };
-  times: { orderTime: string; timeDue?: string | null };
   items: ExpandedOrderItem[];
   totals: {
     baseItemsSubtotalCents: number;
@@ -145,7 +139,11 @@ interface OrderAccumulator {
   orderNumber: string | null;
   checkId: string | null;
   status: string | null;
-  fulfillmentStatus: ItemFulfillmentStatus | null;
+  webhookFulfillmentStatus: string | null;
+  selectionFulfillmentStatus: ItemFulfillmentStatus | null;
+  hasItemFulfillmentStatuses: boolean;
+  anyItemStatusNotReady: boolean;
+  allItemStatusesReady: boolean;
   currency: string | null;
   customerName: string | null;
   orderType: OrderType;
@@ -154,6 +152,7 @@ interface OrderAccumulator {
   orderTime: string;
   orderTimeMs: number | null;
   timeDue: string | null;
+  deliveryState: string | null;
   deliveryInfo?: Record<string, unknown> | null;
   curbsidePickupInfo?: Record<string, unknown> | null;
   dineInTable?: Record<string, unknown> | null;
@@ -173,6 +172,7 @@ interface OrderAccumulator {
 interface OrderBehaviorMetadata {
   orderType: OrderType;
   diningOptionGuid: string | null;
+  deliveryState?: string | null;
   deliveryInfo?: Record<string, unknown> | null;
   curbsidePickupInfo?: Record<string, unknown> | null;
   dineInTable?: Record<string, unknown> | null;
@@ -284,13 +284,15 @@ export function createItemsExpandedHandler(
               diningOptionResolver
             );
             const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
+            const webhookFulfillmentStatus = extractGuestOrderFulfillmentStatus(order, check);
             const key = `${order.guid}:${check.guid}`;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
               orderNumber,
               checkId: check.guid ?? null,
               status: orderStatus,
-              fulfillmentStatus: initialFulfillmentStatus ?? null,
+              webhookFulfillmentStatus: webhookFulfillmentStatus ?? null,
+              selectionFulfillmentStatus: initialFulfillmentStatus ?? null,
               currency: orderCurrency,
               customerName,
               orderType: behaviorMeta.orderType,
@@ -299,6 +301,7 @@ export function createItemsExpandedHandler(
               orderTime,
               orderTimeMs,
               timeDue,
+              deliveryState: behaviorMeta.deliveryState ?? null,
               deliveryInfo: behaviorMeta.deliveryInfo ?? null,
               curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
               dineInTable: behaviorMeta.dineInTable ?? null,
@@ -312,7 +315,8 @@ export function createItemsExpandedHandler(
             updateAccumulatorMeta(accumulator, {
               orderNumber,
               status: orderStatus,
-              fulfillmentStatus: initialFulfillmentStatus ?? null,
+              webhookFulfillmentStatus: webhookFulfillmentStatus ?? null,
+              selectionFulfillmentStatus: initialFulfillmentStatus ?? null,
               currency: orderCurrency,
               customerName,
               orderType: behaviorMeta.orderType,
@@ -321,6 +325,7 @@ export function createItemsExpandedHandler(
               orderTime,
               orderTimeMs,
               timeDue,
+              deliveryState: behaviorMeta.deliveryState ?? null,
               deliveryInfo: behaviorMeta.deliveryInfo ?? null,
               curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
               dineInTable: behaviorMeta.dineInTable ?? null,
@@ -349,10 +354,19 @@ export function createItemsExpandedHandler(
                 (selection as any)?.fulfillmentStatus
               );
               if (selectionFulfillmentStatus) {
-                accumulator.fulfillmentStatus = mergeFulfillmentStatuses(
-                  accumulator.fulfillmentStatus,
+                accumulator.selectionFulfillmentStatus = mergeFulfillmentStatuses(
+                  accumulator.selectionFulfillmentStatus,
                   selectionFulfillmentStatus
                 );
+                accumulator.hasItemFulfillmentStatuses = true;
+                if (selectionFulfillmentStatus === "READY") {
+                  if (!accumulator.anyItemStatusNotReady) {
+                    accumulator.allItemStatusesReady = true;
+                  }
+                } else {
+                  accumulator.anyItemStatusNotReady = true;
+                  accumulator.allItemStatusesReady = false;
+                }
               }
 
               const menuItem = menuIndex.findItem(selection.item);
@@ -407,6 +421,7 @@ export function createItemsExpandedHandler(
                 menuItemId,
                 itemName,
                 quantity,
+                fulfillmentStatus: selectionFulfillmentStatus,
                 modifiers: modifierDetails.modifiers,
               };
 
@@ -647,7 +662,8 @@ function getOrCreateAccumulator(
     orderNumber: string | null;
     checkId: string | null;
     status: string | null;
-    fulfillmentStatus?: ItemFulfillmentStatus | null;
+    webhookFulfillmentStatus?: string | null;
+    selectionFulfillmentStatus?: ItemFulfillmentStatus | null;
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
@@ -656,6 +672,7 @@ function getOrCreateAccumulator(
     orderTime: string;
     orderTimeMs: number | null;
     timeDue: string | null;
+    deliveryState?: string | null;
     deliveryInfo?: Record<string, unknown> | null;
     curbsidePickupInfo?: Record<string, unknown> | null;
     dineInTable?: Record<string, unknown> | null;
@@ -673,7 +690,11 @@ function getOrCreateAccumulator(
       orderNumber: seed.orderNumber ?? null,
       checkId: seed.checkId ?? null,
       status: seed.status ?? null,
-      fulfillmentStatus: seed.fulfillmentStatus ?? null,
+      webhookFulfillmentStatus: seed.webhookFulfillmentStatus ?? null,
+      selectionFulfillmentStatus: seed.selectionFulfillmentStatus ?? null,
+      hasItemFulfillmentStatuses: false,
+      anyItemStatusNotReady: false,
+      allItemStatusesReady: true,
       currency: seed.currency ?? null,
       customerName: seed.customerName ?? null,
       orderType: seed.orderType ?? "UNKNOWN",
@@ -682,6 +703,7 @@ function getOrCreateAccumulator(
       orderTime: seed.orderTime,
       orderTimeMs: seed.orderTimeMs ?? null,
       timeDue: seed.timeDue ?? null,
+      deliveryState: seed.deliveryState ?? null,
       deliveryInfo: seed.deliveryInfo ?? null,
       curbsidePickupInfo: seed.curbsidePickupInfo ?? null,
       dineInTable: seed.dineInTable ?? null,
@@ -715,7 +737,8 @@ function updateAccumulatorMeta(
   meta: {
     orderNumber: string | null;
     status: string | null;
-    fulfillmentStatus?: ItemFulfillmentStatus | null;
+    webhookFulfillmentStatus?: string | null;
+    selectionFulfillmentStatus?: ItemFulfillmentStatus | null;
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
@@ -724,6 +747,7 @@ function updateAccumulatorMeta(
     orderTime: string;
     orderTimeMs: number | null;
     timeDue: string | null;
+    deliveryState?: string | null;
     deliveryInfo?: Record<string, unknown> | null;
     curbsidePickupInfo?: Record<string, unknown> | null;
     dineInTable?: Record<string, unknown> | null;
@@ -739,10 +763,13 @@ function updateAccumulatorMeta(
   if (meta.status && !accumulator.status) {
     accumulator.status = meta.status;
   }
-  if (meta.fulfillmentStatus) {
-    accumulator.fulfillmentStatus = mergeFulfillmentStatuses(
-      accumulator.fulfillmentStatus,
-      meta.fulfillmentStatus
+  if (meta.webhookFulfillmentStatus && !accumulator.webhookFulfillmentStatus) {
+    accumulator.webhookFulfillmentStatus = meta.webhookFulfillmentStatus;
+  }
+  if (meta.selectionFulfillmentStatus) {
+    accumulator.selectionFulfillmentStatus = mergeFulfillmentStatuses(
+      accumulator.selectionFulfillmentStatus,
+      meta.selectionFulfillmentStatus
     );
   }
   if (meta.currency && !accumulator.currency) {
@@ -762,6 +789,9 @@ function updateAccumulatorMeta(
   }
   if (meta.timeDue && !accumulator.timeDue) {
     accumulator.timeDue = meta.timeDue;
+  }
+  if (meta.deliveryState && !accumulator.deliveryState) {
+    accumulator.deliveryState = meta.deliveryState;
   }
   if (meta.deliveryInfo && !accumulator.deliveryInfo) {
     accumulator.deliveryInfo = meta.deliveryInfo;
@@ -843,19 +873,6 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
   const tip = entry.tipCents;
   const subtotal = base + modifiers;
   const grand = Math.max(subtotal - discount + service + tip, 0);
-
-  const location: { locationId?: string | null } = {};
-  if (entry.locationId) {
-    location.locationId = entry.locationId;
-  }
-
-  const times: { orderTime: string; timeDue?: string | null } = {
-    orderTime: entry.orderTime,
-  };
-  if (entry.timeDue) {
-    times.timeDue = entry.timeDue;
-  }
-
   const orderDataLocation: { locationId?: string | null } = {};
   if (entry.locationId) {
     orderDataLocation.locationId = entry.locationId;
@@ -869,12 +886,15 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
     orderNumber: entry.orderNumber ?? null,
     checkId: entry.checkId ?? null,
     status: entry.status ?? null,
-    fulfillmentStatus: entry.fulfillmentStatus ?? null,
+    fulfillmentStatus: deriveOrderFulfillmentStatus(entry),
     customerName: entry.customerName ?? null,
     orderType: entry.orderType ?? "UNKNOWN",
     diningOptionGuid: entry.diningOptionGuid ?? null,
   };
 
+  if (entry.deliveryState) {
+    orderData.deliveryState = entry.deliveryState;
+  }
   if (entry.deliveryInfo) {
     orderData.deliveryInfo = entry.deliveryInfo;
   }
@@ -902,10 +922,6 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
 
   const order: ExpandedOrder = {
     orderData,
-    orderId: entry.orderId,
-    orderType: entry.orderType ?? "UNKNOWN",
-    location,
-    times,
     items: entry.items,
     totals: {
       baseItemsSubtotalCents: base,
@@ -917,23 +933,62 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
     },
   };
 
-  if (entry.orderNumber) {
-    order.orderNumber = entry.orderNumber;
-  }
-  if (entry.checkId) {
-    order.checkId = entry.checkId;
-  }
-  if (entry.status) {
-    order.status = entry.status;
-  }
   if (entry.currency) {
     order.currency = entry.currency;
   }
-  if (entry.customerName) {
-    order.customerName = entry.customerName;
-  }
 
   return order;
+}
+
+function deriveOrderFulfillmentStatus(entry: OrderAccumulator): string | null {
+  if (entry.webhookFulfillmentStatus) {
+    const normalized = normalizeGuestFulfillmentStatus(entry.webhookFulfillmentStatus);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  if (entry.hasItemFulfillmentStatuses) {
+    if (entry.anyItemStatusNotReady) {
+      return "IN_PREPARATION";
+    }
+    if (entry.allItemStatusesReady) {
+      return "READY_FOR_PICKUP";
+    }
+  }
+
+  return null;
+}
+
+function normalizeGuestFulfillmentStatus(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidates = [
+    (value as any)?.status,
+    (value as any)?.currentStatus,
+    (value as any)?.value,
+    (value as any)?.state,
+    (value as any)?.fulfillmentStatus,
+    (value as any)?.newStatus,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function collectModifierDetails(
@@ -990,35 +1045,58 @@ function collectModifierDetails(
 }
 
 function collapseOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemModifier[] {
-  const order: string[] = [];
-  const aggregated = new Map<string, OrderItemModifier>();
+  const aggregated: OrderItemModifier[] = [];
 
   for (const modifier of modifiers) {
-    const key =
-      modifier.id ?? `name:${modifier.name}::group:${modifier.groupName ?? ""}`;
+    const candidateId = modifier.id ?? null;
+    const candidateName = modifier.name;
+    const candidateGroup = modifier.groupName ?? null;
 
-    if (!aggregated.has(key)) {
-      aggregated.set(key, {
-        id: modifier.id,
-        name: modifier.name,
-        groupName: modifier.groupName ?? null,
+    const existing = aggregated.find((entry) => {
+      if (entry.id !== candidateId) {
+        return false;
+      }
+      if (entry.name !== candidateName) {
+        return false;
+      }
+
+      if (entry.groupName === candidateGroup) {
+        return true;
+      }
+
+      if (entry.groupName === null || candidateGroup === null) {
+        return true;
+      }
+
+      return false;
+    });
+
+    if (!existing) {
+      aggregated.push({
+        id: candidateId,
+        name: candidateName,
+        groupName: candidateGroup,
         priceCents: modifier.priceCents,
         quantity: modifier.quantity,
       });
-      order.push(key);
       continue;
     }
 
-    const entry = aggregated.get(key)!;
-    entry.quantity += modifier.quantity;
-    entry.priceCents += modifier.priceCents;
+    existing.quantity += modifier.quantity;
+    existing.priceCents += modifier.priceCents;
 
-    if ((entry.groupName === null || entry.groupName === undefined) && modifier.groupName) {
-      entry.groupName = modifier.groupName;
+    if ((existing.groupName === null || existing.groupName === undefined) && candidateGroup) {
+      existing.groupName = candidateGroup;
     }
   }
 
-  return order.map((key) => aggregated.get(key)!);
+  return aggregated.map((entry) => ({
+    id: entry.id ?? null,
+    name: entry.name,
+    groupName: entry.groupName ?? null,
+    priceCents: entry.priceCents,
+    quantity: entry.quantity,
+  }));
 }
 
 function sumDiscountAmounts(discounts: unknown): number {
@@ -1249,6 +1327,72 @@ function extractOrderFulfillmentStatus(order: ToastOrder, check: ToastCheck): It
   return null;
 }
 
+function extractGuestOrderFulfillmentStatus(order: ToastOrder, check: ToastCheck): string | null {
+  const directCandidates: unknown[] = [];
+  const push = (value: unknown) => {
+    if (value !== undefined && value !== null) {
+      directCandidates.push(value);
+    }
+  };
+
+  push((check as any)?.guestOrderFulfillmentStatus);
+  push((check as any)?.guestOrderFulfillmentStatus?.status);
+  push((check as any)?.guestFulfillmentStatus);
+  push((check as any)?.guestFulfillmentStatus?.status);
+  push((check as any)?.fulfillmentStatusWebhook);
+  push((check as any)?.fulfillmentStatusWebhook?.status);
+  push((order as any)?.guestOrderFulfillmentStatus);
+  push((order as any)?.guestOrderFulfillmentStatus?.status);
+  push((order as any)?.guestFulfillmentStatus);
+  push((order as any)?.guestFulfillmentStatus?.status);
+  push((order as any)?.context?.guestOrderFulfillmentStatus);
+  push((order as any)?.context?.guestOrderFulfillmentStatus?.status);
+  push((order as any)?.context?.guestFulfillmentStatus);
+  push((order as any)?.context?.guestFulfillmentStatus?.status);
+
+  for (const candidate of directCandidates) {
+    const normalized = normalizeGuestFulfillmentStatus(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
+  const historySources: unknown[] = [
+    (check as any)?.guestOrderFulfillmentStatusHistory,
+    (check as any)?.guestFulfillmentStatusHistory,
+    (check as any)?.fulfillmentStatusHistory,
+    (order as any)?.guestOrderFulfillmentStatusHistory,
+    (order as any)?.guestFulfillmentStatusHistory,
+    (order as any)?.fulfillmentStatusHistory,
+    (order as any)?.context?.guestOrderFulfillmentStatusHistory,
+    (order as any)?.context?.guestFulfillmentStatusHistory,
+    (order as any)?.context?.fulfillmentStatusHistory,
+  ];
+
+  for (const source of historySources) {
+    if (!Array.isArray(source)) {
+      continue;
+    }
+
+    for (let i = source.length - 1; i >= 0; i -= 1) {
+      const entry = source[i];
+      const normalized = normalizeGuestFulfillmentStatus(entry);
+      if (normalized) {
+        return normalized;
+      }
+
+      if (entry && typeof entry === "object") {
+        const nested = normalizeGuestFulfillmentStatus((entry as any)?.payload);
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 function extractOrderCurrency(order: ToastOrder): string | null {
   const maybe = [(order as any)?.currency, (order as any)?.currencyCode];
   for (const candidate of maybe) {
@@ -1462,6 +1606,10 @@ function collectBehaviorEnrichments(
     if (delivery) {
       enrichment.deliveryInfo = delivery;
     }
+    const deliveryState = extractDeliveryState(order, check);
+    if (deliveryState) {
+      enrichment.deliveryState = deliveryState;
+    }
   }
 
   if (orderType === "CURBSIDE") {
@@ -1581,6 +1729,30 @@ function extractDeliveryInfo(order: ToastOrder, check: ToastCheck): Record<strin
   }
 
   return hasInfo ? info : null;
+}
+
+function extractDeliveryState(order: ToastOrder, check: ToastCheck): string | null {
+  const sources = [
+    (order as any)?.deliveryInfo,
+    (order as any)?.context?.deliveryInfo,
+    (check as any)?.deliveryInfo,
+  ];
+
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+
+    const state = (source as any)?.deliveryState ?? (source as any)?.state;
+    if (typeof state === "string") {
+      const trimmed = state.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+
+  return null;
 }
 
 function extractCurbsidePickupInfo(order: ToastOrder, check: ToastCheck): Record<string, unknown> | null {
