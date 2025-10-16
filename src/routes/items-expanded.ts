@@ -5,8 +5,8 @@ import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
 const DEFAULT_RANGE_MS = 2 * 60 * 60 * 1000; // 2 hours
-const DEFAULT_LIMIT = 500;
-const MAX_LIMIT = 5000;
+const DEFAULT_LIMIT = 15;
+const MAX_LIMIT = 500;
 const PAGE_SIZE = 100;
 
 export interface ItemsExpandedDeps {
@@ -14,25 +14,68 @@ export interface ItemsExpandedDeps {
   getPublishedMenus: typeof getPublishedMenus;
 }
 
-export interface ExpandedItem {
+export interface OrderItemModifier {
+  id: string | null;
+  name: string;
+  groupName?: string | null;
+  priceCents: number;
+}
+
+export interface OrderItemMoney {
+  baseItemPriceCents?: number;
+  modifierTotalCents?: number;
+  totalItemPriceCents?: number;
+}
+
+export interface ExpandedOrderItem {
+  lineItemId: string;
+  menuItemId?: string | null;
+  itemName: string;
+  quantity: number;
+  modifiers: OrderItemModifier[];
+  specialInstructions?: string | null;
+  money?: OrderItemMoney;
+}
+
+export interface ExpandedOrder {
   orderId: string;
   orderNumber?: string | null;
   checkId?: string | null;
-  lineItemId: string;
-  menuItemId?: string | null;
-  order: {
-    customerName?: string | null;
-    locationId?: string | null;
-    status?: string | null;
-  };
+  status?: string | null;
+  currency?: string | null;
+  customerName?: string | null;
+  location: { locationId?: string | null };
   times: { orderTime: string; timeDue?: string | null };
-  item: {
-    itemName: string;
-    itemModifiers: string[];
-    quantity: 1;
-    specialInstructions?: string | null;
+  items: ExpandedOrderItem[];
+  totals: {
+    baseItemsSubtotalCents: number;
+    modifiersSubtotalCents: number;
+    discountTotalCents: number;
+    serviceChargeCents: number;
+    tipCents: number;
+    grandTotalCents: number;
   };
-  money?: { itemPrice?: number | null; currency?: string | null };
+}
+
+interface OrderAccumulator {
+  key: string;
+  orderId: string;
+  orderNumber: string | null;
+  checkId: string | null;
+  status: string | null;
+  currency: string | null;
+  customerName: string | null;
+  locationId: string | null;
+  orderTime: string;
+  orderTimeMs: number | null;
+  timeDue: string | null;
+  items: ExpandedOrderItem[];
+  baseItemsSubtotalCents: number;
+  modifiersSubtotalCents: number;
+  discountTotalCents: number;
+  serviceChargeCents: number;
+  tipCents: number;
+  checkTotalsHydrated: boolean;
 }
 
 export function createItemsExpandedHandler(
@@ -76,10 +119,10 @@ export function createItemsExpandedHandler(
       const menuDoc = await deps.getPublishedMenus(env);
       const menuIndex = createMenuIndex(menuDoc);
 
-      const expanded: ExpandedItem[] = [];
+      const aggregates = new Map<string, OrderAccumulator>();
       let page = 1;
 
-      while (expanded.length < limit) {
+      while (true) {
         const { orders, nextPage } = await deps.getOrdersBulk(env, {
           startIso,
           endIso,
@@ -105,25 +148,60 @@ export function createItemsExpandedHandler(
             continue;
           }
 
+          const orderTimeMs = parseToastTimestamp(orderTime);
           const timeDue = extractOrderDueTime(order);
           const orderNumber = extractOrderNumber(order);
           const locationId = extractOrderLocation(order);
           const orderStatus = extractOrderStatus(order);
           const orderCurrency = extractOrderCurrency(order);
 
-          for (const check of Array.isArray(order.checks) ? order.checks : []) {
+          const checks = Array.isArray(order.checks) ? order.checks : [];
+          for (const check of checks) {
             if (!check || typeof check.guid !== "string") {
               continue;
             }
 
-            const customerName = extractCustomerName(order, check);
+            if ((check as any)?.deleted) {
+              continue;
+            }
 
-            for (const selection of Array.isArray(check.selections) ? check.selections : []) {
+            const customerName = extractCustomerName(order, check);
+            const key = `${order.guid}:${check.guid}`;
+            const accumulator = getOrCreateAccumulator(aggregates, key, {
+              orderId: order.guid,
+              orderNumber,
+              checkId: check.guid ?? null,
+              status: orderStatus,
+              currency: orderCurrency,
+              customerName,
+              locationId,
+              orderTime,
+              orderTimeMs,
+              timeDue,
+            });
+
+            updateAccumulatorMeta(accumulator, {
+              orderNumber,
+              status: orderStatus,
+              currency: orderCurrency,
+              customerName,
+              locationId,
+              orderTime,
+              orderTimeMs,
+              timeDue,
+            });
+
+            const selections = Array.isArray(check.selections) ? check.selections : [];
+            for (const selection of selections) {
               if (!selection || typeof selection.guid !== "string") {
                 continue;
               }
 
               if (!isLineItem(selection)) {
+                continue;
+              }
+
+              if (isSelectionVoided(selection)) {
                 continue;
               }
 
@@ -134,60 +212,86 @@ export function createItemsExpandedHandler(
                 selection.item?.guid ??
                 "Unknown item";
 
-              const modifiers = collectModifierNames(selection, menuIndex);
+              const menuItemId = selection.item?.guid ?? null;
+              const quantity = normalizeQuantity(selection.quantity);
+              const modifierDetails = collectModifierDetails(selection, menuIndex, quantity);
               const specialInstructions = extractSpecialInstructions(selection, itemName);
               const unitPrice = extractReceiptLinePrice(selection);
-              const menuItemId = selection.item?.guid ?? null;
-
-              const quantity = normalizeQuantity(selection.quantity);
-
-              for (let i = 0; i < quantity && expanded.length < limit; i += 1) {
-                const item: ExpandedItem = {
-                  orderId: order.guid,
-                  orderNumber,
-                  checkId: check.guid ?? null,
-                  lineItemId: selection.guid,
-                  menuItemId,
-                  order: {
-                    customerName,
-                    locationId,
-                    status: orderStatus,
-                  },
-                  times: { orderTime, timeDue },
-                  item: {
-                    itemName,
-                    itemModifiers: modifiers,
-                    quantity: 1,
-                    specialInstructions,
-                  },
-                  money: unitPrice !== null || orderCurrency
-                    ? { itemPrice: unitPrice, currency: orderCurrency }
-                    : undefined,
-                };
-
-                if (!item.item.specialInstructions) {
-                  delete item.item.specialInstructions;
-                }
-
-                if (!item.money) {
-                  delete item.money;
-                }
-
-                expanded.push(item);
+              const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
+              const baseTotalCents = baseEachCents !== null ? baseEachCents * quantity : null;
+              const totalItemPriceCents = toCents((selection as any)?.price);
+              const fallbackTotal =
+                baseTotalCents !== null ? baseTotalCents + modifierDetails.totalCents : null;
+              const resolvedTotal =
+                totalItemPriceCents ??
+                fallbackTotal ??
+                (modifierDetails.totalCents > 0 ? modifierDetails.totalCents : baseTotalCents);
+              let resolvedBase = baseTotalCents;
+              if (resolvedBase === null && resolvedTotal !== null) {
+                resolvedBase = Math.max(resolvedTotal - modifierDetails.totalCents, 0);
               }
 
-              if (expanded.length >= limit) {
-                break;
+              const money: OrderItemMoney = {};
+              if (resolvedBase !== null) {
+                money.baseItemPriceCents = resolvedBase;
+              }
+              if (modifierDetails.totalCents > 0) {
+                money.modifierTotalCents = modifierDetails.totalCents;
+              }
+              if (resolvedTotal !== null) {
+                money.totalItemPriceCents = resolvedTotal;
+              }
+
+              const item: ExpandedOrderItem = {
+                lineItemId: selection.guid,
+                menuItemId,
+                itemName,
+                quantity,
+                modifiers: modifierDetails.modifiers,
+              };
+
+              if (specialInstructions) {
+                item.specialInstructions = specialInstructions;
+              }
+
+              if (Object.keys(money).length > 0) {
+                item.money = money;
+              }
+
+              accumulator.items.push(item);
+
+              if (resolvedBase !== null) {
+                accumulator.baseItemsSubtotalCents += resolvedBase;
+              }
+
+              if (modifierDetails.totalCents > 0) {
+                accumulator.modifiersSubtotalCents += modifierDetails.totalCents;
+              }
+
+              const selectionDiscountCents = sumDiscountAmounts((selection as any)?.appliedDiscounts);
+              if (selectionDiscountCents > 0) {
+                accumulator.discountTotalCents += selectionDiscountCents;
               }
             }
 
-            if (expanded.length >= limit) {
-              break;
-            }
-          }
+            if (!accumulator.checkTotalsHydrated) {
+              const checkDiscountCents = sumDiscountAmounts((check as any)?.appliedDiscounts);
+              if (checkDiscountCents > 0) {
+                accumulator.discountTotalCents += checkDiscountCents;
+              }
 
-          if (expanded.length >= limit) {
-            break;
+              const serviceChargeCents = sumServiceCharges((check as any)?.appliedServiceCharges);
+              if (serviceChargeCents > 0) {
+                accumulator.serviceChargeCents += serviceChargeCents;
+              }
+
+              const tipCents = sumTipAmounts((check as any)?.payments);
+              if (tipCents > 0) {
+                accumulator.tipCents += tipCents;
+              }
+
+              accumulator.checkTotalsHydrated = true;
+            }
           }
         }
 
@@ -205,9 +309,16 @@ export function createItemsExpandedHandler(
         page = next;
       }
 
-      expanded.sort(compareExpandedItemsByOrderTime);
+      const ordered = Array.from(aggregates.values())
+        .filter((entry) => entry.items.length > 0 || hasNonZeroTotals(entry))
+        .sort(compareAggregatedOrdersByOrderTime);
 
-      return jsonResponse({ items: expanded });
+      const limited =
+        ordered.length > limit ? ordered.slice(Math.max(ordered.length - limit, 0)) : ordered;
+
+      const ordersResponse = limited.map((entry) => toExpandedOrder(entry));
+
+      return jsonResponse({ orders: ordersResponse });
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
       const code = typeof err?.code === "string" ? err.code : status === 500 ? "INTERNAL_ERROR" : "ERROR";
@@ -261,29 +372,6 @@ function errorResponse(status: number, message: string, code = "BAD_REQUEST"): R
   return jsonResponse({ error: { message, code } }, { status });
 }
 
-function compareExpandedItemsByOrderTime(a: ExpandedItem, b: ExpandedItem): number {
-  const aTime = parseToastTimestamp(a.times.orderTime);
-  const bTime = parseToastTimestamp(b.times.orderTime);
-
-  if (aTime !== null && bTime !== null && aTime !== bTime) {
-    return aTime - bTime;
-  }
-
-  if (aTime !== null && bTime === null) {
-    return -1;
-  }
-
-  if (aTime === null && bTime !== null) {
-    return 1;
-  }
-
-  if (a.orderId !== b.orderId) {
-    return a.orderId.localeCompare(b.orderId);
-  }
-
-  return a.lineItemId.localeCompare(b.lineItemId);
-}
-
 function createMenuIndex(document: ToastMenusDocument | null) {
   const itemsByGuid = new Map<string, ToastMenuItem>();
   const itemsByMulti = new Map<string, ToastMenuItem>();
@@ -294,16 +382,17 @@ function createMenuIndex(document: ToastMenusDocument | null) {
 
   if (document) {
     for (const modifier of Object.values(document.modifierOptionReferences ?? {})) {
-      if (modifier?.guid) {
-        modifiersByGuid.set(modifier.guid, modifier);
+      const modAny = modifier as any;
+      if (modAny?.guid) {
+        modifiersByGuid.set(modAny.guid, modifier as ToastModifierOption);
       }
-      const multi = (modifier as any)?.multiLocationId;
+      const multi = modAny?.multiLocationId;
       if (multi) {
-        modifiersByMulti.set(String(multi), modifier);
+        modifiersByMulti.set(String(multi), modifier as ToastModifierOption);
       }
-      const referenceId = (modifier as any)?.referenceId;
+      const referenceId = modAny?.referenceId;
       if (referenceId !== undefined && referenceId !== null) {
-        modifiersByReference.set(referenceId, modifier);
+        modifiersByReference.set(referenceId, modifier as ToastModifierOption);
       }
     }
 
@@ -321,16 +410,17 @@ function createMenuIndex(document: ToastMenusDocument | null) {
       }
 
       for (const item of group.items ?? []) {
-        if (item?.guid) {
-          itemsByGuid.set(item.guid, item);
+        const itemAny = item as any;
+        if (itemAny?.guid) {
+          itemsByGuid.set(itemAny.guid, item as ToastMenuItem);
         }
-        const multi = (item as any)?.multiLocationId;
+        const multi = itemAny?.multiLocationId;
         if (multi) {
-          itemsByMulti.set(String(multi), item);
+          itemsByMulti.set(String(multi), item as ToastMenuItem);
         }
-        const referenceId = (item as any)?.referenceId;
+        const referenceId = itemAny?.referenceId;
         if (referenceId !== undefined && referenceId !== null) {
-          itemsByReference.set(referenceId, item);
+          itemsByReference.set(referenceId, item as ToastMenuItem);
         }
       }
 
@@ -389,7 +479,356 @@ function createMenuIndex(document: ToastMenusDocument | null) {
   };
 }
 
+function getOrCreateAccumulator(
+  aggregates: Map<string, OrderAccumulator>,
+  key: string,
+  seed: {
+    orderId: string;
+    orderNumber: string | null;
+    checkId: string | null;
+    status: string | null;
+    currency: string | null;
+    customerName: string | null;
+    locationId: string | null;
+    orderTime: string;
+    orderTimeMs: number | null;
+    timeDue: string | null;
+  }
+): OrderAccumulator {
+  let existing = aggregates.get(key);
+  if (!existing) {
+    existing = {
+      key,
+      orderId: seed.orderId,
+      orderNumber: seed.orderNumber ?? null,
+      checkId: seed.checkId ?? null,
+      status: seed.status ?? null,
+      currency: seed.currency ?? null,
+      customerName: seed.customerName ?? null,
+      locationId: seed.locationId ?? null,
+      orderTime: seed.orderTime,
+      orderTimeMs: seed.orderTimeMs ?? null,
+      timeDue: seed.timeDue ?? null,
+      items: [],
+      baseItemsSubtotalCents: 0,
+      modifiersSubtotalCents: 0,
+      discountTotalCents: 0,
+      serviceChargeCents: 0,
+      tipCents: 0,
+      checkTotalsHydrated: false,
+    };
+    aggregates.set(key, existing);
+  }
+  return existing;
+}
+
+function updateAccumulatorMeta(
+  accumulator: OrderAccumulator,
+  meta: {
+    orderNumber: string | null;
+    status: string | null;
+    currency: string | null;
+    customerName: string | null;
+    locationId: string | null;
+    orderTime: string;
+    orderTimeMs: number | null;
+    timeDue: string | null;
+  }
+): void {
+  if (meta.orderNumber && !accumulator.orderNumber) {
+    accumulator.orderNumber = meta.orderNumber;
+  }
+  if (meta.status && !accumulator.status) {
+    accumulator.status = meta.status;
+  }
+  if (meta.currency && !accumulator.currency) {
+    accumulator.currency = meta.currency;
+  }
+  if (meta.customerName && !accumulator.customerName) {
+    accumulator.customerName = meta.customerName;
+  }
+  if (meta.locationId && !accumulator.locationId) {
+    accumulator.locationId = meta.locationId;
+  }
+  if (meta.timeDue && !accumulator.timeDue) {
+    accumulator.timeDue = meta.timeDue;
+  }
+  if (meta.orderTime) {
+    accumulator.orderTime = meta.orderTime;
+  }
+  if (meta.orderTimeMs !== null) {
+    accumulator.orderTimeMs = meta.orderTimeMs;
+  }
+}
+
+function hasNonZeroTotals(entry: OrderAccumulator): boolean {
+  return (
+    entry.baseItemsSubtotalCents > 0 ||
+    entry.modifiersSubtotalCents > 0 ||
+    entry.discountTotalCents > 0 ||
+    entry.serviceChargeCents > 0 ||
+    entry.tipCents > 0
+  );
+}
+
+function compareAggregatedOrdersByOrderTime(a: OrderAccumulator, b: OrderAccumulator): number {
+  const aTime = a.orderTimeMs;
+  const bTime = b.orderTimeMs;
+
+  if (aTime !== null && bTime !== null && aTime !== bTime) {
+    return aTime - bTime;
+  }
+
+  if (aTime !== null && bTime === null) {
+    return -1;
+  }
+
+  if (aTime === null && bTime !== null) {
+    return 1;
+  }
+
+  if (a.orderId !== b.orderId) {
+    return a.orderId.localeCompare(b.orderId);
+  }
+
+  const aCheck = a.checkId ?? "";
+  const bCheck = b.checkId ?? "";
+  if (aCheck !== bCheck) {
+    return aCheck.localeCompare(bCheck);
+  }
+
+  return 0;
+}
+
+function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
+  const base = entry.baseItemsSubtotalCents;
+  const modifiers = entry.modifiersSubtotalCents;
+  const discount = entry.discountTotalCents;
+  const service = entry.serviceChargeCents;
+  const tip = entry.tipCents;
+  const subtotal = base + modifiers;
+  const grand = Math.max(subtotal - discount + service + tip, 0);
+
+  const location: { locationId?: string | null } = {};
+  if (entry.locationId) {
+    location.locationId = entry.locationId;
+  }
+
+  const times: { orderTime: string; timeDue?: string | null } = {
+    orderTime: entry.orderTime,
+  };
+  if (entry.timeDue) {
+    times.timeDue = entry.timeDue;
+  }
+
+  const order: ExpandedOrder = {
+    orderId: entry.orderId,
+    location,
+    times,
+    items: entry.items,
+    totals: {
+      baseItemsSubtotalCents: base,
+      modifiersSubtotalCents: modifiers,
+      discountTotalCents: discount,
+      serviceChargeCents: service,
+      tipCents: tip,
+      grandTotalCents: grand,
+    },
+  };
+
+  if (entry.orderNumber) {
+    order.orderNumber = entry.orderNumber;
+  }
+  if (entry.checkId) {
+    order.checkId = entry.checkId;
+  }
+  if (entry.status) {
+    order.status = entry.status;
+  }
+  if (entry.currency) {
+    order.currency = entry.currency;
+  }
+  if (entry.customerName) {
+    order.customerName = entry.customerName;
+  }
+
+  return order;
+}
+
+function collectModifierDetails(
+  selection: ToastSelection,
+  menuIndex: ReturnType<typeof createMenuIndex>,
+  parentQuantity = 1
+): { modifiers: OrderItemModifier[]; totalCents: number } {
+  const output: OrderItemModifier[] = [];
+  let total = 0;
+  const modifiers = Array.isArray(selection.modifiers) ? selection.modifiers : [];
+
+  for (const modifier of modifiers) {
+    if (!modifier) {
+      continue;
+    }
+
+    const base = menuIndex.findModifier(modifier.item);
+    const name =
+      getKitchenTicketName(base) ?? getSelectionDisplayName(modifier) ?? modifier.item?.guid ?? "Unknown modifier";
+    const groupName = extractModifierGroupName(modifier, base);
+    const id =
+      typeof modifier.item?.guid === "string" && modifier.item.guid
+        ? modifier.item.guid
+        : typeof modifier.guid === "string" && modifier.guid
+        ? modifier.guid
+        : (base as any)?.guid ?? null;
+
+    const modifierQuantity = normalizeQuantity((modifier as ToastSelection).quantity);
+    const ownPrice = resolveModifierPriceCents(modifier as ToastSelection);
+    const adjustedPrice = ownPrice !== null ? ownPrice * parentQuantity : null;
+
+    output.push({
+      id,
+      name,
+      groupName: groupName ?? null,
+      priceCents: adjustedPrice ?? 0,
+    });
+
+    if (adjustedPrice !== null) {
+      total += adjustedPrice;
+    }
+
+    if (Array.isArray((modifier as any).modifiers) && (modifier as any).modifiers.length > 0) {
+      const nested = collectModifierDetails(
+        modifier as unknown as ToastSelection,
+        menuIndex,
+        parentQuantity * modifierQuantity
+      );
+      output.push(...nested.modifiers);
+      total += nested.totalCents;
+    }
+  }
+
+  return { modifiers: output, totalCents: total };
+}
+
+function sumDiscountAmounts(discounts: unknown): number {
+  if (!Array.isArray(discounts)) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const discount of discounts) {
+    if (!discount) {
+      continue;
+    }
+
+    const amount =
+      toCents((discount as any)?.discountAmount) ??
+      toCents((discount as any)?.amount) ??
+      toCents((discount as any)?.value);
+
+    if (amount !== null) {
+      total += Math.max(amount, 0);
+    }
+  }
+
+  return total;
+}
+
+function sumServiceCharges(charges: unknown): number {
+  if (!Array.isArray(charges)) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const charge of charges) {
+    if (!charge) {
+      continue;
+    }
+
+    const amount = toCents((charge as any)?.chargeAmount) ?? toCents((charge as any)?.amount);
+    if (amount !== null) {
+      total += amount;
+    }
+  }
+
+  return total;
+}
+
+function sumTipAmounts(payments: unknown): number {
+  if (!Array.isArray(payments)) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const payment of payments) {
+    if (!payment) {
+      continue;
+    }
+
+    const tip = toCents((payment as any)?.tipAmount);
+    if (tip !== null) {
+      total += tip;
+    }
+  }
+
+  return total;
+}
+
+function isSelectionVoided(selection: ToastSelection): boolean {
+  return Boolean((selection as any)?.voided);
+}
+
+function toCents(value: unknown): number | null {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return null;
+  }
+  return Math.round(value * 100);
+}
+
+function extractModifierGroupName(
+  modifier: any,
+  base: ToastModifierOption | undefined
+): string | null {
+  const candidates = [
+    typeof modifier?.optionGroup?.name === "string" ? modifier.optionGroup.name : null,
+    typeof (base as any)?.optionGroupName === "string" ? (base as any).optionGroupName : null,
+    typeof (base as any)?.groupName === "string" ? (base as any).groupName : null,
+    typeof (base as any)?.menuOptionGroup?.name === "string" ? (base as any).menuOptionGroup.name : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveModifierPriceCents(modifier: ToastSelection): number | null {
+  const price = typeof (modifier as any)?.price === "number" ? toCents((modifier as any).price) : null;
+  if (price !== null) {
+    return price;
+  }
+
+  const receiptPrice = extractReceiptLinePrice(modifier);
+  if (receiptPrice === null) {
+    return null;
+  }
+
+  const receiptCents = toCents(receiptPrice);
+  if (receiptCents === null) {
+    return null;
+  }
+
+  const quantity = normalizeQuantity(modifier.quantity);
+  return receiptCents * quantity;
+}
+
 function orderMatches(order: ToastOrder, locationId: string | null, status: string | null): boolean {
+  if (isVoidedOrder(order)) {
+    return false;
+  }
+
   if (locationId) {
     const value = extractOrderLocation(order);
     if (!value || value !== locationId) {
@@ -405,6 +844,10 @@ function orderMatches(order: ToastOrder, locationId: string | null, status: stri
   }
 
   return true;
+}
+
+function isVoidedOrder(order: ToastOrder): boolean {
+  return Boolean((order as any)?.voided);
 }
 
 function extractOrderTime(order: ToastOrder): string | null {
@@ -553,34 +996,6 @@ function getSelectionDisplayName(selection: ToastSelection): string | undefined 
     return displayName;
   }
   return undefined;
-}
-
-function collectModifierNames(selection: ToastSelection, menuIndex: ReturnType<typeof createMenuIndex>): string[] {
-  const names: string[] = [];
-  const modifiers = Array.isArray(selection.modifiers) ? selection.modifiers : [];
-
-  for (const modifier of modifiers) {
-    if (!modifier) {
-      continue;
-    }
-
-    const base = menuIndex.findModifier(modifier.item);
-    const display = getKitchenTicketName(base) ?? getSelectionDisplayName(modifier) ?? modifier.item?.guid;
-
-    const quantity = normalizeQuantity(modifier.quantity);
-
-    if (display) {
-      for (let i = 0; i < quantity; i += 1) {
-        names.push(display);
-      }
-    }
-
-    if (modifier.modifiers && modifier.modifiers.length > 0) {
-      names.push(...collectModifierNames(modifier, menuIndex));
-    }
-  }
-
-  return names;
 }
 
 function normalizeQuantity(quantity: number | undefined): number {
