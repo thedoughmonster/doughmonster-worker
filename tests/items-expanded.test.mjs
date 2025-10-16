@@ -85,6 +85,207 @@ test('items-expanded calculates modifier totals with quantities and exposes modi
   assert.equal(item.money.totalItemPriceCents, 600);
 });
 
+test('items-expanded collapses duplicate modifiers emitted separately', async () => {
+  const orders = [
+    {
+      guid: 'order-duplicate-modifiers',
+      createdDate: '2024-01-01T12:05:00.000+0000',
+      checks: [
+        {
+          guid: 'check-duplicate-modifiers',
+          selections: [
+            {
+              guid: 'sel-duplicate-item',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 9,
+              item: { guid: 'item-duplicate' },
+              modifiers: [
+                {
+                  guid: 'sel-duplicate-mod-1',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.5,
+                  optionGroup: { name: 'Toppings' },
+                  item: { guid: 'mod-cheese' },
+                },
+                {
+                  guid: 'sel-duplicate-mod-2',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.5,
+                  optionGroup: { name: 'Toppings' },
+                  item: { guid: 'mod-cheese' },
+                },
+                {
+                  guid: 'sel-duplicate-mod-unique',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 1.25,
+                  optionGroup: { name: 'Toppings' },
+                  item: { guid: 'mod-bacon' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/items-expanded?limit=50')
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+  const item = body.orders[0].items[0];
+  assert.equal(item.modifiers.length, 2);
+  assert.equal(item.modifiers[0].id, 'mod-cheese');
+  assert.equal(item.modifiers[0].groupName, 'Toppings');
+  assert.equal(item.modifiers[0].quantity, 2);
+  assert.equal(item.modifiers[0].priceCents, 100);
+  assert.equal(item.modifiers[1].id, 'mod-bacon');
+  assert.equal(item.modifiers[1].quantity, 1);
+  assert.equal(item.modifiers[1].priceCents, 125);
+  assert.equal(item.money.modifierTotalCents, 225);
+  assert.equal(
+    item.money.modifierTotalCents,
+    item.modifiers.reduce((sum, mod) => sum + mod.priceCents, 0)
+  );
+});
+
+test('items-expanded collapses duplicate modifiers without ids using name and group fallback', async () => {
+  const orders = [
+    {
+      guid: 'order-duplicate-noid',
+      createdDate: '2024-01-01T12:10:00.000+0000',
+      checks: [
+        {
+          guid: 'check-duplicate-noid',
+          selections: [
+            {
+              guid: 'sel-duplicate-noid',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 6,
+              item: { guid: 'item-noid' },
+              modifiers: [
+                {
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.75,
+                  displayName: 'Extra Sauce',
+                  optionGroup: { name: 'Sauces' },
+                  item: { itemType: 'MODIFIER' },
+                },
+                {
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.75,
+                  displayName: 'Extra Sauce',
+                  optionGroup: { name: 'Sauces' },
+                  item: { itemType: 'MODIFIER' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/items-expanded?limit=50')
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+  const item = body.orders[0].items[0];
+  assert.equal(item.modifiers.length, 1);
+  assert.equal(item.modifiers[0].name, 'Extra Sauce');
+  assert.equal(item.modifiers[0].groupName, 'Sauces');
+  assert.equal(item.modifiers[0].quantity, 2);
+  assert.equal(item.modifiers[0].priceCents, 150);
+  assert.equal(item.money.modifierTotalCents, 150);
+});
+
+test('items-expanded collapses duplicate nested modifiers after flattening', async () => {
+  const orders = [
+    {
+      guid: 'order-nested-duplicates',
+      createdDate: '2024-01-01T12:15:00.000+0000',
+      checks: [
+        {
+          guid: 'check-nested-duplicates',
+          selections: [
+            {
+              guid: 'sel-nested-parent',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 11,
+              item: { guid: 'item-nested' },
+              modifiers: [
+                {
+                  guid: 'sel-nested-parent-mod',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0,
+                  item: { guid: 'mod-parent' },
+                  modifiers: [
+                    {
+                      guid: 'sel-nested-child-1',
+                      selectionType: 'MENU_ITEM',
+                      quantity: 1,
+                      price: 0.4,
+                      optionGroup: { name: 'Sauces' },
+                      item: { guid: 'mod-child' },
+                    },
+                    {
+                      guid: 'sel-nested-child-2',
+                      selectionType: 'MENU_ITEM',
+                      quantity: 1,
+                      price: 0.4,
+                      optionGroup: { name: 'Sauces' },
+                      item: { guid: 'mod-child' },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/items-expanded?limit=50')
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+  const item = body.orders[0].items[0];
+  assert.equal(item.modifiers.length, 2);
+  const child = item.modifiers.find((mod) => mod.id === 'mod-child');
+  assert.ok(child);
+  assert.equal(child.quantity, 2);
+  assert.equal(child.priceCents, 80);
+  assert.equal(
+    item.money.modifierTotalCents,
+    item.modifiers.reduce((sum, mod) => sum + mod.priceCents, 0)
+  );
+});
+
 test('items-expanded exposes orderData block with required metadata as first key', async () => {
   const orders = [
     {
@@ -540,4 +741,49 @@ test('items-expanded includes behavior-specific enrichment data when available',
   const takeout = byId['order-takeout-enrich'];
   assert.equal(takeout.orderData.promisedDate, '2024-01-01T19:00:00.000+0000');
   assert.equal(takeout.orderData.estimatedFulfillmentDate, '2024-01-01T19:20:00.000+0000');
+});
+
+test('items-expanded exposes aggregated fulfillment status on orderData', async () => {
+  const orders = [
+    {
+      guid: 'order-fulfillment-status',
+      createdDate: '2024-01-01T12:25:00.000+0000',
+      checks: [
+        {
+          guid: 'check-fulfillment-status',
+          fulfillmentStatus: 'HOLD',
+          selections: [
+            {
+              guid: 'sel-fulfillment-new',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 5,
+              price: 5,
+              item: { guid: 'item-fulfillment-new' },
+              fulfillmentStatus: 'NEW',
+            },
+            {
+              guid: 'sel-fulfillment-ready',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 7,
+              price: 7,
+              item: { guid: 'item-fulfillment-ready' },
+              fulfillmentStatus: 'READY',
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+
+  const [order] = body.orders;
+  assert.equal(order.orderData.fulfillmentStatus, 'READY');
 });

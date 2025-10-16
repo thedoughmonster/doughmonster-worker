@@ -18,6 +18,7 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 
 - When called without filters it returns the 15 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from oldest to newest.
 - Each order groups all items for a Toast check and includes modifier breakdowns, per-item pricing (base, modifier, total), order timing, customer/location metadata, and aggregated totals (base, modifiers, discounts, service charges, tips, and grand total).
+- `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
 - Accepts optional ISO-8601 `start`/`end` query parameters that default to the last two hours ending "now".
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 15, maximum 500).
 - Loads the published menu document once per request to hydrate item and modifier names.
