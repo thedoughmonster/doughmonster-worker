@@ -48,6 +48,54 @@ export type OrderType =
   | "CATERING"
   | "UNKNOWN";
 
+type ItemFulfillmentStatus = "NEW" | "HOLD" | "SENT" | "READY";
+
+const FULFILLMENT_STATUS_RANK: Record<ItemFulfillmentStatus, number> = {
+  NEW: 0,
+  HOLD: 1,
+  SENT: 2,
+  READY: 3,
+};
+
+function normalizeItemFulfillmentStatus(value: unknown): ItemFulfillmentStatus | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim().toUpperCase();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed === "NEW" || trimmed === "HOLD" || trimmed === "SENT" || trimmed === "READY") {
+    return trimmed as ItemFulfillmentStatus;
+  }
+
+  return null;
+}
+
+function mergeFulfillmentStatuses(
+  current: ItemFulfillmentStatus | null,
+  next: ItemFulfillmentStatus | null
+): ItemFulfillmentStatus | null {
+  if (!next) {
+    return current;
+  }
+
+  if (!current) {
+    return next;
+  }
+
+  const nextRank = FULFILLMENT_STATUS_RANK[next];
+  const currentRank = FULFILLMENT_STATUS_RANK[current];
+
+  if (nextRank >= currentRank) {
+    return next;
+  }
+
+  return current;
+}
+
 export interface OrderDataBlock {
   orderId: string;
   location: { locationId?: string | null };
@@ -56,6 +104,7 @@ export interface OrderDataBlock {
   orderNumber: string | null;
   checkId: string | null;
   status: string | null;
+  fulfillmentStatus: ItemFulfillmentStatus | null;
   customerName: string | null;
   orderType: OrderType;
   diningOptionGuid: string | null;
@@ -96,10 +145,11 @@ interface OrderAccumulator {
   orderNumber: string | null;
   checkId: string | null;
   status: string | null;
+  fulfillmentStatus: ItemFulfillmentStatus | null;
   currency: string | null;
   customerName: string | null;
   orderType: OrderType;
-   diningOptionGuid: string | null;
+  diningOptionGuid: string | null;
   locationId: string | null;
   orderTime: string;
   orderTimeMs: number | null;
@@ -233,12 +283,14 @@ export function createItemsExpandedHandler(
               check,
               diningOptionResolver
             );
+            const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
             const key = `${order.guid}:${check.guid}`;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
               orderNumber,
               checkId: check.guid ?? null,
               status: orderStatus,
+              fulfillmentStatus: initialFulfillmentStatus ?? null,
               currency: orderCurrency,
               customerName,
               orderType: behaviorMeta.orderType,
@@ -260,6 +312,7 @@ export function createItemsExpandedHandler(
             updateAccumulatorMeta(accumulator, {
               orderNumber,
               status: orderStatus,
+              fulfillmentStatus: initialFulfillmentStatus ?? null,
               currency: orderCurrency,
               customerName,
               orderType: behaviorMeta.orderType,
@@ -290,6 +343,16 @@ export function createItemsExpandedHandler(
 
               if (isSelectionVoided(selection)) {
                 continue;
+              }
+
+              const selectionFulfillmentStatus = normalizeItemFulfillmentStatus(
+                (selection as any)?.fulfillmentStatus
+              );
+              if (selectionFulfillmentStatus) {
+                accumulator.fulfillmentStatus = mergeFulfillmentStatuses(
+                  accumulator.fulfillmentStatus,
+                  selectionFulfillmentStatus
+                );
               }
 
               const menuItem = menuIndex.findItem(selection.item);
@@ -584,6 +647,7 @@ function getOrCreateAccumulator(
     orderNumber: string | null;
     checkId: string | null;
     status: string | null;
+    fulfillmentStatus?: ItemFulfillmentStatus | null;
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
@@ -609,6 +673,7 @@ function getOrCreateAccumulator(
       orderNumber: seed.orderNumber ?? null,
       checkId: seed.checkId ?? null,
       status: seed.status ?? null,
+      fulfillmentStatus: seed.fulfillmentStatus ?? null,
       currency: seed.currency ?? null,
       customerName: seed.customerName ?? null,
       orderType: seed.orderType ?? "UNKNOWN",
@@ -650,6 +715,7 @@ function updateAccumulatorMeta(
   meta: {
     orderNumber: string | null;
     status: string | null;
+    fulfillmentStatus?: ItemFulfillmentStatus | null;
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
@@ -672,6 +738,12 @@ function updateAccumulatorMeta(
   }
   if (meta.status && !accumulator.status) {
     accumulator.status = meta.status;
+  }
+  if (meta.fulfillmentStatus) {
+    accumulator.fulfillmentStatus = mergeFulfillmentStatuses(
+      accumulator.fulfillmentStatus,
+      meta.fulfillmentStatus
+    );
   }
   if (meta.currency && !accumulator.currency) {
     accumulator.currency = meta.currency;
@@ -797,6 +869,7 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
     orderNumber: entry.orderNumber ?? null,
     checkId: entry.checkId ?? null,
     status: entry.status ?? null,
+    fulfillmentStatus: entry.fulfillmentStatus ?? null,
     customerName: entry.customerName ?? null,
     orderType: entry.orderType ?? "UNKNOWN",
     diningOptionGuid: entry.diningOptionGuid ?? null,
@@ -869,7 +942,6 @@ function collectModifierDetails(
   parentQuantity = 1
 ): { modifiers: OrderItemModifier[]; totalCents: number } {
   const output: OrderItemModifier[] = [];
-  let total = 0;
   const modifiers = Array.isArray(selection.modifiers) ? selection.modifiers : [];
 
   for (const modifier of modifiers) {
@@ -901,10 +973,6 @@ function collectModifierDetails(
       quantity: modifierQuantity,
     });
 
-    if (adjustedPrice !== null) {
-      total += adjustedPrice;
-    }
-
     if (Array.isArray((modifier as any).modifiers) && (modifier as any).modifiers.length > 0) {
       const nested = collectModifierDetails(
         modifier as unknown as ToastSelection,
@@ -912,11 +980,45 @@ function collectModifierDetails(
         parentQuantity * modifierQuantity
       );
       output.push(...nested.modifiers);
-      total += nested.totalCents;
     }
   }
 
-  return { modifiers: output, totalCents: total };
+  const collapsed = collapseOrderItemModifiers(output);
+  const totalCents = collapsed.reduce((sum, mod) => sum + mod.priceCents, 0);
+
+  return { modifiers: collapsed, totalCents };
+}
+
+function collapseOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemModifier[] {
+  const order: string[] = [];
+  const aggregated = new Map<string, OrderItemModifier>();
+
+  for (const modifier of modifiers) {
+    const key =
+      modifier.id ?? `name:${modifier.name}::group:${modifier.groupName ?? ""}`;
+
+    if (!aggregated.has(key)) {
+      aggregated.set(key, {
+        id: modifier.id,
+        name: modifier.name,
+        groupName: modifier.groupName ?? null,
+        priceCents: modifier.priceCents,
+        quantity: modifier.quantity,
+      });
+      order.push(key);
+      continue;
+    }
+
+    const entry = aggregated.get(key)!;
+    entry.quantity += modifier.quantity;
+    entry.priceCents += modifier.priceCents;
+
+    if ((entry.groupName === null || entry.groupName === undefined) && modifier.groupName) {
+      entry.groupName = modifier.groupName;
+    }
+  }
+
+  return order.map((key) => aggregated.get(key)!);
 }
 
 function sumDiscountAmounts(discounts: unknown): number {
@@ -1124,6 +1226,26 @@ function extractOrderStatus(order: ToastOrder): string | null {
       return candidate;
     }
   }
+  return null;
+}
+
+function extractOrderFulfillmentStatus(order: ToastOrder, check: ToastCheck): ItemFulfillmentStatus | null {
+  const candidates: unknown[] = [
+    (check as any)?.fulfillmentStatus,
+    (check as any)?.fulfillment?.status,
+    (order as any)?.fulfillmentStatus,
+    (order as any)?.fulfillment?.status,
+    (order as any)?.context?.fulfillmentStatus,
+    (order as any)?.context?.fulfillment?.status,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeItemFulfillmentStatus(candidate);
+    if (normalized) {
+      return normalized;
+    }
+  }
+
   return null;
 }
 
