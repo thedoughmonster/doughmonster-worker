@@ -19,6 +19,7 @@ export interface OrderItemModifier {
   name: string;
   groupName?: string | null;
   priceCents: number;
+  quantity: number;
 }
 
 export interface OrderItemMoney {
@@ -37,6 +38,15 @@ export interface ExpandedOrderItem {
   money?: OrderItemMoney;
 }
 
+export type OrderType =
+  | "TAKEOUT"
+  | "DELIVERY"
+  | "DINE_IN"
+  | "CURBSIDE"
+  | "DRIVE_THRU"
+  | "CATERING"
+  | "UNKNOWN";
+
 export interface ExpandedOrder {
   orderId: string;
   orderNumber?: string | null;
@@ -44,6 +54,7 @@ export interface ExpandedOrder {
   status?: string | null;
   currency?: string | null;
   customerName?: string | null;
+  orderType: OrderType;
   location: { locationId?: string | null };
   times: { orderTime: string; timeDue?: string | null };
   items: ExpandedOrderItem[];
@@ -65,6 +76,7 @@ interface OrderAccumulator {
   status: string | null;
   currency: string | null;
   customerName: string | null;
+  orderType: OrderType;
   locationId: string | null;
   orderTime: string;
   orderTimeMs: number | null;
@@ -166,6 +178,7 @@ export function createItemsExpandedHandler(
             }
 
             const customerName = extractCustomerName(order, check);
+            const orderType = extractOrderType(order, check);
             const key = `${order.guid}:${check.guid}`;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
@@ -174,6 +187,7 @@ export function createItemsExpandedHandler(
               status: orderStatus,
               currency: orderCurrency,
               customerName,
+              orderType,
               locationId,
               orderTime,
               orderTimeMs,
@@ -185,6 +199,7 @@ export function createItemsExpandedHandler(
               status: orderStatus,
               currency: orderCurrency,
               customerName,
+              orderType,
               locationId,
               orderTime,
               orderTimeMs,
@@ -220,25 +235,35 @@ export function createItemsExpandedHandler(
               const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
               const baseTotalCents = baseEachCents !== null ? baseEachCents * quantity : null;
               const totalItemPriceCents = toCents((selection as any)?.price);
-              const fallbackTotal =
-                baseTotalCents !== null ? baseTotalCents + modifierDetails.totalCents : null;
-              const resolvedTotal =
-                totalItemPriceCents ??
-                fallbackTotal ??
-                (modifierDetails.totalCents > 0 ? modifierDetails.totalCents : baseTotalCents);
+              const computedTotal =
+                baseTotalCents !== null
+                  ? baseTotalCents + modifierDetails.totalCents
+                  : modifierDetails.totalCents !== 0
+                  ? modifierDetails.totalCents
+                  : null;
+              let resolvedTotal: number | null = null;
+              if (totalItemPriceCents !== null && computedTotal !== null) {
+                resolvedTotal = Math.max(totalItemPriceCents, computedTotal);
+              } else {
+                resolvedTotal = totalItemPriceCents ?? computedTotal ?? baseTotalCents;
+              }
               let resolvedBase = baseTotalCents;
               if (resolvedBase === null && resolvedTotal !== null) {
                 resolvedBase = Math.max(resolvedTotal - modifierDetails.totalCents, 0);
+              }
+              if (resolvedBase !== null) {
+                resolvedBase = Math.max(resolvedBase, 0);
               }
 
               const money: OrderItemMoney = {};
               if (resolvedBase !== null) {
                 money.baseItemPriceCents = resolvedBase;
               }
-              if (modifierDetails.totalCents > 0) {
+              if (modifierDetails.totalCents !== 0) {
                 money.modifierTotalCents = modifierDetails.totalCents;
               }
               if (resolvedTotal !== null) {
+                resolvedTotal = Math.max(resolvedTotal, 0);
                 money.totalItemPriceCents = resolvedTotal;
               }
 
@@ -264,7 +289,7 @@ export function createItemsExpandedHandler(
                 accumulator.baseItemsSubtotalCents += resolvedBase;
               }
 
-              if (modifierDetails.totalCents > 0) {
+              if (modifierDetails.totalCents !== 0) {
                 accumulator.modifiersSubtotalCents += modifierDetails.totalCents;
               }
 
@@ -489,6 +514,7 @@ function getOrCreateAccumulator(
     status: string | null;
     currency: string | null;
     customerName: string | null;
+    orderType: OrderType;
     locationId: string | null;
     orderTime: string;
     orderTimeMs: number | null;
@@ -505,6 +531,7 @@ function getOrCreateAccumulator(
       status: seed.status ?? null,
       currency: seed.currency ?? null,
       customerName: seed.customerName ?? null,
+      orderType: seed.orderType ?? "UNKNOWN",
       locationId: seed.locationId ?? null,
       orderTime: seed.orderTime,
       orderTimeMs: seed.orderTimeMs ?? null,
@@ -529,6 +556,7 @@ function updateAccumulatorMeta(
     status: string | null;
     currency: string | null;
     customerName: string | null;
+    orderType: OrderType;
     locationId: string | null;
     orderTime: string;
     orderTimeMs: number | null;
@@ -546,6 +574,9 @@ function updateAccumulatorMeta(
   }
   if (meta.customerName && !accumulator.customerName) {
     accumulator.customerName = meta.customerName;
+  }
+  if (meta.orderType && (accumulator.orderType === "UNKNOWN" || !accumulator.orderType)) {
+    accumulator.orderType = meta.orderType;
   }
   if (meta.locationId && !accumulator.locationId) {
     accumulator.locationId = meta.locationId;
@@ -623,6 +654,7 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
 
   const order: ExpandedOrder = {
     orderId: entry.orderId,
+    orderType: entry.orderType ?? "UNKNOWN",
     location,
     times,
     items: entry.items,
@@ -681,14 +713,16 @@ function collectModifierDetails(
         : (base as any)?.guid ?? null;
 
     const modifierQuantity = normalizeQuantity((modifier as ToastSelection).quantity);
-    const ownPrice = resolveModifierPriceCents(modifier as ToastSelection);
-    const adjustedPrice = ownPrice !== null ? ownPrice * parentQuantity : null;
+    const ownUnitPrice = resolveModifierUnitPriceCents(modifier as ToastSelection);
+    const ownTotalPrice = ownUnitPrice !== null ? ownUnitPrice * modifierQuantity : null;
+    const adjustedPrice = ownTotalPrice !== null ? ownTotalPrice * parentQuantity : null;
 
     output.push({
       id,
       name,
       groupName: groupName ?? null,
       priceCents: adjustedPrice ?? 0,
+      quantity: modifierQuantity,
     });
 
     if (adjustedPrice !== null) {
@@ -804,7 +838,7 @@ function extractModifierGroupName(
   return null;
 }
 
-function resolveModifierPriceCents(modifier: ToastSelection): number | null {
+function resolveModifierUnitPriceCents(modifier: ToastSelection): number | null {
   const price = typeof (modifier as any)?.price === "number" ? toCents((modifier as any).price) : null;
   if (price !== null) {
     return price;
@@ -815,13 +849,7 @@ function resolveModifierPriceCents(modifier: ToastSelection): number | null {
     return null;
   }
 
-  const receiptCents = toCents(receiptPrice);
-  if (receiptCents === null) {
-    return null;
-  }
-
-  const quantity = normalizeQuantity(modifier.quantity);
-  return receiptCents * quantity;
+  return toCents(receiptPrice);
 }
 
 function orderMatches(order: ToastOrder, locationId: string | null, status: string | null): boolean {
@@ -938,12 +966,27 @@ function extractCustomerName(order: ToastOrder, check: ToastCheck): string | nul
   if (fromCheck) {
     return fromCheck;
   }
+
   for (const customer of Array.isArray(order.customers) ? order.customers : []) {
     const name = buildCustomerName(customer);
     if (name) {
       return name;
     }
   }
+
+  const fallbackCandidates = [
+    normalizeName((check as any)?.tabName),
+    normalizeName((check as any)?.curbsidePickupInfo?.name),
+    normalizeName((order as any)?.context?.deliveryInfo?.recipientName),
+    extractFirstGuestName(check),
+  ];
+
+  for (const candidate of fallbackCandidates) {
+    if (candidate) {
+      return candidate;
+    }
+  }
+
   return null;
 }
 
@@ -952,24 +995,314 @@ function buildCustomerName(customer: unknown): string | null {
     return null;
   }
 
-  const first = typeof (customer as any)?.firstName === "string" ? (customer as any).firstName : "";
-  const last = typeof (customer as any)?.lastName === "string" ? (customer as any).lastName : "";
-  const combined = `${first} ${last}`.trim();
+  if (typeof customer === "string") {
+    return normalizeName(customer);
+  }
+
+  const first = normalizeName((customer as any)?.firstName);
+  const last = normalizeName((customer as any)?.lastName);
+  const combined = [first, last].filter(Boolean).join(" ").trim();
 
   if (combined) {
     return combined;
   }
 
-  if (typeof (customer as any)?.name === "string" && (customer as any).name) {
-    return (customer as any).name;
+  const name = normalizeName((customer as any)?.name);
+  if (name) {
+    return name;
+  }
+
+  return null;
+}
+
+function extractFirstGuestName(check: ToastCheck): string | null {
+  const guests = Array.isArray((check as any)?.guests) ? (check as any).guests : [];
+  for (const guest of guests) {
+    const name = buildCustomerName(guest);
+    if (name) {
+      return name;
+    }
+  }
+  return null;
+}
+
+function normalizeName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function extractOrderType(order: ToastOrder, check: ToastCheck): OrderType {
+  if ((check as any)?.curbsidePickupInfo) {
+    return "CURBSIDE";
+  }
+
+  const candidates = new Set<OrderType>();
+
+  if ((order as any)?.context?.deliveryInfo || (order as any)?.isDelivery === true || (check as any)?.isDelivery === true) {
+    candidates.add("DELIVERY");
+  }
+
+  if ((order as any)?.isDriveThru === true || (check as any)?.isDriveThru === true) {
+    candidates.add("DRIVE_THRU");
+  }
+
+  if ((order as any)?.isCatering === true || (check as any)?.isCatering === true) {
+    candidates.add("CATERING");
+  }
+
+  for (const value of gatherOrderTypeCandidates(order, check)) {
+    const normalized = normalizeOrderType(value);
+    if (normalized) {
+      candidates.add(normalized);
+    }
+  }
+
+  if (candidates.has("CURBSIDE")) {
+    return "CURBSIDE";
+  }
+  if (candidates.has("DRIVE_THRU")) {
+    return "DRIVE_THRU";
+  }
+  if (candidates.has("CATERING")) {
+    return "CATERING";
+  }
+  if (candidates.has("DELIVERY")) {
+    return "DELIVERY";
+  }
+  if (candidates.has("DINE_IN")) {
+    return "DINE_IN";
+  }
+  if (candidates.has("TAKEOUT")) {
+    return "TAKEOUT";
+  }
+
+  return "UNKNOWN";
+}
+
+function gatherOrderTypeCandidates(order: ToastOrder, check: ToastCheck): unknown[] {
+  const values: unknown[] = [];
+  const push = (...items: unknown[]) => {
+    for (const item of items) {
+      if (item !== undefined && item !== null) {
+        values.push(item);
+      }
+    }
+  };
+
+  push(
+    (check as any)?.orderType,
+    (check as any)?.serviceType,
+    (check as any)?.orderMode,
+    (check as any)?.channelType,
+    (check as any)?.fulfillmentMode,
+    (order as any)?.orderType,
+    (order as any)?.serviceType,
+    (order as any)?.orderMode,
+    (order as any)?.channelType,
+    (order as any)?.mode,
+    (order as any)?.fulfillmentType,
+    (order as any)?.fulfillmentMode,
+    (order as any)?.fulfillment,
+    (order as any)?.source?.orderType,
+    (order as any)?.source?.serviceType,
+    (order as any)?.source?.mode,
+    (order as any)?.context?.orderType,
+    (order as any)?.context?.serviceType,
+    (order as any)?.context?.orderMode,
+    (order as any)?.context?.channelType,
+    (order as any)?.context?.fulfillmentType,
+    (order as any)?.context?.fulfillmentMode,
+    (order as any)?.context?.diningOption,
+    (order as any)?.context?.diningOptionType
+  );
+
+  return values;
+}
+
+function normalizeOrderType(value: unknown): OrderType | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "object") {
+    const candidate =
+      typeof (value as any)?.type === "string"
+        ? (value as any).type
+        : typeof (value as any)?.name === "string"
+        ? (value as any).name
+        : null;
+    if (candidate) {
+      return normalizeOrderType(candidate);
+    }
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const normalized = trimmed.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+
+  const directMap: Record<string, OrderType> = {
+    TAKEOUT: "TAKEOUT",
+    TAKE_OUT: "TAKEOUT",
+    TAKEAWAY: "TAKEOUT",
+    TAKE_AWAY: "TAKEOUT",
+    PICKUP: "TAKEOUT",
+    PICK_UP: "TAKEOUT",
+    PICK_UP_ORDER: "TAKEOUT",
+    PICKUP_ORDER: "TAKEOUT",
+    TOGO: "TAKEOUT",
+    TO_GO: "TAKEOUT",
+    DINE_IN: "DINE_IN",
+    DINEIN: "DINE_IN",
+    ON_PREMISE: "DINE_IN",
+    ONPREMISE: "DINE_IN",
+    EAT_IN: "DINE_IN",
+    CURBSIDE: "CURBSIDE",
+    CURB_SIDE: "CURBSIDE",
+    CURBSIDE_PICKUP: "CURBSIDE",
+    DRIVE_THRU: "DRIVE_THRU",
+    DRIVE_THRUGH: "DRIVE_THRU",
+    DRIVETHRU: "DRIVE_THRU",
+    DRIVE_THROUGH: "DRIVE_THRU",
+    CATERING: "CATERING",
+    DELIVERY: "DELIVERY",
+    DELIVER: "DELIVERY",
+  };
+
+  if (directMap[normalized]) {
+    return directMap[normalized];
+  }
+
+  if (normalized.includes("CURBSIDE")) {
+    return "CURBSIDE";
+  }
+  if (normalized.includes("DRIVE")) {
+    return "DRIVE_THRU";
+  }
+  if (normalized.includes("CATER")) {
+    return "CATERING";
+  }
+  if (normalized.includes("DELIVER")) {
+    return "DELIVERY";
+  }
+  if (normalized.includes("DINE") || normalized.includes("EAT_IN") || normalized.includes("EATIN") || normalized.includes("ON_PREMISE")) {
+    return "DINE_IN";
+  }
+  if (
+    normalized.includes("TAKE") ||
+    normalized.includes("PICKUP") ||
+    normalized.includes("PICK_UP") ||
+    normalized.includes("PICK-UP") ||
+    normalized.includes("TOGO") ||
+    normalized.includes("TO_GO")
+  ) {
+    return "TAKEOUT";
   }
 
   return null;
 }
 
 function isLineItem(selection: ToastSelection): boolean {
-  const selectionType = selection.selectionType ?? (selection as any)?.selectionType;
-  return selectionType !== "SPECIAL_REQUEST";
+  const selectionType = getSelectionType(selection);
+  if (selectionType && DISALLOWED_SELECTION_TYPES.has(selectionType)) {
+    return false;
+  }
+
+  const item = (selection as any)?.item;
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+
+  const itemType = getItemType(selection);
+  if (itemType && DISALLOWED_ITEM_TYPES.has(itemType)) {
+    return false;
+  }
+
+  if (selectionType && ALLOWED_SELECTION_TYPES.has(selectionType)) {
+    return true;
+  }
+
+  if (itemType && ALLOWED_ITEM_TYPES.has(itemType)) {
+    return true;
+  }
+
+  const hasGuid =
+    (typeof item.guid === "string" && item.guid.trim() !== "") ||
+    (typeof item.guid === "number" && Number.isFinite(item.guid));
+  const hasReference =
+    hasGuid ||
+    item.multiLocationId !== undefined && item.multiLocationId !== null ||
+    item.referenceId !== undefined && item.referenceId !== null;
+
+  if (hasReference) {
+    return true;
+  }
+
+  const price = extractReceiptLinePrice(selection);
+  return price !== null;
+}
+
+const DISALLOWED_SELECTION_TYPES = new Set([
+  "SPECIAL_REQUEST",
+  "NOTE",
+  "TEXT",
+  "FEE",
+  "SURCHARGE",
+  "SERVICE_CHARGE",
+  "TIP",
+  "TAX",
+  "PAYMENT",
+  "DEPOSIT",
+]);
+
+const ALLOWED_SELECTION_TYPES = new Set(["MENU_ITEM", "ITEM", "STANDARD", "OPEN_ITEM", "CUSTOM_ITEM", "RETAIL_ITEM"]);
+
+const DISALLOWED_ITEM_TYPES = new Set([
+  "SPECIAL_REQUEST",
+  "NOTE",
+  "TEXT",
+  "FEE",
+  "SURCHARGE",
+  "SERVICE_CHARGE",
+  "TIP",
+  "TAX",
+]);
+
+const ALLOWED_ITEM_TYPES = new Set([
+  "MENU_ITEM",
+  "ITEM",
+  "ENTREE",
+  "PRODUCT",
+  "OPEN_ITEM",
+  "RETAIL",
+  "RETAIL_ITEM",
+  "BEVERAGE",
+]);
+
+function getSelectionType(selection: ToastSelection): string {
+  const raw = (selection as any)?.selectionType ?? selection.selectionType;
+  if (typeof raw !== "string") {
+    return "";
+  }
+  return raw.trim().toUpperCase().replace(/\s+/g, "_");
+}
+
+function getItemType(selection: ToastSelection): string {
+  const raw = (selection as any)?.item?.itemType ?? (selection as any)?.item?.type;
+  if (typeof raw !== "string") {
+    return "";
+  }
+  return raw.trim().toUpperCase().replace(/\s+/g, "_");
 }
 
 function getKitchenTicketName(entity: unknown): string | undefined {
@@ -1011,9 +1344,12 @@ function extractSpecialInstructions(selection: ToastSelection, itemName: string)
     return explicit;
   }
 
-  const display = getSelectionDisplayName(selection);
-  if (display && display !== itemName) {
-    return display;
+  const selectionType = getSelectionType(selection);
+  if (selectionType === "SPECIAL_REQUEST") {
+    const display = getSelectionDisplayName(selection);
+    if (display && display !== itemName) {
+      return display;
+    }
   }
 
   return null;
