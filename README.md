@@ -8,7 +8,7 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders (default 60 minute window, max 120). Accepts `?minutes=` and optional `?debug=1` for diagnostics. | `curl -s "https://<worker>/api/orders/latest?minutes=30" \| jq` |
-| `GET` | `/api/items-expanded` | Flattens Toast orders into individual line items enriched with menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?start=2024-01-01T00:00:00Z" \| jq` |
+| `GET` | `/api/items-expanded` | Flattens Toast orders into individual line items enriched with menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=OPEN" \| jq` |
 
 ### `/api/orders/latest`
 The handler accepts an optional `?minutes=` query parameter that clamps between 1 and 120 minutes (default 60) and fetches all pages from `orders/v2/ordersBulk` until no more data is available. It returns the familiar payload shape `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`. When `?debug=1` is present an additional `debug.pages` array is included that details each paginated request.
@@ -16,10 +16,25 @@ The handler accepts an optional `?minutes=` query parameter that clamps between 
 ### `/api/items-expanded`
 This endpoint is designed for dashboards that need flattened line items. It:
 
-- Accepts optional ISO-8601 `start`/`end` query parameters defining the Toast order window (defaulting to the last 24 hours ending at "now").
+- Accepts optional ISO-8601 `start`/`end` query parameters defining the Toast order window (defaulting to the last 2 hours ending at "now").
 - Supports optional `status` and `locationId` filters and a `limit` (default 500, maximum 5000).
 - Fetches the published menu document once per request to cross-reference item and modifier names.
 - Returns `{ items: ExpandedItem[] }` where each item includes order metadata, timing information, the resolved item/modifier names, special instructions, and price/currency details when available.
+
+#### Filters
+
+| Query        | Description                                                                                   | Example                                            |
+| ------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Defaults to 2 hours before `end`.   | `/api/items-expanded?start=2024-03-09T14:00:00Z`   |
+| `end`        | ISO-8601 timestamp (UTC) for the end of the window. Defaults to the current time.             | `/api/items-expanded?end=2024-03-09T16:00:00Z`     |
+| `status`     | Case-insensitive Toast order status filter.                                                   | `/api/items-expanded?status=paid`                  |
+| `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/items-expanded?locationId=<location-guid>`   |
+| `limit`      | Maximum number of expanded items to return (1-5000, default 500).                             | `/api/items-expanded?limit=250`                    |
+
+#### Sample requests
+
+- All items from the last two hours in chronological order: `curl -s "https://<worker>/api/items-expanded" \| jq`
+- Filtered by location and status with custom window: `curl -s "https://<worker>/api/items-expanded?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
 
 ### `/api/menus`
 `/api/menus` returns `{ ok, metadata, menu, cacheHit }` where:

@@ -4,7 +4,7 @@ import { jsonResponse } from "../lib/http.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
-const DEFAULT_RANGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DEFAULT_RANGE_MS = 2 * 60 * 60 * 1000; // 2 hours
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 5000;
 const PAGE_SIZE = 100;
@@ -205,6 +205,8 @@ export function createItemsExpandedHandler(
         page = next;
       }
 
+      expanded.sort(compareExpandedItemsByOrderTime);
+
       return jsonResponse({ items: expanded });
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
@@ -257,6 +259,29 @@ function toToastIsoUtc(date: Date): string {
 
 function errorResponse(status: number, message: string, code = "BAD_REQUEST"): Response {
   return jsonResponse({ error: { message, code } }, { status });
+}
+
+function compareExpandedItemsByOrderTime(a: ExpandedItem, b: ExpandedItem): number {
+  const aTime = parseToastTimestamp(a.times.orderTime);
+  const bTime = parseToastTimestamp(b.times.orderTime);
+
+  if (aTime !== null && bTime !== null && aTime !== bTime) {
+    return aTime - bTime;
+  }
+
+  if (aTime !== null && bTime === null) {
+    return -1;
+  }
+
+  if (aTime === null && bTime !== null) {
+    return 1;
+  }
+
+  if (a.orderId !== b.orderId) {
+    return a.orderId.localeCompare(b.orderId);
+  }
+
+  return a.lineItemId.localeCompare(b.lineItemId);
 }
 
 function createMenuIndex(document: ToastMenusDocument | null) {
@@ -390,6 +415,21 @@ function extractOrderTime(order: ToastOrder): string | null {
     }
   }
   return null;
+}
+
+function parseToastTimestamp(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  const parsed = Date.parse(normalized);
+
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  return parsed;
 }
 
 function extractOrderDueTime(order: ToastOrder): string | null {
