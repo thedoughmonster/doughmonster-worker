@@ -1,5 +1,5 @@
 import type { AppEnv } from "../config/env.js";
-import { getOrdersBulk, getPublishedMenus } from "../clients/toast.js";
+import { getDiningOptions, getOrdersBulk, getPublishedMenus } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
@@ -12,6 +12,7 @@ const PAGE_SIZE = 100;
 export interface ItemsExpandedDeps {
   getOrdersBulk: typeof getOrdersBulk;
   getPublishedMenus: typeof getPublishedMenus;
+  getDiningOptions: typeof getDiningOptions;
 }
 
 export interface OrderItemModifier {
@@ -47,7 +48,28 @@ export type OrderType =
   | "CATERING"
   | "UNKNOWN";
 
+export interface OrderDataBlock {
+  orderId: string;
+  location: { locationId?: string | null };
+  orderTime: string;
+  timeDue: string | null;
+  orderNumber: string | null;
+  checkId: string | null;
+  status: string | null;
+  customerName: string | null;
+  orderType: OrderType;
+  diningOptionGuid: string | null;
+  deliveryInfo?: Record<string, unknown>;
+  curbsidePickupInfo?: Record<string, unknown>;
+  table?: Record<string, unknown>;
+  seats?: number[];
+  employee?: Record<string, unknown>;
+  promisedDate?: string;
+  estimatedFulfillmentDate?: string;
+}
+
 export interface ExpandedOrder {
+  orderData: OrderDataBlock;
   orderId: string;
   orderNumber?: string | null;
   checkId?: string | null;
@@ -77,10 +99,18 @@ interface OrderAccumulator {
   currency: string | null;
   customerName: string | null;
   orderType: OrderType;
+   diningOptionGuid: string | null;
   locationId: string | null;
   orderTime: string;
   orderTimeMs: number | null;
   timeDue: string | null;
+  deliveryInfo?: Record<string, unknown> | null;
+  curbsidePickupInfo?: Record<string, unknown> | null;
+  dineInTable?: Record<string, unknown> | null;
+  dineInSeatNumbers: Set<number>;
+  dineInEmployee?: Record<string, unknown> | null;
+  takeoutPromisedDate: string | null;
+  takeoutEstimatedFulfillmentDate: string | null;
   items: ExpandedOrderItem[];
   baseItemsSubtotalCents: number;
   modifiersSubtotalCents: number;
@@ -90,9 +120,28 @@ interface OrderAccumulator {
   checkTotalsHydrated: boolean;
 }
 
+interface OrderBehaviorMetadata {
+  orderType: OrderType;
+  diningOptionGuid: string | null;
+  deliveryInfo?: Record<string, unknown> | null;
+  curbsidePickupInfo?: Record<string, unknown> | null;
+  dineInTable?: Record<string, unknown> | null;
+  dineInSeats?: number[];
+  dineInEmployee?: Record<string, unknown> | null;
+  takeoutPromisedDate?: string | null;
+  takeoutEstimatedFulfillmentDate?: string | null;
+}
+
+interface DiningOptionRecord {
+  guid: string;
+  behavior: string | null;
+  name: string | null;
+}
+
 export function createItemsExpandedHandler(
-  deps: ItemsExpandedDeps = { getOrdersBulk, getPublishedMenus }
+  deps: ItemsExpandedDeps = { getOrdersBulk, getPublishedMenus, getDiningOptions }
 ) {
+  const diningOptionResolver = createDiningOptionResolver(deps.getDiningOptions);
   return async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -178,7 +227,12 @@ export function createItemsExpandedHandler(
             }
 
             const customerName = extractCustomerName(order, check);
-            const orderType = extractOrderType(order, check);
+            const behaviorMeta = await resolveOrderBehavior(
+              env,
+              order,
+              check,
+              diningOptionResolver
+            );
             const key = `${order.guid}:${check.guid}`;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
@@ -187,11 +241,20 @@ export function createItemsExpandedHandler(
               status: orderStatus,
               currency: orderCurrency,
               customerName,
-              orderType,
+              orderType: behaviorMeta.orderType,
+              diningOptionGuid: behaviorMeta.diningOptionGuid,
               locationId,
               orderTime,
               orderTimeMs,
               timeDue,
+              deliveryInfo: behaviorMeta.deliveryInfo ?? null,
+              curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
+              dineInTable: behaviorMeta.dineInTable ?? null,
+              dineInSeats: behaviorMeta.dineInSeats ?? [],
+              dineInEmployee: behaviorMeta.dineInEmployee ?? null,
+              takeoutPromisedDate: behaviorMeta.takeoutPromisedDate ?? null,
+              takeoutEstimatedFulfillmentDate:
+                behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
             });
 
             updateAccumulatorMeta(accumulator, {
@@ -199,11 +262,20 @@ export function createItemsExpandedHandler(
               status: orderStatus,
               currency: orderCurrency,
               customerName,
-              orderType,
+              orderType: behaviorMeta.orderType,
+              diningOptionGuid: behaviorMeta.diningOptionGuid,
               locationId,
               orderTime,
               orderTimeMs,
               timeDue,
+              deliveryInfo: behaviorMeta.deliveryInfo ?? null,
+              curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
+              dineInTable: behaviorMeta.dineInTable ?? null,
+              dineInSeats: behaviorMeta.dineInSeats ?? [],
+              dineInEmployee: behaviorMeta.dineInEmployee ?? null,
+              takeoutPromisedDate: behaviorMeta.takeoutPromisedDate ?? null,
+              takeoutEstimatedFulfillmentDate:
+                behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
             });
 
             const selections = Array.isArray(check.selections) ? check.selections : [];
@@ -515,10 +587,18 @@ function getOrCreateAccumulator(
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
+    diningOptionGuid: string | null;
     locationId: string | null;
     orderTime: string;
     orderTimeMs: number | null;
     timeDue: string | null;
+    deliveryInfo?: Record<string, unknown> | null;
+    curbsidePickupInfo?: Record<string, unknown> | null;
+    dineInTable?: Record<string, unknown> | null;
+    dineInSeats?: number[];
+    dineInEmployee?: Record<string, unknown> | null;
+    takeoutPromisedDate?: string | null;
+    takeoutEstimatedFulfillmentDate?: string | null;
   }
 ): OrderAccumulator {
   let existing = aggregates.get(key);
@@ -532,10 +612,18 @@ function getOrCreateAccumulator(
       currency: seed.currency ?? null,
       customerName: seed.customerName ?? null,
       orderType: seed.orderType ?? "UNKNOWN",
+      diningOptionGuid: seed.diningOptionGuid ?? null,
       locationId: seed.locationId ?? null,
       orderTime: seed.orderTime,
       orderTimeMs: seed.orderTimeMs ?? null,
       timeDue: seed.timeDue ?? null,
+      deliveryInfo: seed.deliveryInfo ?? null,
+      curbsidePickupInfo: seed.curbsidePickupInfo ?? null,
+      dineInTable: seed.dineInTable ?? null,
+      dineInSeatNumbers: new Set(Array.isArray(seed.dineInSeats) ? seed.dineInSeats : []),
+      dineInEmployee: seed.dineInEmployee ?? null,
+      takeoutPromisedDate: seed.takeoutPromisedDate ?? null,
+      takeoutEstimatedFulfillmentDate: seed.takeoutEstimatedFulfillmentDate ?? null,
       items: [],
       baseItemsSubtotalCents: 0,
       modifiersSubtotalCents: 0,
@@ -545,6 +633,14 @@ function getOrCreateAccumulator(
       checkTotalsHydrated: false,
     };
     aggregates.set(key, existing);
+  } else {
+    if (Array.isArray(seed.dineInSeats) && seed.dineInSeats.length > 0) {
+      for (const seat of seed.dineInSeats) {
+        if (typeof seat === "number" && Number.isFinite(seat)) {
+          existing.dineInSeatNumbers.add(seat);
+        }
+      }
+    }
   }
   return existing;
 }
@@ -557,10 +653,18 @@ function updateAccumulatorMeta(
     currency: string | null;
     customerName: string | null;
     orderType: OrderType;
+    diningOptionGuid: string | null;
     locationId: string | null;
     orderTime: string;
     orderTimeMs: number | null;
     timeDue: string | null;
+    deliveryInfo?: Record<string, unknown> | null;
+    curbsidePickupInfo?: Record<string, unknown> | null;
+    dineInTable?: Record<string, unknown> | null;
+    dineInSeats?: number[];
+    dineInEmployee?: Record<string, unknown> | null;
+    takeoutPromisedDate?: string | null;
+    takeoutEstimatedFulfillmentDate?: string | null;
   }
 ): void {
   if (meta.orderNumber && !accumulator.orderNumber) {
@@ -578,11 +682,39 @@ function updateAccumulatorMeta(
   if (meta.orderType && (accumulator.orderType === "UNKNOWN" || !accumulator.orderType)) {
     accumulator.orderType = meta.orderType;
   }
+  if (meta.diningOptionGuid && !accumulator.diningOptionGuid) {
+    accumulator.diningOptionGuid = meta.diningOptionGuid;
+  }
   if (meta.locationId && !accumulator.locationId) {
     accumulator.locationId = meta.locationId;
   }
   if (meta.timeDue && !accumulator.timeDue) {
     accumulator.timeDue = meta.timeDue;
+  }
+  if (meta.deliveryInfo && !accumulator.deliveryInfo) {
+    accumulator.deliveryInfo = meta.deliveryInfo;
+  }
+  if (meta.curbsidePickupInfo && !accumulator.curbsidePickupInfo) {
+    accumulator.curbsidePickupInfo = meta.curbsidePickupInfo;
+  }
+  if (meta.dineInTable && !accumulator.dineInTable) {
+    accumulator.dineInTable = meta.dineInTable;
+  }
+  if (meta.dineInEmployee && !accumulator.dineInEmployee) {
+    accumulator.dineInEmployee = meta.dineInEmployee;
+  }
+  if (Array.isArray(meta.dineInSeats) && meta.dineInSeats.length > 0) {
+    for (const seat of meta.dineInSeats) {
+      if (typeof seat === "number" && Number.isFinite(seat)) {
+        accumulator.dineInSeatNumbers.add(seat);
+      }
+    }
+  }
+  if (meta.takeoutPromisedDate && !accumulator.takeoutPromisedDate) {
+    accumulator.takeoutPromisedDate = meta.takeoutPromisedDate;
+  }
+  if (meta.takeoutEstimatedFulfillmentDate && !accumulator.takeoutEstimatedFulfillmentDate) {
+    accumulator.takeoutEstimatedFulfillmentDate = meta.takeoutEstimatedFulfillmentDate;
   }
   if (meta.orderTime) {
     accumulator.orderTime = meta.orderTime;
@@ -652,7 +784,51 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
     times.timeDue = entry.timeDue;
   }
 
+  const orderDataLocation: { locationId?: string | null } = {};
+  if (entry.locationId) {
+    orderDataLocation.locationId = entry.locationId;
+  }
+
+  const orderData: OrderDataBlock = {
+    orderId: entry.orderId,
+    location: orderDataLocation,
+    orderTime: entry.orderTime,
+    timeDue: entry.timeDue ?? null,
+    orderNumber: entry.orderNumber ?? null,
+    checkId: entry.checkId ?? null,
+    status: entry.status ?? null,
+    customerName: entry.customerName ?? null,
+    orderType: entry.orderType ?? "UNKNOWN",
+    diningOptionGuid: entry.diningOptionGuid ?? null,
+  };
+
+  if (entry.deliveryInfo) {
+    orderData.deliveryInfo = entry.deliveryInfo;
+  }
+  if (entry.curbsidePickupInfo) {
+    orderData.curbsidePickupInfo = entry.curbsidePickupInfo;
+  }
+  if (entry.dineInTable) {
+    orderData.table = entry.dineInTable;
+  }
+  const dineInSeats = Array.from(entry.dineInSeatNumbers)
+    .filter((seat): seat is number => typeof seat === "number" && Number.isFinite(seat))
+    .sort((a, b) => a - b);
+  if (dineInSeats.length > 0) {
+    orderData.seats = dineInSeats;
+  }
+  if (entry.dineInEmployee) {
+    orderData.employee = entry.dineInEmployee;
+  }
+  if (entry.takeoutPromisedDate) {
+    orderData.promisedDate = entry.takeoutPromisedDate;
+  }
+  if (entry.takeoutEstimatedFulfillmentDate) {
+    orderData.estimatedFulfillmentDate = entry.takeoutEstimatedFulfillmentDate;
+  }
+
   const order: ExpandedOrder = {
+    orderData,
     orderId: entry.orderId,
     orderType: entry.orderType ?? "UNKNOWN",
     location,
@@ -1034,7 +1210,598 @@ function normalizeName(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
-function extractOrderType(order: ToastOrder, check: ToastCheck): OrderType {
+function createDiningOptionResolver(fetcher: ItemsExpandedDeps["getDiningOptions"]) {
+  const cache = new Map<string, DiningOptionRecord>();
+  let inFlight: Promise<void> | null = null;
+
+  const prime = (value: unknown) => {
+    const normalized = normalizeDiningOptionRecord(value);
+    if (normalized) {
+      cache.set(normalized.guid, normalized);
+    }
+    if (value && typeof value === "object") {
+      const nested = (value as any)?.diningOption;
+      if (nested && nested !== value) {
+        prime(nested);
+      }
+    }
+  };
+
+  const load = async (env: AppEnv) => {
+    if (!fetcher) {
+      return;
+    }
+    if (!inFlight) {
+      inFlight = (async () => {
+        try {
+          const options = await fetcher(env);
+          if (Array.isArray(options)) {
+            for (const option of options) {
+              prime(option);
+            }
+          }
+        } catch {
+          // Swallow errors so order processing can continue with fallbacks.
+        } finally {
+          inFlight = null;
+        }
+      })();
+    }
+
+    if (inFlight) {
+      try {
+        await inFlight;
+      } catch {
+        // ignore fetch failures, fallback logic will handle UNKNOWN behavior.
+      }
+    }
+  };
+
+  return {
+    prime,
+    async resolve(env: AppEnv, guid: string | null): Promise<DiningOptionRecord | null> {
+      if (!guid) {
+        return null;
+      }
+      let record = cache.get(guid) ?? null;
+      if (!record || !record.behavior) {
+        await load(env);
+        record = cache.get(guid) ?? record;
+      }
+      return record ?? null;
+    },
+  };
+}
+
+async function resolveOrderBehavior(
+  env: AppEnv,
+  order: ToastOrder,
+  check: ToastCheck,
+  resolver: ReturnType<typeof createDiningOptionResolver>
+): Promise<OrderBehaviorMetadata> {
+  const candidates = gatherDiningOptionCandidates(order, check);
+  let diningOptionGuid: string | null = null;
+  let behavior: string | null = null;
+
+  for (const candidate of candidates) {
+    resolver.prime(candidate);
+    if (!behavior) {
+      const candidateBehavior = extractBehaviorString(candidate);
+      if (candidateBehavior) {
+        behavior = candidateBehavior;
+      }
+    }
+    if (!diningOptionGuid) {
+      const normalized = normalizeDiningOptionRecord(candidate);
+      if (normalized?.guid) {
+        diningOptionGuid = normalized.guid;
+        if (!behavior && normalized.behavior) {
+          behavior = normalized.behavior;
+        }
+      }
+    }
+  }
+
+  let resolvedRecord: DiningOptionRecord | null = null;
+  if (diningOptionGuid) {
+    resolvedRecord = await resolver.resolve(env, diningOptionGuid);
+    if (resolvedRecord) {
+      if (!behavior && resolvedRecord.behavior) {
+        behavior = resolvedRecord.behavior;
+      }
+      if (!diningOptionGuid && resolvedRecord.guid) {
+        diningOptionGuid = resolvedRecord.guid;
+      }
+    }
+  }
+
+  const normalizedBehavior = mapBehaviorToOrderType(behavior);
+  const fallbackType = inferOrderTypeFromContext(order, check);
+  const orderType = normalizedBehavior ?? fallbackType ?? "UNKNOWN";
+
+  const enrichment = collectBehaviorEnrichments(order, check, orderType);
+
+  return {
+    orderType,
+    diningOptionGuid: diningOptionGuid ?? resolvedRecord?.guid ?? null,
+    ...enrichment,
+  };
+}
+
+function collectBehaviorEnrichments(
+  order: ToastOrder,
+  check: ToastCheck,
+  orderType: OrderType
+): Partial<Omit<OrderBehaviorMetadata, "orderType" | "diningOptionGuid">> {
+  const enrichment: Partial<Omit<OrderBehaviorMetadata, "orderType" | "diningOptionGuid">> = {};
+
+  if (orderType === "DELIVERY") {
+    const delivery = extractDeliveryInfo(order, check);
+    if (delivery) {
+      enrichment.deliveryInfo = delivery;
+    }
+  }
+
+  if (orderType === "CURBSIDE") {
+    const curbside = extractCurbsidePickupInfo(order, check);
+    if (curbside) {
+      enrichment.curbsidePickupInfo = curbside;
+    }
+  }
+
+  if (orderType === "DINE_IN") {
+    const dineIn = extractDineInDetails(order, check);
+    if (dineIn.table) {
+      enrichment.dineInTable = dineIn.table;
+    }
+    if (dineIn.seats && dineIn.seats.length > 0) {
+      enrichment.dineInSeats = dineIn.seats;
+    }
+    if (dineIn.employee) {
+      enrichment.dineInEmployee = dineIn.employee;
+    }
+  }
+
+  if (orderType === "TAKEOUT") {
+    const takeout = extractTakeoutTiming(order, check);
+    if (takeout?.promisedDate) {
+      enrichment.takeoutPromisedDate = takeout.promisedDate;
+    }
+    if (takeout?.estimatedFulfillmentDate) {
+      enrichment.takeoutEstimatedFulfillmentDate = takeout.estimatedFulfillmentDate;
+    }
+  }
+
+  return enrichment;
+}
+
+function extractDeliveryInfo(order: ToastOrder, check: ToastCheck): Record<string, unknown> | null {
+  const info: Record<string, unknown> = {};
+  let hasInfo = false;
+
+  const assignString = (key: string, value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (info[key] === undefined) {
+      info[key] = trimmed;
+      hasInfo = true;
+    }
+  };
+
+  const assignNumber = (key: string, value: unknown) => {
+    if (typeof value === "number" && Number.isFinite(value) && info[key] === undefined) {
+      info[key] = value;
+      hasInfo = true;
+    }
+  };
+
+  const addAddress = (source: any) => {
+    if (!source || typeof source !== "object") {
+      return;
+    }
+    assignString("address1", source.address1 ?? source.line1 ?? source.street1);
+    assignString("address2", source.address2 ?? source.line2 ?? source.street2);
+    assignString("city", source.city ?? source.town);
+    assignString("state", source.state ?? source.region ?? source.province);
+    assignString("zipCode", source.zipCode ?? source.postalCode ?? source.zip ?? source.postcode);
+    assignString("country", source.country ?? source.countryCode);
+    assignString("administrativeArea", source.administrativeArea ?? source.county);
+    assignNumber("latitude", source.latitude);
+    assignNumber("longitude", source.longitude);
+  };
+
+  const sources: any[] = [];
+  const push = (value: any) => {
+    if (value && typeof value === "object") {
+      sources.push(value);
+    }
+  };
+
+  push((order as any)?.context?.deliveryInfo);
+  push((order as any)?.deliveryInfo);
+  push((order as any)?.destination);
+  push((order as any)?.shippingAddress);
+  push((order as any)?.deliveryDestination);
+  push((check as any)?.deliveryInfo);
+  push((check as any)?.destination);
+
+  for (const source of sources) {
+    assignString("recipientName", source.recipientName ?? source.name ?? source.customerName);
+    assignString("instructions", source.instructions ?? source.deliveryInstructions ?? source.dropoffInstructions);
+    assignString("notes", source.notes ?? source.deliveryNotes ?? source.customerNotes);
+    assignString("status", source.status ?? source.deliveryStatus ?? source.fulfillmentStatus);
+    assignString("quotedDeliveryDate", source.quotedDeliveryDate ?? source.quotedDate ?? source.quotedAt);
+    assignString("estimatedDeliveryDate", source.estimatedDeliveryDate ?? source.estimatedDate ?? source.estimatedArrivalDate);
+    assignString("promisedDate", source.promisedDate ?? source.promisedDeliveryDate);
+    assignString("readyDate", source.readyDate ?? source.readyTime);
+    assignString("contactPhone", source.contactPhone ?? source.phoneNumber ?? source.customerPhone);
+    assignString("contactEmail", source.contactEmail ?? source.email);
+    addAddress(source);
+    addAddress(source.address);
+    addAddress(source.deliveryAddress);
+  }
+
+  const timeSources = [order as any, (order as any)?.context, check as any];
+  for (const source of timeSources) {
+    if (!source) {
+      continue;
+    }
+    assignString("promisedDate", source.promisedDate);
+    assignString("estimatedFulfillmentDate", source.estimatedFulfillmentDate);
+    assignString("quotedDeliveryDate", source.quotedDeliveryDate);
+    assignString("estimatedDeliveryDate", source.estimatedDeliveryDate);
+    assignString("readyDate", source.readyDate);
+  }
+
+  return hasInfo ? info : null;
+}
+
+function extractCurbsidePickupInfo(order: ToastOrder, check: ToastCheck): Record<string, unknown> | null {
+  const sources = [
+    (check as any)?.curbsidePickupInfo,
+    (order as any)?.curbsidePickupInfo,
+    (order as any)?.context?.curbsidePickupInfo,
+  ];
+
+  const info: Record<string, unknown> = {};
+  let hasInfo = false;
+
+  const assign = (key: string, value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (info[key] === undefined) {
+      info[key] = trimmed;
+      hasInfo = true;
+    }
+  };
+
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+    assign("name", source.name);
+    assign("transportColor", source.transportColor);
+    assign("transportDescription", source.transportDescription ?? source.vehicleDescription);
+    assign("vehicleColor", source.vehicleColor ?? source.color);
+    assign("vehicleMake", source.vehicleMake ?? source.make);
+    assign("vehicleModel", source.vehicleModel ?? source.model);
+    assign(
+      "licensePlate",
+      source.licensePlate ?? source.plateNumber ?? source.vehicleLicensePlate ?? source.plate
+    );
+    assign("notes", source.notes ?? source.instructions ?? source.comments);
+    assign("parkingSpot", source.parkingSpot ?? source.pickupSpot ?? source.spotNumber);
+    assign("contactPhone", source.contactPhone ?? source.phoneNumber ?? source.customerPhone);
+    const vehicle = (source as any)?.vehicle;
+    if (vehicle && typeof vehicle === "object") {
+      assign("vehicleColor", vehicle.color ?? vehicle.vehicleColor ?? vehicle.paint);
+      assign("vehicleMake", vehicle.make ?? vehicle.brand);
+      assign("vehicleModel", vehicle.model ?? vehicle.description);
+      assign("licensePlate", vehicle.licensePlate ?? vehicle.plate);
+    }
+  }
+
+  return hasInfo ? info : null;
+}
+
+function extractDineInDetails(
+  order: ToastOrder,
+  check: ToastCheck
+): { table?: Record<string, unknown>; seats?: number[]; employee?: Record<string, unknown> } {
+  const result: { table?: Record<string, unknown>; seats?: number[]; employee?: Record<string, unknown> } = {};
+
+  const tableCandidates = [
+    (check as any)?.table,
+    (order as any)?.table,
+    (order as any)?.context?.table,
+    (check as any)?.tableAssignment,
+  ];
+  for (const candidate of tableCandidates) {
+    const sanitized = sanitizeReference(candidate);
+    if (sanitized) {
+      result.table = sanitized;
+      break;
+    }
+  }
+
+  const seatNumbers = new Set<number>();
+  const addSeat = (value: unknown) => {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      seatNumbers.add(value);
+    }
+  };
+  const selections = Array.isArray(check.selections) ? check.selections : [];
+  for (const selection of selections) {
+    addSeat((selection as any)?.seatNumber);
+  }
+  const explicitSeats = Array.isArray((check as any)?.seatNumbers) ? (check as any).seatNumbers : [];
+  for (const seat of explicitSeats) {
+    addSeat(seat);
+  }
+  if (seatNumbers.size > 0) {
+    result.seats = Array.from(seatNumbers).sort((a, b) => a - b);
+  }
+
+  const employeeCandidates: unknown[] = [
+    (check as any)?.openedBy,
+    (check as any)?.server,
+    (check as any)?.owner,
+    (order as any)?.openedBy,
+    (order as any)?.createdBy,
+    (order as any)?.server,
+  ];
+  const employeeArrays = [
+    (check as any)?.servers,
+    (check as any)?.employees,
+    (order as any)?.servers,
+    (order as any)?.employees,
+  ];
+  for (const collection of employeeArrays) {
+    if (Array.isArray(collection)) {
+      for (const candidate of collection) {
+        employeeCandidates.push(candidate);
+      }
+    }
+  }
+
+  for (const candidate of employeeCandidates) {
+    const sanitized = sanitizeReference(candidate, [
+      "employeeNumber",
+      "employeeId",
+      "displayName",
+      "id",
+      "externalEmployeeId",
+    ]);
+    if (sanitized) {
+      result.employee = sanitized;
+      break;
+    }
+  }
+
+  return result;
+}
+
+function extractTakeoutTiming(
+  order: ToastOrder,
+  check: ToastCheck
+): { promisedDate?: string; estimatedFulfillmentDate?: string } | null {
+  const data: { promisedDate?: string; estimatedFulfillmentDate?: string } = {};
+  const assign = (key: "promisedDate" | "estimatedFulfillmentDate", value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (data[key] === undefined) {
+      data[key] = trimmed;
+    }
+  };
+
+  assign("promisedDate", (check as any)?.promisedDate);
+  assign("promisedDate", (order as any)?.promisedDate);
+  assign("promisedDate", (order as any)?.context?.promisedDate);
+  assign("promisedDate", (order as any)?.expectedReadyDate);
+
+  assign("estimatedFulfillmentDate", (check as any)?.estimatedFulfillmentDate);
+  assign("estimatedFulfillmentDate", (order as any)?.estimatedFulfillmentDate);
+  assign("estimatedFulfillmentDate", (order as any)?.context?.estimatedFulfillmentDate);
+  assign("estimatedFulfillmentDate", (order as any)?.readyDate);
+
+  return Object.keys(data).length > 0 ? data : null;
+}
+
+function gatherDiningOptionCandidates(order: ToastOrder, check: ToastCheck): unknown[] {
+  const values: unknown[] = [];
+  const push = (...items: unknown[]) => {
+    for (const item of items) {
+      if (item !== undefined && item !== null) {
+        values.push(item);
+      }
+    }
+  };
+
+  push(
+    (check as any)?.diningOption,
+    (check as any)?.diningOptionInfo,
+    (order as any)?.diningOption,
+    (order as any)?.context?.diningOption,
+    (order as any)?.context?.diningOptionInfo,
+    (order as any)?.source?.diningOption,
+    (order as any)?.fulfillment?.diningOption
+  );
+  push((check as any)?.diningOptionGuid, (order as any)?.diningOptionGuid, (order as any)?.context?.diningOptionGuid);
+
+  return values;
+}
+
+function normalizeDiningOptionRecord(value: unknown): DiningOptionRecord | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (looksLikeGuid(trimmed)) {
+      return { guid: trimmed, behavior: null, name: null };
+    }
+    return null;
+  }
+
+  if (typeof value !== "object") {
+    return null;
+  }
+
+  const obj = value as any;
+
+  if (obj?.diningOption && obj.diningOption !== value) {
+    const nested = normalizeDiningOptionRecord(obj.diningOption);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  const guidCandidates = [obj.guid, obj.diningOptionGuid, obj.optionGuid, obj.id];
+  let guid: string | null = null;
+  for (const candidate of guidCandidates) {
+    if (typeof candidate === "string" && looksLikeGuid(candidate)) {
+      guid = candidate.trim();
+      break;
+    }
+  }
+
+  if (!guid) {
+    return null;
+  }
+
+  const behaviorCandidates = [
+    obj.behavior,
+    obj.diningOptionBehavior,
+    obj.optionBehavior,
+    obj.type,
+    obj.mode,
+    obj.behaviour,
+  ];
+  let behavior: string | null = null;
+  for (const candidate of behaviorCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      behavior = candidate.trim();
+      break;
+    }
+  }
+
+  const nameCandidates = [obj.name, obj.displayName, obj.label, obj.diningOptionName];
+  let name: string | null = null;
+  for (const candidate of nameCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      name = candidate.trim();
+      break;
+    }
+  }
+
+  return { guid, behavior, name };
+}
+
+function looksLikeGuid(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (!/[0-9-]/.test(trimmed)) {
+    return false;
+  }
+  return /^[0-9a-zA-Z-]+$/.test(trimmed);
+}
+
+function extractBehaviorString(candidate: unknown): string | null {
+  if (!candidate) {
+    return null;
+  }
+  if (typeof candidate === "string") {
+    const trimmed = candidate.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const normalized = normalizeOrderType(trimmed);
+    return normalized ? trimmed : null;
+  }
+  if (typeof candidate !== "object") {
+    return null;
+  }
+  const obj = candidate as any;
+  const behaviorCandidates = [
+    obj.behavior,
+    obj.diningOptionBehavior,
+    obj.optionBehavior,
+    obj.type,
+    obj.mode,
+    obj.behaviour,
+  ];
+  for (const value of behaviorCandidates) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const normalized = normalizeOrderType(trimmed);
+      if (normalized) {
+        return trimmed;
+      }
+    }
+  }
+  return null;
+}
+
+function mapBehaviorToOrderType(behavior: string | null): OrderType | null {
+  if (!behavior) {
+    return null;
+  }
+  return normalizeOrderType(behavior);
+}
+
+function sanitizeReference(value: unknown, extraKeys: string[] = []): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? { name: trimmed } : null;
+  }
+  if (typeof value !== "object") {
+    return null;
+  }
+
+  const baseKeys = new Set(["guid", "name", "externalId", "entityType", "displayName", "id"]);
+  for (const key of extraKeys) {
+    baseKeys.add(key);
+  }
+
+  const output: Record<string, unknown> = {};
+  for (const key of baseKeys) {
+    const candidate = (value as any)[key];
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed) {
+        output[key] = trimmed;
+      }
+    }
+  }
+
+  return Object.keys(output).length > 0 ? output : null;
+}
+
+function inferOrderTypeFromContext(order: ToastOrder, check: ToastCheck): OrderType {
   if ((check as any)?.curbsidePickupInfo) {
     return "CURBSIDE";
   }

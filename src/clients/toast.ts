@@ -26,6 +26,12 @@ export interface MenuMetadataResponse {
 
 export type PublishedMenuResponse = any;
 
+export interface DiningOptionConfig {
+  guid: string;
+  behavior?: string | null;
+  name?: string | null;
+}
+
 export async function getOrdersBulk(env: AppEnv, params: GetOrdersBulkParams): Promise<OrdersBulkResult> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = new URL(`${base}/orders/v2/ordersBulk`);
@@ -105,6 +111,33 @@ export async function getPublishedMenus(env: AppEnv): Promise<PublishedMenuRespo
   } catch (err) {
     if (isToastNotFound(err)) {
       return null;
+    }
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
+export async function getDiningOptions(env: AppEnv): Promise<DiningOptionConfig[]> {
+  const base = env.TOAST_API_BASE.replace(/\/+$/, "");
+  const url = `${base}/config/v2/diningOptions`;
+  const headers = await getToastHeaders(env);
+
+  try {
+    const response = await fetchWithBackoff(url, { method: "GET", headers });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : null;
+
+    if (Array.isArray(json?.diningOptions)) {
+      return json.diningOptions as DiningOptionConfig[];
+    }
+
+    if (Array.isArray(json)) {
+      return json as DiningOptionConfig[];
+    }
+
+    return [];
+  } catch (err) {
+    if (isToastNotFound(err)) {
+      return [];
     }
     throw err instanceof Error ? err : new Error(String(err));
   }
