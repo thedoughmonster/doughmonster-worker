@@ -51,32 +51,24 @@ The worker keeps the most recent published menu in memory and reuses it until To
 
 ## Operations UI
 
-The repository includes a React-based "Orders – All Day" view under `src/ui/OrdersAllDayView.tsx`. The UI is designed for
-back-of-house dashboards that need a continuously updating look at the orders coming through the worker:
+Visiting the root path (`/`) now serves a standalone "Orders – All Day View" dashboard powered by the static files in `/public`.
+The experience mirrors the needs of an expediter station and runs entirely in the browser—no additional framework required.
 
-- Polls the `/api/items-expanded` endpoint every 10 seconds and renders cards grouped by order with aggregated modifier data.
-- Highlights order urgency based on due times, fulfillment status, and delivery state so expediter teams can triage at a glance.
-- Provides filter chips (`All`, `Open`, `Ready`, `Delivery`) alongside a modifier rail that summarizes the ingredients/options
-  appearing in the current result set.
+- Polls `/api/items-expanded` every 10 seconds (configurable in `public/app.js`) and re-renders without full-page refreshes.
+- Fixed top bar shows the live clock, open order count (after filters), lookback toggle (`Default` vs `Full Day`), and the last
+  successful refresh timestamp.
+- Modifier rail on the left aggregates modifiers across the currently visible orders (collapsible on small screens).
+- Order cards combine identical line items, collapse duplicate modifiers, surface fulfillment status chips, and highlight due
+  times (overdue vs. due soon).
+- Filters include `All`, `Open`, `Ready`, and `Delivery`. Switching to the "Full Day" lookback adds `start/end` parameters to the
+  API request covering local midnight through "now".
 
-### Accessing the view
+### Local development
 
-The worker only exposes APIs; it does not serve the UI directly. To use the component:
-
-1. Start the worker locally with `npm run dev` so the API is available at `http://127.0.0.1:8787`.
-2. Import the component into the React application that will host your operations dashboard, e.g.
-   ```tsx
-   import OrdersAllDayView, { ORDERS_ENDPOINT } from "./src/ui/OrdersAllDayView";
-
-   export default function App() {
-     return <OrdersAllDayView />;
-   }
-   ```
-3. Override the exported `ORDERS_ENDPOINT` constant so that it points at your worker instance. During local development use
-   `http://127.0.0.1:8787/api/items-expanded`; in production set it to `https://<your-worker>/api/items-expanded`.
-
-Because the component uses modern React features and Tailwind-style utility classes, bundle it with your preferred build tool
-(Vite, Next.js, Remix, etc.) so those dependencies are available and the CSS classes are compiled into your dashboard.
+1. Start the worker with `npm run dev` (Wrangler serves the worker and static assets).
+2. Open `http://127.0.0.1:8787/` to load the dashboard. The page polls the co-located API, so no additional configuration is
+   required.
+3. Customize intervals, styles, or behavior via the files in `/public`.
 
 ## Environment variables
 | Name | Type | Purpose |
