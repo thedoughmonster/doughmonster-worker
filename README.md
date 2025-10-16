@@ -49,6 +49,35 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 
 The worker keeps the most recent published menu in memory and reuses it until Toast reports a different `lastUpdated` value. This minimizes Toast API traffic while still returning fresh data as soon as Toast publishes a new menu. The cache is per-worker instance and resets when the worker is cold-started or redeployed.
 
+## Operations UI
+
+The repository includes a React-based "Orders – All Day" view under `src/ui/OrdersAllDayView.tsx`. The UI is designed for
+back-of-house dashboards that need a continuously updating look at the orders coming through the worker:
+
+- Polls the `/api/items-expanded` endpoint every 10 seconds and renders cards grouped by order with aggregated modifier data.
+- Highlights order urgency based on due times, fulfillment status, and delivery state so expediter teams can triage at a glance.
+- Provides filter chips (`All`, `Open`, `Ready`, `Delivery`) alongside a modifier rail that summarizes the ingredients/options
+  appearing in the current result set.
+
+### Accessing the view
+
+The worker only exposes APIs; it does not serve the UI directly. To use the component:
+
+1. Start the worker locally with `npm run dev` so the API is available at `http://127.0.0.1:8787`.
+2. Import the component into the React application that will host your operations dashboard, e.g.
+   ```tsx
+   import OrdersAllDayView, { ORDERS_ENDPOINT } from "./src/ui/OrdersAllDayView";
+
+   export default function App() {
+     return <OrdersAllDayView />;
+   }
+   ```
+3. Override the exported `ORDERS_ENDPOINT` constant so that it points at your worker instance. During local development use
+   `http://127.0.0.1:8787/api/items-expanded`; in production set it to `https://<your-worker>/api/items-expanded`.
+
+Because the component uses modern React features and Tailwind-style utility classes, bundle it with your preferred build tool
+(Vite, Next.js, Remix, etc.) so those dependencies are available and the CSS classes are compiled into your dashboard.
+
 ## Environment variables
 | Name | Type | Purpose |
 | ---- | ---- | ------- |
