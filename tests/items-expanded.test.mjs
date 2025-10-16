@@ -85,6 +85,74 @@ test('items-expanded calculates modifier totals with quantities and exposes modi
   assert.equal(item.money.totalItemPriceCents, 600);
 });
 
+test('items-expanded collapses identical modifiers on a single item into one entry', async () => {
+  const orders = [
+    {
+      guid: 'order-modifiers-collapsed',
+      createdDate: '2024-01-01T12:02:00.000+0000',
+      checks: [
+        {
+          guid: 'check-modifiers-collapsed',
+          selections: [
+            {
+              guid: 'sel-modifiers-collapsed',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 4,
+              item: { guid: 'item-collapsed' },
+              modifiers: [
+                {
+                  guid: 'dup-1',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.4,
+                  optionGroup: { name: 'Extras' },
+                  item: { guid: 'mod-identical' },
+                },
+                {
+                  guid: 'dup-2',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.4,
+                  optionGroup: { name: 'Extras' },
+                  item: { guid: 'mod-identical' },
+                },
+                {
+                  guid: 'dup-3',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.4,
+                  optionGroup: { name: 'Extras' },
+                  item: { guid: 'mod-identical' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+
+  const [order] = body.orders;
+  const [item] = order.items;
+  assert.equal(item.modifiers.length, 1);
+  assert.equal(item.modifiers[0].id, 'mod-identical');
+  assert.equal(item.modifiers[0].quantity, 3);
+  assert.equal(item.modifiers[0].priceCents, 120);
+  assert.equal(item.money.modifierTotalCents, 120);
+  assert.equal(
+    item.money.modifierTotalCents,
+    item.modifiers.reduce((sum, mod) => sum + mod.priceCents, 0)
+  );
+});
+
 test('items-expanded collapses duplicate modifiers emitted separately', async () => {
   const orders = [
     {
@@ -341,9 +409,16 @@ test('items-expanded exposes orderData block with required metadata as first key
   assert.equal(data.orderType, 'TAKEOUT');
   assert.equal(data.diningOptionGuid, 'dining-1');
   assert.equal('deliveryInfo' in data, false);
-  assert.equal(order.orderId, 'order-data');
-  assert.equal(order.orderNumber, '42');
-  assert.equal(order.orderData.customerName, 'Sam Guest');
+  assert.equal(order.orderId, undefined);
+  assert.equal(order.orderNumber, undefined);
+  assert.equal(order.orderType, undefined);
+  assert.equal(order.location, undefined);
+  assert.equal(order.times, undefined);
+  assert.equal(order.status, undefined);
+  assert.equal(order.customerName, undefined);
+  assert.equal(order.checkId, undefined);
+  assert.equal(order.diningOptionGuid, undefined);
+  assert.equal(order.fulfillmentStatus, undefined);
 });
 
 test('items-expanded filters out special requests and fees from items array', async () => {
@@ -477,7 +552,7 @@ test('items-expanded uses customer name fallbacks when direct customer data is m
 
   assert.equal(response.status, 200);
   assert.equal(body.orders.length, 1);
-  assert.equal(body.orders[0].customerName, 'VIP Table');
+  assert.equal(body.orders[0].customerName, undefined);
   assert.equal(body.orders[0].orderData.customerName, 'VIP Table');
 });
 
@@ -522,6 +597,62 @@ test('items-expanded resolves totals using the higher of upstream and computed v
   assert.equal(money.baseItemPriceCents, 200);
   assert.equal(money.modifierTotalCents, 50);
   assert.equal(money.totalItemPriceCents, 250);
+});
+
+test('items-expanded maintains totals when modifiers are deduplicated', async () => {
+  const orders = [
+    {
+      guid: 'order-total-dedup',
+      createdDate: '2024-01-01T15:30:00.000+0000',
+      checks: [
+        {
+          guid: 'check-total-dedup',
+          selections: [
+            {
+              guid: 'sel-total-dedup',
+              selectionType: 'MENU_ITEM',
+              quantity: 2,
+              receiptLinePrice: 5,
+              price: 12,
+              item: { guid: 'item-total-dedup', itemType: 'MENU_ITEM' },
+              modifiers: [
+                {
+                  guid: 'mod-total-a',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.5,
+                  item: { guid: 'mod-total', itemType: 'MENU_ITEM' },
+                },
+                {
+                  guid: 'mod-total-b',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  price: 0.5,
+                  item: { guid: 'mod-total', itemType: 'MENU_ITEM' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+
+  const [order] = body.orders;
+  assert.equal(order.totals.baseItemsSubtotalCents, 1000);
+  assert.equal(order.totals.modifiersSubtotalCents, 200);
+  assert.equal(order.totals.grandTotalCents, 1200);
+  const [item] = order.items;
+  assert.equal(item.modifiers.length, 1);
+  assert.equal(item.modifiers[0].priceCents, 200);
+  assert.equal(item.money.modifierTotalCents, 200);
 });
 
 test('items-expanded derives order type from available metadata', async () => {
@@ -592,19 +723,16 @@ test('items-expanded derives order type from available metadata', async () => {
   const body = await response.json();
 
   assert.equal(response.status, 200);
-  const curbside = body.orders.find((order) => order.orderId === 'order-curbside');
-  const delivery = body.orders.find((order) => order.orderId === 'order-delivery');
-  const takeout = body.orders.find((order) => order.orderId === 'order-takeout');
+  const curbside = body.orders.find((order) => order.orderData.orderId === 'order-curbside');
+  const delivery = body.orders.find((order) => order.orderData.orderId === 'order-delivery');
+  const takeout = body.orders.find((order) => order.orderData.orderId === 'order-takeout');
 
   assert.ok(curbside, 'curbside order should be present');
   assert.ok(delivery, 'delivery order should be present');
   assert.ok(takeout, 'takeout order should be present');
 
-  assert.equal(curbside.orderType, 'CURBSIDE');
   assert.equal(curbside.orderData.orderType, 'CURBSIDE');
-  assert.equal(delivery.orderType, 'DELIVERY');
   assert.equal(delivery.orderData.orderType, 'DELIVERY');
-  assert.equal(takeout.orderType, 'TAKEOUT');
   assert.equal(takeout.orderData.orderType, 'TAKEOUT');
 });
 
@@ -613,6 +741,7 @@ test('items-expanded includes behavior-specific enrichment data when available',
     {
       guid: 'order-delivery',
       createdDate: '2024-01-01T17:00:00.000+0000',
+      deliveryInfo: { deliveryState: 'IN_PROGRESS' },
       context: {
         diningOption: { guid: 'delivery-guid', behavior: 'DELIVERY' },
         deliveryInfo: {
@@ -717,7 +846,7 @@ test('items-expanded includes behavior-specific enrichment data when available',
   assert.equal(response.status, 200);
   assert.equal(body.orders.length, 4);
 
-  const byId = Object.fromEntries(body.orders.map((order) => [order.orderId, order]));
+  const byId = Object.fromEntries(body.orders.map((order) => [order.orderData.orderId, order]));
 
   const delivery = byId['order-delivery'];
   assert.ok(delivery.orderData.deliveryInfo, 'delivery info should be present');
@@ -725,6 +854,7 @@ test('items-expanded includes behavior-specific enrichment data when available',
   assert.equal(delivery.orderData.deliveryInfo.address1, '123 Main St');
   assert.equal(delivery.orderData.deliveryInfo.notes, 'Leave at door');
   assert.equal(delivery.orderData.deliveryInfo.quotedDeliveryDate, '2024-01-01T18:30:00.000+0000');
+  assert.equal(delivery.orderData.deliveryState, 'IN_PROGRESS');
 
   const curbside = byId['order-curbside-enrich'];
   assert.ok(curbside.orderData.curbsidePickupInfo);
@@ -785,5 +915,94 @@ test('items-expanded exposes aggregated fulfillment status on orderData', async 
   assert.equal(body.orders.length, 1);
 
   const [order] = body.orders;
-  assert.equal(order.orderData.fulfillmentStatus, 'READY');
+  assert.equal(order.orderData.fulfillmentStatus, 'IN_PREPARATION');
+  const statuses = order.items.map((item) => item.fulfillmentStatus);
+  assert.deepEqual(statuses, ['NEW', 'READY']);
+});
+
+test('items-expanded reports READY_FOR_PICKUP when all selections are ready', async () => {
+  const orders = [
+    {
+      guid: 'order-fulfillment-ready',
+      createdDate: '2024-01-01T12:40:00.000+0000',
+      checks: [
+        {
+          guid: 'check-fulfillment-ready',
+          selections: [
+            {
+              guid: 'sel-ready-1',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 4,
+              price: 4,
+              item: { guid: 'item-ready-1' },
+              fulfillmentStatus: 'READY',
+            },
+            {
+              guid: 'sel-ready-2',
+              selectionType: 'MENU_ITEM',
+              quantity: 2,
+              receiptLinePrice: 3,
+              price: 6,
+              item: { guid: 'item-ready-2' },
+              fulfillmentStatus: 'READY',
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+
+  const [order] = body.orders;
+  assert.equal(order.orderData.fulfillmentStatus, 'READY_FOR_PICKUP');
+  assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['READY', 'READY']);
+});
+
+test('items-expanded prioritizes webhook-derived fulfillment status over selection states', async () => {
+  const orders = [
+    {
+      guid: 'order-fulfillment-webhook',
+      createdDate: '2024-01-01T12:45:00.000+0000',
+      context: {
+        guestOrderFulfillmentStatusHistory: [
+          { status: 'IN_PREPARATION' },
+          { status: 'READY_FOR_PICKUP' },
+        ],
+      },
+      checks: [
+        {
+          guid: 'check-fulfillment-webhook',
+          selections: [
+            {
+              guid: 'sel-webhook-1',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 5,
+              price: 5,
+              item: { guid: 'item-webhook-1' },
+              fulfillmentStatus: 'HOLD',
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+
+  const [order] = body.orders;
+  assert.equal(order.orderData.fulfillmentStatus, 'READY_FOR_PICKUP');
+  assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['HOLD']);
 });
