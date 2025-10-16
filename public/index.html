@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orders – All Day View</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <aside id="modifier-rail" class="modifier-rail" aria-label="Modifier summary">
+        <div class="modifier-rail-header">
+          <h2>Modifiers</h2>
+          <button id="close-rail" class="icon-button" aria-label="Hide modifier rail">×</button>
+        </div>
+        <div id="modifier-rail-list" class="modifier-rail-list" role="list"></div>
+      </aside>
+      <div class="main-region">
+        <header class="top-bar" aria-label="Orders dashboard controls">
+          <div class="top-bar-left">
+            <button id="open-rail" class="icon-button mobile-only" aria-label="Show modifier rail">☰</button>
+            <div class="top-bar-titles">
+              <h1>Orders – All Day View</h1>
+              <div class="top-bar-meta">
+                <span id="current-time" aria-live="polite">--:--:--</span>
+                <span id="open-order-count">Open Orders: 0</span>
+              </div>
+            </div>
+          </div>
+          <div class="top-bar-right">
+            <div class="control-group" role="group" aria-label="Filters">
+              <div class="filter-chips" id="filter-chips" role="tablist"></div>
+              <div class="lookback-toggle" role="group" aria-label="Lookback window">
+                <button class="chip" data-lookback="default" aria-pressed="true">Default</button>
+                <button class="chip" data-lookback="full">Full Day</button>
+              </div>
+              <span id="last-updated" class="last-updated" aria-live="polite">Last updated --:--:--</span>
+            </div>
+            <button id="settings-button" class="icon-button" aria-label="Settings" title="Settings">⚙</button>
+          </div>
+        </header>
+        <main class="content-area" aria-live="polite">
+          <div id="status-area" class="status-area" role="status"></div>
+          <section id="orders-container" class="orders-grid" aria-label="Orders list"></section>
+        </main>
+      </div>
+    </div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
