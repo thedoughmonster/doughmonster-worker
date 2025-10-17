@@ -1,5 +1,10 @@
 import type { AppEnv } from "../config/env.js";
-import { getDiningOptions, getOrdersBulk, getPublishedMenus } from "../clients/toast.js";
+import {
+  getDiningOptions,
+  getMenuCacheInfo,
+  getOrdersBulk,
+  getPublishedMenusCached,
+} from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
@@ -15,7 +20,7 @@ const MAX_PROGRESSIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export interface ItemsExpandedDeps {
   getOrdersBulk: typeof getOrdersBulk;
-  getPublishedMenus: typeof getPublishedMenus;
+  getPublishedMenus: (env: AppEnv, request?: Request) => Promise<ToastMenusDocument | null>;
   getDiningOptions: typeof getDiningOptions;
 }
 
@@ -213,7 +218,11 @@ interface DiagnosticsCounters {
 }
 
 export function createItemsExpandedHandler(
-  deps: ItemsExpandedDeps = { getOrdersBulk, getPublishedMenus, getDiningOptions }
+  deps: ItemsExpandedDeps = {
+    getOrdersBulk,
+    getPublishedMenus: getPublishedMenusCached,
+    getDiningOptions,
+  }
 ) {
   const diningOptionResolver = createDiningOptionResolver(deps.getDiningOptions);
   return async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
@@ -284,7 +293,7 @@ export function createItemsExpandedHandler(
     };
 
     try {
-      const menuDoc = await deps.getPublishedMenus(env);
+      const menuDoc = await deps.getPublishedMenus(env, request);
       const menuIndex = createMenuIndex(menuDoc);
 
       const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
@@ -737,7 +746,14 @@ export function createItemsExpandedHandler(
         });
       }
 
-      return jsonResponse({ orders: ordersResponse });
+      const menuCacheInfo = getMenuCacheInfo(request);
+      return jsonResponse({
+        orders: ordersResponse,
+        cacheInfo: {
+          menu: menuCacheInfo?.status ?? "miss-network",
+          menuUpdatedAt: menuCacheInfo?.updatedAt,
+        },
+      });
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
       const code = typeof err?.code === "string" ? err.code : status === 500 ? "INTERNAL_ERROR" : "ERROR";

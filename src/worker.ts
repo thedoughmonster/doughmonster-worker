@@ -6,8 +6,16 @@ import handleItemsExpanded from "./routes/items-expanded.js";
 
 const STATIC_CACHE_SECONDS = 60;
 
+interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
 export default {
-  async fetch(request: Request, rawEnv: Record<string, unknown>): Promise<Response> {
+  async fetch(
+    request: Request,
+    rawEnv: Record<string, unknown>,
+    context?: ExecutionContextLike
+  ): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -18,6 +26,9 @@ export default {
       }
 
       const env = getEnv(rawEnv);
+      if (context && typeof context.waitUntil === "function") {
+        env.waitUntil = context.waitUntil.bind(context);
+      }
 
       if (request.method === "GET" && path === "/api/health") {
         return handleHealth();
