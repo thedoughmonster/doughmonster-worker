@@ -42,14 +42,15 @@ Production consumers should continue calling the endpoint without `debug`; the t
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
 
-- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. The worker incrementally widens the lookback window in one-hour steps (up to seven days) until it has collected enough qualifying orders or hits the paging/time safety limits.
+- Internally calls `/api/orders/latest` (to load recent orders) and `/api/menus` (to enrich menu metadata) so it reuses the worker's KV cache while returning the same JSON schema as the previous direct-Toast implementation.
+- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. `/api/orders/latest` handles the rolling lookback/pagination; items-expanded filters out non-line items, aggregates line-level totals, and applies the requested limit.
 - Each order groups all items for a Toast check and includes modifier breakdowns, per-item pricing (base, modifier, total), order timing, customer/location metadata, and aggregated totals (base, modifiers, discounts, service charges, tips, and grand total).
-- Results are deterministic: orders are sorted by order time descending (falling back to orderId then checkId), line items are ordered by display/index metadata (display order → creation time → receipt line position → selection index → seat → name → menuItemId → lineItemId), and modifiers remain grouped so cards do not jitter between refreshes.
+- Results are deterministic: orders are sorted by `orderTime` descending (breaking ties with `orderId` then `checkId`), and items are sorted by display/index metadata (display order → creation time → receipt line position → selection index → seat → name → `menuItemId` → `lineItemId`) so nothing jumps between polls.
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
-- Accepts optional ISO-8601 `start`/`end` query parameters; when omitted the endpoint falls back to the adaptive window strategy described above and returns whatever it collected before the limit, safety caps, or time budget kicked in.
+- Accepts optional ISO-8601 `start`/`end` query parameters; these are forwarded to `/api/orders/latest` when present. Otherwise the shared endpoint uses its adaptive window strategy and items-expanded returns whatever qualifies before the requested limit is reached.
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
-- Loads the published menu document once per request to hydrate item and modifier names. The response now includes a `cacheInfo` block that reports how the menu was resolved:
-  - `cacheInfo.menu` is one of `hit-fresh`, `hit-stale-revalidate`, `miss-network`, `manual-refresh`, or `hit-stale-error`.
+- Loads the published menu document once per request to hydrate item and modifier names. The response includes a `cacheInfo` block:
+  - `cacheInfo.menu` reports `hit-fresh` when the worker cache satisfied the menu request and `miss-network` when it pulled from the upstream API.
   - `cacheInfo.menuUpdatedAt` surfaces the ISO timestamp stored alongside the cached document (undefined until the first successful fetch populates KV).
 
 #### Filters
