@@ -68,6 +68,12 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - Most recent orders across all statuses: `curl -s "https://<worker>/api/items-expanded" \| jq`
 - Filtered by location and status with custom window: `curl -s "https://<worker>/api/items-expanded?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
 
+#### Debugging
+
+- Append `?debug=1` (or `true`/`debug`) to enable a rich debug payload along with diagnostic headers.
+- Debug mode adds the `x-request-id`, `x-items-expanded-debug`, `x-up-orders-status`, `x-up-menu-status`, and `x-qualifying-found` headers to responses.
+- Response body snippets in debug output are limited to 512 characters and are only emitted when debug mode is explicitly enabled.
+
 ### `/api/menus`
 `/api/menus` returns `{ ok, metadata, menu, cacheHit }` where:
 
