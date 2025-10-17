@@ -1,26 +1,31 @@
 import type { AppEnv } from "../config/env.js";
-import {
-  getDiningOptions,
-  getMenuCacheInfo,
-  getOrdersBulk,
-  getPublishedMenusCached,
-} from "../clients/toast.js";
+import { getDiningOptions } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
+/**
+ * items-expanded composes data from internal Worker endpoints (orders + menu)
+ * so we can reuse the Worker KV cache instead of calling Toast APIs directly.
+ */
+
+const ORDERS_ENDPOINT = "/api/orders/latest";
+const MENUS_ENDPOINT = "/api/menus";
+
+const defaultFetch: typeof fetch = (...args) => fetch(...args);
+
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 500;
-const PAGE_SIZE = 100;
-const MAX_PAGES = 200;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const HANDLER_TIME_BUDGET_MS = 3_000;
-const BACKFILL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const MAX_PROGRESSIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+class UpstreamUnavailableError extends Error {
+  status = 502;
+  code = "UPSTREAM_UNAVAILABLE" as const;
+}
 
 export interface ItemsExpandedDeps {
-  getOrdersBulk: typeof getOrdersBulk;
-  getPublishedMenus: (env: AppEnv, request?: Request) => Promise<ToastMenusDocument | null>;
+  fetch: typeof fetch;
   getDiningOptions: typeof getDiningOptions;
 }
 
@@ -217,10 +222,39 @@ interface DiagnosticsCounters {
   lookback_windows_used: number;
 }
 
+interface OrdersLatestResponseBody {
+  ok: boolean;
+  data?: ToastOrder[];
+  detail?: string;
+  error?: unknown;
+}
+
+interface MenusResponseBody {
+  ok: boolean;
+  menu: ToastMenusDocument | null;
+  metadata?: { lastUpdated?: string | null } | null;
+  cacheHit?: boolean;
+  error?: unknown;
+}
+
+interface FetchOrdersOptions {
+  fetchLimit: number;
+  statusParam: string | null;
+  locationParam: string | null;
+  effectiveStart: Date | null;
+  effectiveEnd: Date | null;
+  rangeMode: boolean;
+}
+
+interface MenuFetchResult {
+  document: ToastMenusDocument | null;
+  cacheStatus: string;
+  updatedAt: string | null;
+}
+
 export function createItemsExpandedHandler(
   deps: ItemsExpandedDeps = {
-    getOrdersBulk,
-    getPublishedMenus: getPublishedMenusCached,
+    fetch: defaultFetch,
     getDiningOptions,
   }
 ) {
@@ -276,6 +310,11 @@ export function createItemsExpandedHandler(
     let lastWindowStartIso: string | null = null;
     let lastWindowEndIso: string | null = null;
 
+    if (rangeMode) {
+      lastWindowStartIso = effectiveStart ? toToastIsoUtc(effectiveStart) : null;
+      lastWindowEndIso = effectiveEnd ? toToastIsoUtc(effectiveEnd) : null;
+    }
+
     const aggregates = new Map<string, OrderAccumulator>();
     const processedKeys = new Set<string>();
     const qualifyingKeys = new Set<string>();
@@ -292,8 +331,25 @@ export function createItemsExpandedHandler(
       lookback_windows_used: 0,
     };
 
+    const ordersFetchLimit = Math.min(MAX_LIMIT, Math.max(limit, limit * 3));
+
     try {
-      const menuDoc = await deps.getPublishedMenus(env, request);
+      const refreshParam = url.searchParams.get("refresh");
+      const [ordersData, menuFetchResult] = await Promise.all([
+        fetchOrdersFromWorker(deps.fetch, request, {
+          fetchLimit: ordersFetchLimit,
+          statusParam,
+          locationParam,
+          effectiveStart,
+          effectiveEnd,
+          rangeMode,
+        }),
+        fetchMenuFromWorker(deps.fetch, request, refreshParam),
+      ]);
+      diagnostics.lookback_windows_used = ordersData.length > 0 ? 1 : 0;
+
+      const { document: menuDoc, cacheStatus: menuCacheStatus, updatedAt: menuUpdatedAt } =
+        menuFetchResult;
       const menuIndex = createMenuIndex(menuDoc);
 
       const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
@@ -629,102 +685,18 @@ export function createItemsExpandedHandler(
         return { aborted };
       };
 
-      const collectWindow = async (windowStart: Date, windowEnd: Date): Promise<boolean> => {
-        const startIso = toToastIsoUtc(windowStart);
-        const endIso = toToastIsoUtc(windowEnd);
-        lastWindowStartIso = startIso;
-        lastWindowEndIso = endIso;
-        diagnostics.lookback_windows_used += 1;
+      if (ordersData.length > 0) {
+        const { aborted } = await processOrdersPage(ordersData);
+        pagesProcessed = 1;
 
-        let page = 1;
-
-        while (pagesProcessed < MAX_PAGES) {
-          if (timedOut() || collectedEnough()) {
-            return true;
-          }
-
-          lastPage = page;
-
-          const { orders, nextPage } = await deps.getOrdersBulk(env, {
-            startIso,
-            endIso,
-            page,
-            pageSize: PAGE_SIZE,
-          });
-
-          pagesProcessed += 1;
-          diagnostics.pages_fetched += 1;
-
-          if (!Array.isArray(orders) || orders.length === 0) {
-            break;
-          }
-
-          const { aborted } = await processOrdersPage(orders);
-
-          if (aborted) {
-            return true;
-          }
-
-          if (collectedEnough()) {
-            return true;
-          }
-
-          if (timedOut()) {
-            return true;
-          }
-
-          const nextPageNumber = typeof nextPage === "number" && nextPage > page ? nextPage : page + 1;
-          const hasMore =
-            (typeof nextPage === "number" && nextPage > page) || orders.length === PAGE_SIZE;
-
-          if (!hasMore) {
-            break;
-          }
-
-          page = nextPageNumber;
+        if (aborted && !timedOut() && !collectedEnough()) {
+          lastPage = 1;
         }
-
-        return false;
-      };
-
-      if (rangeMode && effectiveStart && effectiveEnd) {
-        await collectWindow(effectiveStart, effectiveEnd);
       } else {
-        const nowMs = now.getTime();
-        const earliestAllowedMs = nowMs - MAX_PROGRESSIVE_LOOKBACK_MS;
-        let windowEnd = new Date(nowMs);
-        let windowStart = new Date(
-          Math.max(windowEnd.getTime() - BACKFILL_WINDOW_MS, earliestAllowedMs)
-        );
-
-        while (pagesProcessed < MAX_PAGES && !timedOut() && !collectedEnough()) {
-          if (windowEnd.getTime() <= earliestAllowedMs && windowStart.getTime() <= earliestAllowedMs) {
-            break;
-          }
-
-          if (windowEnd.getTime() <= windowStart.getTime()) {
-            break;
-          }
-
-          const stop = await collectWindow(windowStart, windowEnd);
-          if (stop) {
-            break;
-          }
-
-          if (windowStart.getTime() <= earliestAllowedMs) {
-            break;
-          }
-
-          const nextEndMs = windowStart.getTime();
-          const nextStartMs = Math.max(nextEndMs - BACKFILL_WINDOW_MS, earliestAllowedMs);
-          if (nextEndMs <= nextStartMs) {
-            break;
-          }
-
-          windowEnd = new Date(nextEndMs);
-          windowStart = new Date(nextStartMs);
-        }
+        pagesProcessed = 0;
       }
+
+      diagnostics.pages_fetched = pagesProcessed;
 
       const ordered = Array.from(aggregates.values())
         .filter((entry) => entry.items.length > 0 || hasNonZeroTotals(entry))
@@ -746,12 +718,11 @@ export function createItemsExpandedHandler(
         });
       }
 
-      const menuCacheInfo = getMenuCacheInfo(request);
       return jsonResponse({
         orders: ordersResponse,
         cacheInfo: {
-          menu: menuCacheInfo?.status ?? "miss-network",
-          menuUpdatedAt: menuCacheInfo?.updatedAt,
+          menu: menuCacheStatus,
+          menuUpdatedAt: menuUpdatedAt ?? undefined,
         },
       });
     } catch (err: any) {
@@ -825,6 +796,111 @@ function toToastIsoUtc(date: Date): string {
 
 function errorResponse(status: number, message: string, code = "BAD_REQUEST"): Response {
   return jsonResponse({ error: { message, code } }, { status });
+}
+
+async function fetchOrdersFromWorker(
+  fetcher: ItemsExpandedDeps["fetch"],
+  request: Request,
+  options: FetchOrdersOptions
+): Promise<ToastOrder[]> {
+  const url = new URL(ORDERS_ENDPOINT, request.url);
+  url.searchParams.set("limit", String(Math.max(1, options.fetchLimit)));
+  url.searchParams.set("detail", "full");
+
+  if (options.statusParam) {
+    url.searchParams.set("status", options.statusParam);
+  }
+
+  if (options.locationParam) {
+    url.searchParams.set("locationId", options.locationParam);
+  }
+
+  if (options.rangeMode) {
+    if (options.effectiveStart) {
+      url.searchParams.set("start", toToastIsoUtc(options.effectiveStart));
+    }
+    if (options.effectiveEnd) {
+      url.searchParams.set("end", toToastIsoUtc(options.effectiveEnd));
+    }
+  }
+
+  let response: Response;
+  try {
+    response = await fetcher(url.toString());
+  } catch (err) {
+    const error = new UpstreamUnavailableError("Failed to load recent orders");
+    (error as any).cause = err;
+    throw error;
+  }
+
+  if (!response.ok) {
+    throw new UpstreamUnavailableError("Failed to load recent orders");
+  }
+
+  let payload: OrdersLatestResponseBody;
+  try {
+    payload = (await response.json()) as OrdersLatestResponseBody;
+  } catch (err) {
+    const error = new UpstreamUnavailableError("Failed to parse recent orders");
+    (error as any).cause = err;
+    throw error;
+  }
+
+  if (!payload?.ok || !Array.isArray(payload.data)) {
+    throw new UpstreamUnavailableError("Orders service unavailable");
+  }
+
+  return payload.data;
+}
+
+async function fetchMenuFromWorker(
+  fetcher: ItemsExpandedDeps["fetch"],
+  request: Request,
+  refreshParam: string | null
+): Promise<MenuFetchResult> {
+  const url = new URL(MENUS_ENDPOINT, request.url);
+  if (refreshParam) {
+    url.searchParams.set("refresh", refreshParam);
+  }
+
+  let response: Response;
+  try {
+    response = await fetcher(url.toString());
+  } catch (err) {
+    const error = new UpstreamUnavailableError("Failed to load menu document");
+    (error as any).cause = err;
+    throw error;
+  }
+
+  if (!response.ok) {
+    throw new UpstreamUnavailableError("Failed to load menu document");
+  }
+
+  let payload: MenusResponseBody;
+  try {
+    payload = (await response.json()) as MenusResponseBody;
+  } catch (err) {
+    const error = new UpstreamUnavailableError("Failed to parse menu document");
+    (error as any).cause = err;
+    throw error;
+  }
+
+  if (!payload?.ok) {
+    throw new UpstreamUnavailableError("Menu service unavailable");
+  }
+
+  const updatedAt =
+    payload?.metadata && typeof payload.metadata?.lastUpdated === "string"
+      ? payload.metadata.lastUpdated
+      : null;
+
+  const cacheStatus = payload?.cacheHit ? "hit-fresh" : "miss-network";
+
+  return {
+    document: payload?.menu ?? null,
+    cacheStatus,
+    updatedAt,
+  };
 }
 
 function createMenuIndex(document: ToastMenusDocument | null) {

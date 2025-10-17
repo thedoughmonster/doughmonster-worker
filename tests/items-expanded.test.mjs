@@ -19,14 +19,72 @@ function createEnv() {
 }
 
 function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
-  const { getDiningOptions, diningOptions } = overrides;
+  const { getDiningOptions, diningOptions, fetch: customFetch, menuCacheHit = false, menuMetadata } =
+    overrides;
+
+  const resolveUrl = (input) => {
+    if (typeof input === 'string') {
+      return new URL(input, 'https://worker.test');
+    }
+    if (input instanceof URL) {
+      return new URL(input.toString());
+    }
+    if (input && typeof input.url === 'string') {
+      return new URL(input.url);
+    }
+    return new URL(String(input), 'https://worker.test');
+  };
+
+  const resolveOrdersData = (url) => {
+    if (typeof orders === 'function') {
+      return orders(url);
+    }
+    return orders;
+  };
+
+  const defaultFetch = async (input, init) => {
+    const url = resolveUrl(input);
+
+    if (url.pathname === '/api/orders/latest') {
+      const raw = resolveOrdersData(url);
+      const data = Array.isArray(raw) ? raw : [];
+      const cloned = JSON.parse(JSON.stringify(data));
+      return new Response(
+        JSON.stringify({ ok: true, detail: 'full', data: cloned }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (url.pathname === '/api/menus') {
+      const metadata =
+        menuMetadata && typeof menuMetadata === 'object'
+          ? menuMetadata
+          : { lastUpdated: '2024-01-01T00:00:00Z' };
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          metadata,
+          menu: menuDoc,
+          cacheHit: Boolean(menuCacheHit),
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
+    if (typeof customFetch === 'function') {
+      return customFetch(input, init);
+    }
+
+    throw new Error(`Unexpected fetch to ${url.pathname}`);
+  };
+
+  const fetchImpl =
+    typeof customFetch === 'function'
+      ? (input, init) => customFetch(input, init, defaultFetch)
+      : defaultFetch;
+
   return createItemsExpandedHandler({
-    async getOrdersBulk() {
-      return { orders, nextPage: null };
-    },
-    async getPublishedMenus() {
-      return menuDoc;
-    },
+    fetch: fetchImpl,
     async getDiningOptions(env) {
       if (typeof getDiningOptions === 'function') {
         return getDiningOptions(env);
@@ -920,153 +978,124 @@ test('items-expanded exposes aggregated fulfillment status on orderData', async 
   assert.deepEqual(statuses, ['NEW', 'READY']);
 });
 
-test('items-expanded paginates to collect the newest qualifying orders and keeps item order stable', async () => {
-  const pagedResponses = {
-    1: {
-      orders: [
+test('items-expanded keeps newest qualifying orders and item order stable across polls', async () => {
+  const orders = [
+    {
+      guid: 'order-new-2',
+      createdDate: '2024-01-01T12:30:00.000+0000',
+      checks: [
         {
-          guid: 'order-new-2',
-          createdDate: '2024-01-01T12:30:00.000+0000',
-          checks: [
+          guid: 'order-new-2-check',
+          selections: [
             {
-              guid: 'order-new-2-check',
-              selections: [
-                {
-                  guid: 'sel-new-2',
-                  selectionType: 'MENU_ITEM',
-                  quantity: 1,
-                  receiptLinePrice: 9,
-                  item: { guid: 'item-new-2' },
-                },
-              ],
-            },
-          ],
-        },
-        {
-          guid: 'order-non-1',
-          createdDate: '2024-01-01T12:15:00.000+0000',
-          checks: [
-            {
-              guid: 'order-non-1-check',
-              selections: [],
+              guid: 'sel-new-2',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 9,
+              item: { guid: 'item-new-2' },
             },
           ],
         },
       ],
-      nextPage: 2,
     },
-    2: {
-      orders: [
+    {
+      guid: 'order-non-1',
+      createdDate: '2024-01-01T12:15:00.000+0000',
+      checks: [
         {
-          guid: 'order-new-3',
-          createdDate: '2024-01-01T12:00:00.000+0000',
-          checks: [
-            {
-              guid: 'order-new-3-check',
-              selections: [
-                {
-                  selectionType: 'OPEN_ITEM',
-                  displayName: 'Chef Special',
-                  quantity: 1,
-                  receiptLinePrice: 7,
-                  selectionIndex: 3,
-                  item: {},
-                },
-              ],
-            },
-          ],
+          guid: 'order-non-1-check',
+          selections: [],
         },
+      ],
+    },
+    {
+      guid: 'order-new-3',
+      createdDate: '2024-01-01T12:00:00.000+0000',
+      checks: [
         {
-          guid: 'order-non-2',
-          createdDate: '2024-01-01T11:45:00.000+0000',
-          checks: [
+          guid: 'order-new-3-check',
+          selections: [
             {
-              guid: 'order-non-2-check',
-              selections: [],
+              selectionType: 'OPEN_ITEM',
+              displayName: 'Chef Special',
+              quantity: 1,
+              receiptLinePrice: 7,
+              selectionIndex: 3,
+              item: {},
             },
           ],
         },
       ],
-      nextPage: 3,
     },
-    3: {
-      orders: [
+    {
+      guid: 'order-non-2',
+      createdDate: '2024-01-01T11:45:00.000+0000',
+      checks: [
         {
-          guid: 'order-new-1',
-          createdDate: '2024-01-01T13:00:00.000+0000',
-          checks: [
-            {
-              guid: 'order-new-1-check',
-              selections: [
-                {
-                  guid: 'sel-b',
-                  selectionType: 'MENU_ITEM',
-                  quantity: 1,
-                  receiptLinePrice: 4,
-                  receiptLinePosition: 2,
-                  selectionIndex: 2,
-                  item: { guid: 'item-b' },
-                },
-                {
-                  selectionType: 'OPEN_ITEM',
-                  displayName: 'Daily Special',
-                  quantity: 1,
-                  receiptLinePrice: 3,
-                  receiptLinePosition: 3,
-                  selectionIndex: 3,
-                  item: {},
-                },
-                {
-                  guid: 'sel-a',
-                  selectionType: 'MENU_ITEM',
-                  quantity: 1,
-                  receiptLinePrice: 5,
-                  receiptLinePosition: 1,
-                  selectionIndex: 1,
-                  item: { guid: 'item-a' },
-                },
-              ],
-            },
-          ],
+          guid: 'order-non-2-check',
+          selections: [],
         },
+      ],
+    },
+    {
+      guid: 'order-new-1',
+      createdDate: '2024-01-01T13:00:00.000+0000',
+      checks: [
         {
-          guid: 'order-old',
-          createdDate: '2024-01-01T11:00:00.000+0000',
-          checks: [
+          guid: 'order-new-1-check',
+          selections: [
             {
-              guid: 'order-old-check',
-              selections: [
-                {
-                  guid: 'sel-old',
-                  selectionType: 'MENU_ITEM',
-                  quantity: 1,
-                  receiptLinePrice: 2,
-                  item: { guid: 'item-old' },
-                },
-              ],
+              guid: 'sel-b',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 4,
+              receiptLinePosition: 2,
+              selectionIndex: 2,
+              item: { guid: 'item-b' },
+            },
+            {
+              selectionType: 'OPEN_ITEM',
+              displayName: 'Daily Special',
+              quantity: 1,
+              receiptLinePrice: 3,
+              receiptLinePosition: 3,
+              selectionIndex: 3,
+              item: {},
+            },
+            {
+              guid: 'sel-a',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 5,
+              receiptLinePosition: 1,
+              selectionIndex: 1,
+              item: { guid: 'item-a' },
             },
           ],
         },
       ],
-      nextPage: null,
     },
-  };
+    {
+      guid: 'order-old',
+      createdDate: '2024-01-01T11:00:00.000+0000',
+      checks: [
+        {
+          guid: 'order-old-check',
+          selections: [
+            {
+              guid: 'sel-old',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 2,
+              item: { guid: 'item-old' },
+            },
+          ],
+        },
+      ],
+    },
+  ];
 
-  const handler = createItemsExpandedHandler({
-    async getOrdersBulk(_env, params) {
-      const page = params?.page ?? 1;
-      const response = pagedResponses[page] ?? { orders: [], nextPage: null };
-      const cloned = JSON.parse(JSON.stringify(response));
-      return { orders: cloned.orders, nextPage: cloned.nextPage };
-    },
-    async getPublishedMenus() {
-      return null;
-    },
-    async getDiningOptions() {
-      return [];
-    },
-  });
-
+  const handler = createHandlerWithOrders(orders);
   const env = createEnv();
   const request = new Request('https://worker.test/api/items-expanded?limit=3');
 
