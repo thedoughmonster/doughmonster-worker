@@ -16,22 +16,22 @@ The handler accepts an optional `?minutes=` query parameter that clamps between 
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
 
-- When called without filters it returns the 15 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from oldest to newest.
+- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest.
 - Each order groups all items for a Toast check and includes modifier breakdowns, per-item pricing (base, modifier, total), order timing, customer/location metadata, and aggregated totals (base, modifiers, discounts, service charges, tips, and grand total).
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
-- Accepts optional ISO-8601 `start`/`end` query parameters that default to the last two hours ending "now".
-- Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 15, maximum 500).
+- Accepts optional ISO-8601 `start`/`end` query parameters; when omitted the endpoint simply returns the latest orders.
+- Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500).
 - Loads the published menu document once per request to hydrate item and modifier names.
 
 #### Filters
 
 | Query        | Description                                                                                   | Example                                            |
 | ------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Defaults to 2 hours before `end`.   | `/api/items-expanded?start=2024-03-09T14:00:00Z`   |
-| `end`        | ISO-8601 timestamp (UTC) for the end of the window. Defaults to the current time.             | `/api/items-expanded?end=2024-03-09T16:00:00Z`     |
+| `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Optional; omit to return the latest orders regardless of start time.   | `/api/items-expanded?start=2024-03-09T14:00:00Z`   |
+| `end`        | ISO-8601 timestamp (UTC) for the end of the window. Optional; defaults to "now" when only `start` is provided.             | `/api/items-expanded?end=2024-03-09T16:00:00Z`     |
 | `status`     | Case-insensitive Toast order status filter.                                                   | `/api/items-expanded?status=paid`                  |
 | `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/items-expanded?locationId=<location-guid>`   |
-| `limit`      | Maximum number of orders to return (1-500, default 15).                                       | `/api/items-expanded?limit=25`                     |
+| `limit`      | Maximum number of orders to return (1-500, default 20).                                       | `/api/items-expanded?limit=25`                     |
 
 #### Sample requests
 

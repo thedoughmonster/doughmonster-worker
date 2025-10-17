@@ -4,10 +4,10 @@ import { jsonResponse } from "../lib/http.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
-const DEFAULT_RANGE_MS = 2 * 60 * 60 * 1000; // 2 hours
-const DEFAULT_LIMIT = 15;
+const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 500;
 const PAGE_SIZE = 100;
+const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export interface ItemsExpandedDeps {
   getOrdersBulk: typeof getOrdersBulk;
@@ -202,18 +202,20 @@ export function createItemsExpandedHandler(
     const locationParam = url.searchParams.get("locationId");
     const limitParam = url.searchParams.get("limit");
 
-    const parsedEnd = parseDateParam(endParam) ?? now;
-    const parsedStart = parseDateParam(startParam) ?? new Date(parsedEnd.getTime() - DEFAULT_RANGE_MS);
-
-    if (!(parsedStart instanceof Date) || isNaN(parsedStart.getTime())) {
-      return errorResponse(400, "Invalid start parameter");
-    }
-
-    if (!(parsedEnd instanceof Date) || isNaN(parsedEnd.getTime())) {
+    const parsedEnd = parseDateParam(endParam);
+    if (endParam && !(parsedEnd instanceof Date && !isNaN(parsedEnd.getTime()))) {
       return errorResponse(400, "Invalid end parameter");
     }
 
-    if (parsedStart.getTime() >= parsedEnd.getTime()) {
+    const parsedStart = parseDateParam(startParam);
+    if (startParam && !(parsedStart instanceof Date && !isNaN(parsedStart.getTime()))) {
+      return errorResponse(400, "Invalid start parameter");
+    }
+
+    const effectiveEnd = parsedEnd ?? (parsedStart ? now : null) ?? now;
+    const effectiveStart = parsedStart ?? new Date(effectiveEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+
+    if (parsedStart && parsedStart.getTime() >= effectiveEnd.getTime()) {
       return errorResponse(400, "start must be before end");
     }
 
@@ -223,8 +225,8 @@ export function createItemsExpandedHandler(
       MAX_LIMIT
     );
 
-    const startIso = toToastIsoUtc(parsedStart);
-    const endIso = toToastIsoUtc(parsedEnd);
+    const startIso = toToastIsoUtc(effectiveStart);
+    const endIso = toToastIsoUtc(effectiveEnd);
 
     try {
       const menuDoc = await deps.getPublishedMenus(env);
@@ -470,6 +472,11 @@ export function createItemsExpandedHandler(
           }
         }
 
+        const qualifyingCount = countQualifyingOrders(aggregates);
+        if (qualifyingCount >= limit) {
+          break;
+        }
+
         const hasMore =
           (typeof nextPage === "number" && nextPage > page) || orders.length === PAGE_SIZE;
 
@@ -488,8 +495,7 @@ export function createItemsExpandedHandler(
         .filter((entry) => entry.items.length > 0 || hasNonZeroTotals(entry))
         .sort(compareAggregatedOrdersByOrderTime);
 
-      const limited =
-        ordered.length > limit ? ordered.slice(Math.max(ordered.length - limit, 0)) : ordered;
+      const limited = ordered.slice(0, limit);
 
       const ordersResponse = limited.map((entry) => toExpandedOrder(entry));
 
@@ -841,7 +847,7 @@ function compareAggregatedOrdersByOrderTime(a: OrderAccumulator, b: OrderAccumul
   const bTime = b.orderTimeMs;
 
   if (aTime !== null && bTime !== null && aTime !== bTime) {
-    return aTime - bTime;
+    return bTime - aTime;
   }
 
   if (aTime !== null && bTime === null) {
@@ -863,6 +869,16 @@ function compareAggregatedOrdersByOrderTime(a: OrderAccumulator, b: OrderAccumul
   }
 
   return 0;
+}
+
+function countQualifyingOrders(aggregates: Map<string, OrderAccumulator>): number {
+  let count = 0;
+  for (const entry of aggregates.values()) {
+    if (entry.items.length > 0 || hasNonZeroTotals(entry)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
