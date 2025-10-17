@@ -55,6 +55,7 @@ export interface CollectLatestOrdersOptions {
   status: string | null;
   debug: boolean;
   since?: Date | null;
+  sinceRaw?: string | null;
   windowOverride?: { start: Date; end: Date } | null;
   now?: Date;
 }
@@ -65,19 +66,55 @@ export interface CollectLatestOrdersResult {
   minutes: number | null;
   window: { start: string; end: string };
   debug?: CollectLatestOrdersDebug;
+  sources?: Array<{ id: string; source: OrderSourceType }>;
 }
 
 interface CollectLatestOrdersDebug {
   fetchWindow: { start: string; end: string };
   cursorBefore: OrderCursor | null;
   cursorAfter: OrderCursor | null;
-  pages: Array<{ page: number; count: number; nextPage: number | null }>;
+  pages: Array<{ page: number; count: number; returned: number; nextPage: number | null }>;
   totals: {
     fetched: number;
     written: number;
     skipped: number;
     readyCandidates: number;
   };
+  kv?: {
+    reads: number;
+    writes: number;
+    indexLoads: number;
+    indexWrites: number;
+    bytesRead?: number;
+    bytesWritten?: number;
+  };
+  api?: {
+    requests: number;
+    pages: Array<{ page: number; returned: number; count: number; nextPage: number | null }>;
+  };
+  cache?: {
+    hits: number;
+    misses: number;
+    updated: number;
+  };
+  cursor?: {
+    before: OrderCursor | null;
+    after: OrderCursor | null;
+  };
+  timing?: {
+    toastFetchMs: number;
+    kvMs: number;
+    totalMs: number;
+  };
+  params?: {
+    limit: number;
+    detail: "ids" | "full";
+    debug: boolean;
+    since: string | null;
+    locationId: string | null;
+    status: string | null;
+  };
+  resultCount?: number;
 }
 
 interface ProcessedOrder extends CachedOrderRecord {
@@ -88,7 +125,10 @@ interface ProcessedOrder extends CachedOrderRecord {
   readyTimestampMs: number | null;
   isReady: boolean;
   changed: boolean;
+  source: OrderSourceType;
 }
+
+type OrderSourceType = "cache" | "api" | "merged";
 
 export async function collectLatestOrders({
   env,
@@ -99,10 +139,13 @@ export async function collectLatestOrders({
   status,
   debug,
   since = null,
+  sinceRaw = null,
   windowOverride = null,
   now = new Date(),
 }: CollectLatestOrdersOptions): Promise<CollectLatestOrdersResult> {
-  const cursorBefore = await getCachedCursor(env);
+  const telemetry = createOrdersTelemetry(env, debug);
+  const workingEnv = telemetry.env;
+  const cursorBefore = await getCachedCursor(workingEnv);
   const { start, end } = resolveFetchWindow({ now, cursor: cursorBefore, since, windowOverride });
 
   const startIso = toToastIsoUtc(start);
@@ -112,25 +155,29 @@ export async function collectLatestOrders({
   const knownRecords = new Map<string, CachedOrderRecord>();
   const byBusinessDate = new Map<string, CachedOrderRecord[]>();
   const readyCandidates: ProcessedOrder[] = [];
+  const orderSources = new Map<string, OrderSourceType>();
 
   let totalFetched = 0;
   let totalWritten = 0;
 
   let page = 1;
   while (page <= MAX_PAGES) {
-    const { orders, nextPage } = await deps.getOrdersBulk(env, {
+    const apiStart = telemetry.now();
+    const { orders, nextPage } = await deps.getOrdersBulk(workingEnv, {
       startIso,
       endIso,
       page,
       pageSize: FETCH_PAGE_SIZE,
       expansions: EXPAND_FULL,
     } as any);
+    telemetry.recordApiRequest(apiStart);
 
     const currentOrders = Array.isArray(orders) ? orders : [];
     totalFetched += currentOrders.length;
     pagesDebug.push({
       page,
       count: currentOrders.length,
+      returned: currentOrders.length,
       nextPage: typeof nextPage === "number" ? nextPage : null,
     });
 
@@ -148,7 +195,7 @@ export async function collectLatestOrders({
         continue;
       }
 
-      const processedOrder = await processOrder(env, order);
+      const processedOrder = await processOrder(workingEnv, order, telemetry);
       if (!processedOrder) {
         continue;
       }
@@ -159,6 +206,7 @@ export async function collectLatestOrders({
         openedAtMs: processedOrder.openedAtMs,
         order: processedOrder.order,
       });
+      orderSources.set(guid, processedOrder.source);
 
       if (processedOrder.businessDate) {
         const list = byBusinessDate.get(processedOrder.businessDate) ?? [];
@@ -183,7 +231,7 @@ export async function collectLatestOrders({
   }
 
   for (const [businessDate, entries] of byBusinessDate.entries()) {
-    await upsertIntoDateIndex(env, businessDate, entries, { knownOrders: knownRecords });
+    await upsertIntoDateIndex(workingEnv, businessDate, entries, { knownOrders: knownRecords });
   }
 
   if (processed.size > 0) {
@@ -192,21 +240,23 @@ export async function collectLatestOrders({
       openedAtMs: value.openedAtMs,
       order: value.order,
     }));
-    await upsertRecentIndex(env, entries, { knownOrders: knownRecords, limit: RECENT_INDEX_LIMIT });
+    await upsertRecentIndex(workingEnv, entries, { knownOrders: knownRecords, limit: RECENT_INDEX_LIMIT });
   }
 
-  const cursorAfter = await maybeAdvanceCursor(env, cursorBefore, readyCandidates);
+  const cursorAfter = await maybeAdvanceCursor(workingEnv, cursorBefore, readyCandidates);
 
   const { orderIds, orders } = await gatherLatestOrders({
-    env,
+    env: workingEnv,
     limit,
     locationId,
     status,
     knownRecords,
+    orderSources,
   });
 
   const minutes = computeWindowMinutes(start, end);
   const window = { start: startIso, end: endIso };
+  const totalMs = telemetry.totalMs();
 
   const result: CollectLatestOrdersResult = {
     orders,
@@ -216,6 +266,11 @@ export async function collectLatestOrders({
   };
 
   if (debug) {
+    const sources = orderIds.map((id) => ({ id, source: orderSources.get(id) ?? "cache" }));
+    result.sources = sources;
+
+    const sinceEcho = sinceRaw ?? (since ? toToastIsoUtc(since) : null);
+    telemetry.setResultCount(orderIds.length);
     result.debug = {
       fetchWindow: window,
       cursorBefore,
@@ -227,13 +282,53 @@ export async function collectLatestOrders({
         skipped: totalFetched - totalWritten,
         readyCandidates: readyCandidates.length,
       },
+      kv: {
+        reads: telemetry.metrics.kvReads,
+        writes: telemetry.metrics.kvWrites,
+        indexLoads: telemetry.metrics.indexLoads,
+        indexWrites: telemetry.metrics.indexWrites,
+        bytesRead: telemetry.metrics.kvBytesRead,
+        bytesWritten: telemetry.metrics.kvBytesWritten,
+      },
+      api: {
+        requests: telemetry.metrics.apiRequests,
+        pages: pagesDebug.map((pageInfo) => ({
+          page: pageInfo.page,
+          returned: pageInfo.returned ?? pageInfo.count,
+          count: pageInfo.count,
+          nextPage: pageInfo.nextPage ?? null,
+        })),
+      },
+      cache: {
+        hits: telemetry.metrics.cacheHits,
+        misses: telemetry.metrics.cacheMisses,
+        updated: telemetry.metrics.cacheUpdated,
+      },
+      cursor: {
+        before: cursorBefore,
+        after: cursorAfter,
+      },
+      timing: {
+        toastFetchMs: Math.round(telemetry.metrics.toastFetchMs),
+        kvMs: Math.round(telemetry.metrics.kvMs),
+        totalMs: Math.round(totalMs),
+      },
+      params: {
+        limit,
+        detail: _detail,
+        debug: true,
+        since: sinceEcho,
+        locationId,
+        status,
+      },
+      resultCount: orderIds.length,
     };
   }
 
   return result;
 }
 
-async function processOrder(env: AppEnv, order: any): Promise<ProcessedOrder | null> {
+async function processOrder(env: AppEnv, order: any, telemetry: OrdersTelemetry): Promise<ProcessedOrder | null> {
   const guid = typeof order?.guid === "string" ? order.guid : null;
   if (!guid) {
     return null;
@@ -284,10 +379,16 @@ async function processOrder(env: AppEnv, order: any): Promise<ProcessedOrder | n
     await putCachedOrder(env, orderForCache);
   }
 
+  if (shouldWrite && existing) {
+    telemetry.recordCacheUpdated();
+  }
+
   const finalOrder = shouldWrite ? orderForCache : existing ?? orderForCache;
   statusToStore = typeof finalOrder?.normalizedFulfillmentStatus === "string"
     ? finalOrder.normalizedFulfillmentStatus
     : statusToStore;
+
+  const source: OrderSourceType = !existing ? "api" : shouldWrite ? "merged" : "cache";
 
   return {
     guid,
@@ -299,6 +400,7 @@ async function processOrder(env: AppEnv, order: any): Promise<ProcessedOrder | n
     readyTimestampMs: readyTimestamp,
     isReady: readyTimestamp !== null && isFulfillmentStatusReady(statusToStore),
     changed: shouldWrite,
+    source,
   };
 }
 
@@ -350,12 +452,14 @@ async function gatherLatestOrders({
   locationId,
   status,
   knownRecords,
+  orderSources,
 }: {
   env: AppEnv;
   limit: number;
   locationId: string | null;
   status: string | null;
   knownRecords: Map<string, CachedOrderRecord>;
+  orderSources: Map<string, OrderSourceType>;
 }): Promise<{ orderIds: string[]; orders: any[] }> {
   const candidateIds = await collectCandidateIds(env, limit);
   const uniqueIds = unique(candidateIds);
@@ -364,6 +468,9 @@ async function gatherLatestOrders({
   for (const guid of uniqueIds) {
     const cached = knownRecords.get(guid);
     if (cached?.order) {
+      if (!orderSources.has(guid)) {
+        orderSources.set(guid, "cache");
+      }
       loadedOrders.push({ guid, order: cached.order, openedAtMs: cached.openedAtMs ?? resolveOrderOpenedAt(cached.order).ms });
       continue;
     }
@@ -373,6 +480,9 @@ async function gatherLatestOrders({
     }
     const opened = resolveOrderOpenedAt(order);
     knownRecords.set(guid, { guid, openedAtMs: opened.ms, order });
+    if (!orderSources.has(guid)) {
+      orderSources.set(guid, "cache");
+    }
     loadedOrders.push({ guid, order, openedAtMs: opened.ms });
   }
 
@@ -423,6 +533,145 @@ async function collectCandidateIds(env: AppEnv, limit: number): Promise<string[]
   }
 
   return [...recent, ...additional];
+}
+
+interface TelemetryMetrics {
+  kvReads: number;
+  kvWrites: number;
+  kvMs: number;
+  kvBytesRead: number;
+  kvBytesWritten: number;
+  indexLoads: number;
+  indexWrites: number;
+  toastFetchMs: number;
+  apiRequests: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheUpdated: number;
+  resultCount: number;
+}
+
+interface OrdersTelemetry {
+  enabled: boolean;
+  env: AppEnv;
+  metrics: TelemetryMetrics;
+  now(): number;
+  recordApiRequest(startTime: number): void;
+  recordCacheUpdated(): void;
+  setResultCount(count: number): void;
+  totalMs(): number;
+}
+
+function createOrdersTelemetry(env: AppEnv, enabled: boolean): OrdersTelemetry {
+  const nowFn = typeof performance !== "undefined" && typeof performance.now === "function"
+    ? () => performance.now()
+    : () => Date.now();
+  const start = nowFn();
+
+  const metrics: TelemetryMetrics = {
+    kvReads: 0,
+    kvWrites: 0,
+    kvMs: 0,
+    kvBytesRead: 0,
+    kvBytesWritten: 0,
+    indexLoads: 0,
+    indexWrites: 0,
+    toastFetchMs: 0,
+    apiRequests: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    cacheUpdated: 0,
+    resultCount: 0,
+  };
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      env,
+      metrics,
+      now: nowFn,
+      recordApiRequest: () => {},
+      recordCacheUpdated: () => {},
+      setResultCount: () => {},
+      totalMs: () => nowFn() - start,
+    };
+  }
+
+  const baseKv = env.CACHE_KV;
+  const instrumentedKv = {
+    async get(key: string, ...rest: any[]): Promise<any> {
+      const opStart = nowFn();
+      const result = await (baseKv as any).get(key, ...rest);
+      const duration = nowFn() - opStart;
+      metrics.kvMs += duration;
+      metrics.kvReads += 1;
+      if (typeof result === "string") {
+        metrics.kvBytesRead += result.length;
+      }
+      if (isIndexKey(key)) {
+        metrics.indexLoads += 1;
+      }
+      if (isOrderKey(key)) {
+        if (result === null || result === undefined) {
+          metrics.cacheMisses += 1;
+        } else {
+          metrics.cacheHits += 1;
+        }
+      }
+      return result;
+    },
+    async put(key: string, value: string, ...rest: any[]): Promise<any> {
+      const opStart = nowFn();
+      const result = await (baseKv as any).put(key, value, ...rest);
+      const duration = nowFn() - opStart;
+      metrics.kvMs += duration;
+      metrics.kvWrites += 1;
+      if (typeof value === "string") {
+        metrics.kvBytesWritten += value.length;
+      }
+      if (isIndexKey(key)) {
+        metrics.indexWrites += 1;
+      }
+      return result;
+    },
+  };
+
+  const instrumentedEnv = {
+    ...env,
+    CACHE_KV: instrumentedKv,
+  } as AppEnv;
+
+  return {
+    enabled: true,
+    env: instrumentedEnv,
+    metrics,
+    now: nowFn,
+    recordApiRequest(startTime: number) {
+      const duration = nowFn() - startTime;
+      metrics.toastFetchMs += duration;
+      metrics.apiRequests += 1;
+    },
+    recordCacheUpdated() {
+      metrics.cacheUpdated += 1;
+    },
+    setResultCount(count: number) {
+      metrics.resultCount = count;
+    },
+    totalMs() {
+      return nowFn() - start;
+    },
+  };
+}
+
+function isOrderKey(key: string): boolean {
+  return typeof key === "string" && key.startsWith("orders:byId:");
+}
+
+function isIndexKey(key: string): boolean {
+  if (typeof key !== "string") {
+    return false;
+  }
+  return key.startsWith("orders:index:") || key === "orders:recentIndex";
 }
 
 function resolveFetchWindow({

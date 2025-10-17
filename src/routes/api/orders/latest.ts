@@ -42,8 +42,7 @@ export function createOrdersLatestHandler(
     const locationId = url.searchParams.get("locationId");
     const status = url.searchParams.get("status");
 
-    const wantsDebugParam =
-      url.searchParams.get("debug") === "1" || url.searchParams.has("debug");
+    const wantsDebugParam = parseBooleanParam(url.searchParams, "debug");
     const allowDebug = Boolean((env as any).DEBUG);
     const includeDebug = allowDebug && wantsDebugParam;
 
@@ -65,6 +64,7 @@ export function createOrdersLatestHandler(
         locationId,
         status,
         since: parseIsoToDate(sinceParam),
+        sinceRaw: sinceParam,
         windowOverride,
         debug: includeDebug,
       });
@@ -82,15 +82,64 @@ export function createOrdersLatestHandler(
         orders: result.orderIds,
       };
 
+      const sourcesMap = includeDebug && Array.isArray(result.sources)
+        ? new Map(result.sources.map((entry) => [entry.id, entry.source]))
+        : null;
+
       if (detail === "full") {
-        responseBody.data = result.orders;
+        if (includeDebug && sourcesMap) {
+          responseBody.data = result.orders.map((order, index) => {
+            const id = result.orderIds[index];
+            if (!order || typeof order !== "object") {
+              return order;
+            }
+            const source = sourcesMap.get(id) ?? "cache";
+            return {
+              ...order,
+              _meta: {
+                source,
+                kvKey: `orders:byId:${id}`,
+              },
+            };
+          });
+        } else {
+          responseBody.data = result.orders;
+        }
+      }
+
+      if (includeDebug && result.sources) {
+        responseBody.sources = result.sources;
       }
 
       if (includeDebug && result.debug) {
         responseBody.debug = result.debug;
       }
 
-      return jsonResponse(responseBody);
+      const response = jsonResponse(responseBody);
+
+      if (includeDebug && result.debug) {
+        const cache = result.debug.cache ?? { hits: 0, misses: 0, updated: 0 };
+        const api = result.debug.api ?? { requests: 0 };
+        const timing = result.debug.timing ?? { totalMs: 0 };
+
+        if (typeof cache.hits === "number") {
+          response.headers.set("X-Orders-Cache-Hits", String(cache.hits));
+        }
+        if (typeof cache.misses === "number") {
+          response.headers.set("X-Orders-Cache-Misses", String(cache.misses));
+        }
+        if (typeof cache.updated === "number") {
+          response.headers.set("X-Orders-Cache-Updated", String(cache.updated));
+        }
+        if (typeof api.requests === "number") {
+          response.headers.set("X-Orders-API-Requests", String(api.requests));
+        }
+        if (typeof timing.totalMs === "number") {
+          response.headers.set("X-Orders-TotalMs", String(Math.round(timing.totalMs)));
+        }
+      }
+
+      return response;
     } catch (err: any) {
       const statusCode = typeof err?.status === "number" ? err.status : 500;
       const snippet = err?.bodySnippet ?? err?.message ?? String(err ?? "Unknown error");
@@ -167,6 +216,27 @@ function parseIsoToDate(value: string | null): Date | null {
     return null;
   }
   return new Date(parsed);
+}
+
+function parseBooleanParam(params: URLSearchParams, key: string): boolean {
+  if (!params.has(key)) {
+    return false;
+  }
+  const raw = params.get(key);
+  if (raw === null) {
+    return false;
+  }
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "") {
+    return true;
+  }
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return true;
 }
 
 function parseNumber(value: string | null, fallback: number | null): number | null {
