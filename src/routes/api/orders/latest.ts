@@ -1,6 +1,10 @@
 import type { AppEnv } from "../../../config/env.js";
 import { getOrdersBulk } from "../../../clients/toast.js";
 import { jsonResponse } from "../../../lib/http.js";
+import {
+  collectLatestOrders,
+  normalizeToastTimestamp,
+} from "../../../lib/collectLatestOrders.js";
 
 const EXPAND_FULL = [
   "checks",
@@ -12,112 +16,77 @@ const EXPAND_FULL = [
   "employee",
 ];
 
-const PAGE_SIZE = 100;
-const MAX_PAGES = 50;
-
 export interface OrdersLatestDeps {
   getOrdersBulk: typeof getOrdersBulk;
 }
+
+const LIMIT_MIN = 1;
+const LIMIT_MAX = 500;
 
 export function createOrdersLatestHandler(
   deps: OrdersLatestDeps = { getOrdersBulk }
 ) {
   return async function handleOrdersLatest(env: AppEnv, request: Request) {
     const url = new URL(request.url);
-    const minutesParam = url.searchParams.get("minutes");
-    const minutes = clamp(Number(minutesParam ?? 60) || 60, 1, 120);
-    const wantDebug = url.searchParams.get("debug") === "1" || url.searchParams.has("debug");
+
+    const limitRaw = parseNumber(url.searchParams.get("limit"), 20);
+    const limit = clamp(limitRaw ?? 20, LIMIT_MIN, LIMIT_MAX);
+
+    const minutesValue = parseNumber(url.searchParams.get("minutes"), null);
+
+    const startParam = url.searchParams.get("start");
+    const endParam = url.searchParams.get("end");
+
+    const locationId = url.searchParams.get("locationId");
+    const status = url.searchParams.get("status");
+
+    const wantsDebugParam =
+      url.searchParams.get("debug") === "1" || url.searchParams.has("debug");
+    const allowDebug = Boolean((env as any).DEBUG);
+    const includeDebug = allowDebug && wantsDebugParam;
 
     try {
-      const startedAt = Date.now();
       const now = new Date();
-      const start = new Date(now.getTime() - minutes * 60_000);
-      const startDateIso = toToastIsoUtc(start);
-      const endDateIso = toToastIsoUtc(now);
 
-      console.log(
-        `[orders/latest] start ${new Date(startedAt).toISOString()} window=${startDateIso}→${endDateIso}`
-      );
-
-      const pageDebug: Array<{ page: number; url: string; returned: number }> = [];
-      const allOrders: any[] = [];
-
-      let page = 1;
-      let lastPageCount = 0;
-
-      while (page <= MAX_PAGES) {
-        const { orders, nextPage } = await deps.getOrdersBulk(env, {
-          startIso: startDateIso,
-          endIso: endDateIso,
-          page,
-          pageSize: PAGE_SIZE,
-        });
-
-        const requestUrl = buildOrdersBulkUrl(env.TOAST_API_BASE, {
-          startIso: startDateIso,
-          endIso: endDateIso,
-          page,
-          pageSize: PAGE_SIZE,
-        });
-
-        pageDebug.push({ page, url: requestUrl, returned: orders.length });
-        allOrders.push(...orders);
-        lastPageCount = orders.length;
-
-        const hasMore =
-          (typeof nextPage === "number" && nextPage > page) || orders.length === PAGE_SIZE;
-
-        if (!hasMore) {
-          break;
-        }
-
-        page += 1;
-      }
-
-      if (page > MAX_PAGES && lastPageCount === PAGE_SIZE) {
-        console.warn(
-          `[orders/latest] hit MAX_PAGES=${MAX_PAGES} for window ${startDateIso}→${endDateIso}`
-        );
-      }
-
-      const sorted = allOrders.slice().sort((a, b) => {
-        const aTime = a?.updatedDate ? Date.parse(a.updatedDate) : 0;
-        const bTime = b?.updatedDate ? Date.parse(b.updatedDate) : 0;
-        return bTime - aTime;
+      const { start, end, allowWidening, minutesUsed } = resolveWindow({
+        startParam,
+        endParam,
+        minutesValue,
+        now,
       });
 
-      const ids = Array.from(new Set(sorted.map((order: any) => order?.guid).filter(Boolean)));
+      const result = await collectLatestOrders({
+        env,
+        deps,
+        limit,
+        locationId,
+        status,
+        start,
+        end,
+        allowWidening,
+        debug: includeDebug,
+      });
 
       const responseBody: any = {
         ok: true,
         route: "/api/orders/latest",
-        minutes,
-        window: { start: startDateIso, end: endDateIso },
+        minutes: minutesUsed ?? result.minutes,
+        window: result.window,
         detail: "full",
         expandUsed: EXPAND_FULL,
-        count: sorted.length,
-        ids,
-        orders: ids,
-        data: sorted,
+        count: result.orders.length,
+        ids: result.orderIds,
+        orders: result.orderIds,
+        data: result.orders,
       };
 
-      if (wantDebug) {
-        responseBody.debug = {
-          pages: pageDebug,
-          totalReturned: sorted.length,
-        };
+      if (includeDebug && result.debug) {
+        responseBody.debug = result.debug;
       }
-
-      const finishedAt = Date.now();
-      console.log(
-        `[orders/latest] finish ${new Date(finishedAt).toISOString()} count=${sorted.length} pages=${pageDebug.length} duration=${
-          finishedAt - startedAt
-        }ms`
-      );
 
       return jsonResponse(responseBody);
     } catch (err: any) {
-      const status = typeof err?.status === "number" ? err.status : 500;
+      const statusCode = typeof err?.status === "number" ? err.status : 500;
       const snippet = err?.bodySnippet ?? err?.message ?? String(err ?? "Unknown error");
 
       return jsonResponse(
@@ -126,7 +95,7 @@ export function createOrdersLatestHandler(
           route: "/api/orders/latest",
           error: typeof snippet === "string" ? snippet : "Unknown error",
         },
-        { status }
+        { status: statusCode }
       );
     }
   };
@@ -138,24 +107,75 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function toToastIsoUtc(date: Date): string {
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  const yyyy = date.getUTCFullYear();
-  const MM = pad(date.getUTCMonth() + 1);
-  const dd = pad(date.getUTCDate());
-  const HH = pad(date.getUTCHours());
-  const mm = pad(date.getUTCMinutes());
-  const ss = pad(date.getUTCSeconds());
-  const mmm = pad(date.getUTCMilliseconds(), 3);
-  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
+function resolveWindow({
+  startParam,
+  endParam,
+  minutesValue,
+  now,
+}: {
+  startParam: string | null;
+  endParam: string | null;
+  minutesValue: number | null;
+  now: Date;
+}): {
+  start: Date;
+  end: Date;
+  allowWidening: boolean;
+  minutesUsed: number | null;
+} {
+  const parsedStart = parseIsoToDate(startParam);
+  const parsedEnd = parseIsoToDate(endParam);
+
+  if (parsedStart && parsedEnd && parsedStart.getTime() < parsedEnd.getTime()) {
+    return {
+      start: parsedStart,
+      end: parsedEnd,
+      allowWidening: false,
+      minutesUsed: Math.round((parsedEnd.getTime() - parsedStart.getTime()) / 60_000),
+    };
+  }
+
+  const minutes = minutesValue ?? null;
+  if (minutes !== null && minutes > 0) {
+    return {
+      start: new Date(now.getTime() - minutes * 60_000),
+      end: new Date(now.getTime()),
+      allowWidening: true,
+      minutesUsed: minutes,
+    };
+  }
+
+  const fallbackMinutes = 60;
+  return {
+    start: new Date(now.getTime() - fallbackMinutes * 60_000),
+    end: new Date(now.getTime()),
+    allowWidening: true,
+    minutesUsed: fallbackMinutes,
+  };
 }
 
-function buildOrdersBulkUrl(base: string, params: { startIso: string; endIso: string; page: number; pageSize: number }): string {
-  const normalized = base.replace(/\/+$/, "");
-  const url = new URL(`${normalized}/orders/v2/ordersBulk`);
-  url.searchParams.set("startDate", params.startIso);
-  url.searchParams.set("endDate", params.endIso);
-  url.searchParams.set("page", String(params.page));
-  url.searchParams.set("pageSize", String(params.pageSize));
-  return url.toString();
+function parseIsoToDate(value: string | null): Date | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = normalizeToastTimestamp(value);
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Date.parse(normalized);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+  return new Date(parsed);
+}
+
+function parseNumber(value: string | null, fallback: number | null): number | null {
+  if (value === null) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return parsed;
 }
