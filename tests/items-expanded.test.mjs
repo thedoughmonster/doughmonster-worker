@@ -212,13 +212,13 @@ test('items-expanded collapses duplicate modifiers emitted separately', async ()
   assert.equal(body.orders.length, 1);
   const item = body.orders[0].items[0];
   assert.equal(item.modifiers.length, 2);
-  assert.equal(item.modifiers[0].id, 'mod-cheese');
+  assert.equal(item.modifiers[0].id, 'mod-bacon');
   assert.equal(item.modifiers[0].groupName, 'Toppings');
-  assert.equal(item.modifiers[0].quantity, 2);
-  assert.equal(item.modifiers[0].priceCents, 100);
-  assert.equal(item.modifiers[1].id, 'mod-bacon');
-  assert.equal(item.modifiers[1].quantity, 1);
-  assert.equal(item.modifiers[1].priceCents, 125);
+  assert.equal(item.modifiers[0].quantity, 1);
+  assert.equal(item.modifiers[0].priceCents, 125);
+  assert.equal(item.modifiers[1].id, 'mod-cheese');
+  assert.equal(item.modifiers[1].quantity, 2);
+  assert.equal(item.modifiers[1].priceCents, 100);
   assert.equal(item.money.modifierTotalCents, 225);
   assert.equal(
     item.money.modifierTotalCents,

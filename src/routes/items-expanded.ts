@@ -11,7 +11,7 @@ const MAX_PAGES = 200;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const HANDLER_TIME_BUDGET_MS = 3_000;
 const BACKFILL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
-const MAX_BACKFILL_WINDOWS = 48; // 48 hours of lookback
+const MAX_PROGRESSIVE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export interface ItemsExpandedDeps {
   getOrdersBulk: typeof getOrdersBulk;
@@ -173,6 +173,13 @@ interface OrderAccumulator {
   checkTotalsHydrated: boolean;
 }
 
+interface ItemSortMetadata {
+  displayOrder: number | null;
+  createdTimeMs: number | null;
+  seatNumber: number | null;
+  itemNameLower: string;
+}
+
 interface OrderBehaviorMetadata {
   orderType: OrderType;
   diningOptionGuid: string | null;
@@ -251,6 +258,7 @@ export function createItemsExpandedHandler(
       const aggregates = new Map<string, OrderAccumulator>();
       const processedKeys = new Set<string>();
       const qualifyingKeys = new Set<string>();
+      const itemSortMetadata = new WeakMap<ExpandedOrderItem, ItemSortMetadata>();
 
       const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
       const timedOut = () => Date.now() > deadline;
@@ -263,8 +271,7 @@ export function createItemsExpandedHandler(
 
       const processOrdersPage = async (
         orders: ToastOrder[]
-      ): Promise<{ newKeysThisPage: number; aborted: boolean }> => {
-        let newKeysThisPage = 0;
+      ): Promise<{ aborted: boolean }> => {
         let aborted = false;
 
         for (const order of orders) {
@@ -332,7 +339,6 @@ export function createItemsExpandedHandler(
 
             const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
             const webhookFulfillmentStatus = extractGuestOrderFulfillmentStatus(order, check);
-            const previousSize = aggregates.size;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
               orderNumber,
@@ -358,10 +364,6 @@ export function createItemsExpandedHandler(
               takeoutEstimatedFulfillmentDate:
                 behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
             });
-
-            if (aggregates.size > previousSize) {
-              newKeysThisPage += 1;
-            }
 
             updateAccumulatorMeta(accumulator, {
               orderNumber,
@@ -436,11 +438,16 @@ export function createItemsExpandedHandler(
 
               const menuItemId = selection.item?.guid ?? null;
               const quantity = normalizeQuantity(selection.quantity);
-              const modifierDetails = collectModifierDetails(selection, menuIndex, quantity);
+              const modifierDetails = collectModifierDetails(
+                selection,
+                menuIndex,
+                quantity
+              );
               const specialInstructions = extractSpecialInstructions(selection, itemName);
               const unitPrice = extractReceiptLinePrice(selection);
               const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
-              const baseTotalCents = baseEachCents !== null ? baseEachCents * quantity : null;
+              const baseTotalCents =
+                baseEachCents !== null ? baseEachCents * quantity : null;
               const totalItemPriceCents = toCents((selection as any)?.price);
               const computedTotal =
                 baseTotalCents !== null
@@ -492,6 +499,7 @@ export function createItemsExpandedHandler(
               }
 
               accumulator.items.push(item);
+              itemSortMetadata.set(item, buildItemSortMetadata(selection, itemName));
 
               if (resolvedBase !== null) {
                 accumulator.baseItemsSubtotalCents += resolvedBase;
@@ -501,7 +509,9 @@ export function createItemsExpandedHandler(
                 accumulator.modifiersSubtotalCents += modifierDetails.totalCents;
               }
 
-              const selectionDiscountCents = sumDiscountAmounts((selection as any)?.appliedDiscounts);
+              const selectionDiscountCents = sumDiscountAmounts(
+                (selection as any)?.appliedDiscounts
+              );
               if (selectionDiscountCents > 0) {
                 accumulator.discountTotalCents += selectionDiscountCents;
               }
@@ -550,7 +560,7 @@ export function createItemsExpandedHandler(
           }
         }
 
-        return { newKeysThisPage, aborted };
+        return { aborted };
       };
 
       const collectWindow = async (windowStart: Date, windowEnd: Date): Promise<boolean> => {
@@ -593,22 +603,18 @@ export function createItemsExpandedHandler(
           }
           lastPageSignature = signature;
 
-          const { newKeysThisPage, aborted } = await processOrdersPage(orders);
+          const { aborted } = await processOrdersPage(orders);
 
           if (aborted) {
             return true;
           }
 
-          if (aggregates.size >= limit || collectedEnough()) {
+          if (collectedEnough()) {
             return true;
           }
 
           if (timedOut()) {
             return true;
-          }
-
-          if (newKeysThisPage === 0) {
-            break;
           }
 
           const hasMore = typeof nextPage === "number" && nextPage > page;
@@ -626,33 +632,51 @@ export function createItemsExpandedHandler(
       if (rangeMode && effectiveStart && effectiveEnd) {
         await collectWindow(effectiveStart, effectiveEnd);
       } else {
-        let windows = 0;
-        let windowEnd = new Date(now.getTime());
-        let windowStart = new Date(windowEnd.getTime() - BACKFILL_WINDOW_MS);
+        const nowMs = now.getTime();
+        const earliestAllowedMs = nowMs - MAX_PROGRESSIVE_LOOKBACK_MS;
+        let windowEnd = new Date(nowMs);
+        let windowStart = new Date(
+          Math.max(windowEnd.getTime() - BACKFILL_WINDOW_MS, earliestAllowedMs)
+        );
 
-        while (
-          windows < MAX_BACKFILL_WINDOWS &&
-          pagesProcessed < MAX_PAGES &&
-          !timedOut() &&
-          !collectedEnough()
-        ) {
+        while (pagesProcessed < MAX_PAGES && !timedOut() && !collectedEnough()) {
+          if (windowEnd.getTime() <= earliestAllowedMs && windowStart.getTime() <= earliestAllowedMs) {
+            break;
+          }
+
+          if (windowEnd.getTime() <= windowStart.getTime()) {
+            break;
+          }
+
           const stop = await collectWindow(windowStart, windowEnd);
           if (stop) {
             break;
           }
-          windows += 1;
-          windowEnd = new Date(windowStart.getTime());
-          windowStart = new Date(windowEnd.getTime() - BACKFILL_WINDOW_MS);
+
+          if (windowStart.getTime() <= earliestAllowedMs) {
+            break;
+          }
+
+          const nextEndMs = windowStart.getTime();
+          const nextStartMs = Math.max(nextEndMs - BACKFILL_WINDOW_MS, earliestAllowedMs);
+          if (nextEndMs <= nextStartMs) {
+            break;
+          }
+
+          windowEnd = new Date(nextEndMs);
+          windowStart = new Date(nextStartMs);
         }
       }
 
       const ordered = Array.from(aggregates.values())
         .filter((entry) => entry.items.length > 0 || hasNonZeroTotals(entry))
-        .sort(compareAggregatedOrdersByOrderTime);
+        .sort((a, b) => compareAggregatedOrdersByOrderTime(a, b));
 
       const limited = ordered.slice(0, limit);
 
-      const ordersResponse = limited.map((entry) => toExpandedOrder(entry));
+      const ordersResponse = limited.map((entry) =>
+        toExpandedOrder(entry, itemSortMetadata)
+      );
 
       return jsonResponse({ orders: ordersResponse });
     } catch (err: any) {
@@ -1036,17 +1060,10 @@ function compareAggregatedOrdersByOrderTime(a: OrderAccumulator, b: OrderAccumul
   return 0;
 }
 
-function countQualifyingOrders(aggregates: Map<string, OrderAccumulator>): number {
-  let count = 0;
-  for (const entry of aggregates.values()) {
-    if (entry.items.length > 0 || hasNonZeroTotals(entry)) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
+function toExpandedOrder(
+  entry: OrderAccumulator,
+  itemSortMetadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
+): ExpandedOrder {
   const base = entry.baseItemsSubtotalCents;
   const modifiers = entry.modifiersSubtotalCents;
   const discount = entry.discountTotalCents;
@@ -1101,9 +1118,11 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
     orderData.estimatedFulfillmentDate = entry.takeoutEstimatedFulfillmentDate;
   }
 
+  const sortedItems = sortExpandedOrderItems(entry.items, itemSortMetadata);
+
   const order: ExpandedOrder = {
     orderData,
-    items: entry.items,
+    items: sortedItems,
     totals: {
       baseItemsSubtotalCents: base,
       modifiersSubtotalCents: modifiers,
@@ -1119,6 +1138,220 @@ function toExpandedOrder(entry: OrderAccumulator): ExpandedOrder {
   }
 
   return order;
+}
+
+function sortExpandedOrderItems(
+  items: ExpandedOrderItem[],
+  metadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
+): ExpandedOrderItem[] {
+  if (!Array.isArray(items) || items.length === 0) {
+    return [];
+  }
+
+  const sorted = [...items];
+  sorted.sort((a, b) => compareExpandedOrderItems(a, b, metadata));
+
+  return sorted.map((item) => ({
+    ...item,
+    modifiers: sortOrderItemModifiers(item.modifiers),
+  }));
+}
+
+function compareExpandedOrderItems(
+  a: ExpandedOrderItem,
+  b: ExpandedOrderItem,
+  metadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
+): number {
+  const metaA = metadata.get(a) ?? fallbackItemSortMetadata(a);
+  const metaB = metadata.get(b) ?? fallbackItemSortMetadata(b);
+
+  if (metaA.displayOrder !== null || metaB.displayOrder !== null) {
+    if (metaA.displayOrder !== null && metaB.displayOrder !== null && metaA.displayOrder !== metaB.displayOrder) {
+      return metaA.displayOrder - metaB.displayOrder;
+    }
+    if (metaA.displayOrder !== null && metaB.displayOrder === null) {
+      return -1;
+    }
+    if (metaA.displayOrder === null && metaB.displayOrder !== null) {
+      return 1;
+    }
+  }
+
+  if (metaA.createdTimeMs !== null || metaB.createdTimeMs !== null) {
+    if (metaA.createdTimeMs !== null && metaB.createdTimeMs !== null && metaA.createdTimeMs !== metaB.createdTimeMs) {
+      return metaA.createdTimeMs - metaB.createdTimeMs;
+    }
+    if (metaA.createdTimeMs !== null && metaB.createdTimeMs === null) {
+      return -1;
+    }
+    if (metaA.createdTimeMs === null && metaB.createdTimeMs !== null) {
+      return 1;
+    }
+  }
+
+  if (metaA.seatNumber !== null || metaB.seatNumber !== null) {
+    if (metaA.seatNumber !== null && metaB.seatNumber !== null && metaA.seatNumber !== metaB.seatNumber) {
+      return metaA.seatNumber - metaB.seatNumber;
+    }
+    if (metaA.seatNumber !== null && metaB.seatNumber === null) {
+      return -1;
+    }
+    if (metaA.seatNumber === null && metaB.seatNumber !== null) {
+      return 1;
+    }
+  }
+
+  if (metaA.itemNameLower !== metaB.itemNameLower) {
+    return metaA.itemNameLower < metaB.itemNameLower ? -1 : 1;
+  }
+
+  if (a.lineItemId !== b.lineItemId) {
+    return a.lineItemId < b.lineItemId ? -1 : 1;
+  }
+
+  return 0;
+}
+
+function fallbackItemSortMetadata(item: ExpandedOrderItem): ItemSortMetadata {
+  return {
+    displayOrder: null,
+    createdTimeMs: null,
+    seatNumber: null,
+    itemNameLower: item.itemName.toLowerCase(),
+  };
+}
+
+function buildItemSortMetadata(selection: ToastSelection, itemName: string): ItemSortMetadata {
+  return {
+    displayOrder: extractSelectionDisplayOrder(selection),
+    createdTimeMs: extractSelectionCreatedTime(selection),
+    seatNumber: extractSelectionSeatNumber(selection),
+    itemNameLower: itemName.toLowerCase(),
+  };
+}
+
+function extractSelectionDisplayOrder(selection: ToastSelection): number | null {
+  const candidates: unknown[] = [
+    (selection as any)?.displaySequence,
+    (selection as any)?.displayOrder,
+    (selection as any)?.displayIndex,
+    (selection as any)?.displayPosition,
+    (selection as any)?.sequence,
+    (selection as any)?.sequenceNumber,
+    (selection as any)?.position,
+    (selection as any)?.order,
+    (selection as any)?.kitchenDisplaySequence,
+    (selection as any)?.posDisplaySequence,
+    (selection as any)?.context?.displayOrder,
+    (selection as any)?.context?.displaySequence,
+  ];
+
+  for (const candidate of candidates) {
+    const value = normalizeMaybeNumber(candidate);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function extractSelectionCreatedTime(selection: ToastSelection): number | null {
+  const stringCandidates: unknown[] = [
+    (selection as any)?.createdDate,
+    (selection as any)?.createdAt,
+    (selection as any)?.creationDate,
+    (selection as any)?.createdTime,
+    (selection as any)?.fireTime,
+    (selection as any)?.timestamp,
+    (selection as any)?.time,
+  ];
+
+  for (const candidate of stringCandidates) {
+    if (typeof candidate === "string" && candidate) {
+      const parsed = parseToastTimestamp(candidate);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+  }
+
+  const numericCandidates: unknown[] = [
+    (selection as any)?.createdTimestamp,
+    (selection as any)?.timestamp,
+    (selection as any)?.createdTime,
+    (selection as any)?.time,
+  ];
+
+  for (const candidate of numericCandidates) {
+    const normalized = normalizeMaybeNumber(candidate);
+    if (normalized !== null) {
+      return normalizeEpochTimestamp(normalized);
+    }
+  }
+
+  return null;
+}
+
+function extractSelectionSeatNumber(selection: ToastSelection): number | null {
+  const candidates: unknown[] = [
+    (selection as any)?.seatNumber,
+    (selection as any)?.seat,
+    (selection as any)?.seatPosition,
+    (selection as any)?.seatNum,
+    (selection as any)?.context?.seatNumber,
+    (selection as any)?.diningContext?.seatNumber,
+  ];
+
+  for (const candidate of candidates) {
+    const value = normalizeMaybeInteger(candidate);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function normalizeMaybeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function normalizeMaybeInteger(value: unknown): number | null {
+  const numeric = normalizeMaybeNumber(value);
+  if (numeric === null) {
+    return null;
+  }
+
+  const rounded = Math.round(numeric);
+  if (!Number.isFinite(rounded)) {
+    return null;
+  }
+
+  return rounded;
+}
+
+function normalizeEpochTimestamp(value: number): number {
+  if (value > 1_000_000_000_000) {
+    return value;
+  }
+
+  if (value > 0) {
+    return value * 1000;
+  }
+
+  return value;
 }
 
 function deriveOrderFulfillmentStatus(entry: OrderAccumulator): string | null {
@@ -1177,7 +1410,29 @@ function collectModifierDetails(
   menuIndex: ReturnType<typeof createMenuIndex>,
   parentQuantity = 1
 ): { modifiers: OrderItemModifier[]; totalCents: number } {
-  const output: OrderItemModifier[] = [];
+  const rawModifiers = collectModifierDetailsInternal(selection, menuIndex, parentQuantity);
+  const collapsed = collapseOrderItemModifiers(rawModifiers);
+  const sorted = sortOrderItemModifiers(collapsed);
+  const totalCents = sorted.reduce((sum, mod) => sum + mod.priceCents, 0);
+
+  return { modifiers: sorted, totalCents };
+}
+
+interface RawOrderItemModifier {
+  id: string | null;
+  name: string;
+  groupName: string | null;
+  priceCents: number;
+  quantity: number;
+  unitPriceCents: number | null;
+}
+
+function collectModifierDetailsInternal(
+  selection: ToastSelection,
+  menuIndex: ReturnType<typeof createMenuIndex>,
+  parentQuantity = 1
+): RawOrderItemModifier[] {
+  const output: RawOrderItemModifier[] = [];
   const modifiers = Array.isArray(selection.modifiers) ? selection.modifiers : [];
 
   for (const modifier of modifiers) {
@@ -1207,56 +1462,42 @@ function collectModifierDetails(
       groupName: groupName ?? null,
       priceCents: adjustedPrice ?? 0,
       quantity: modifierQuantity,
+      unitPriceCents: ownUnitPrice,
     });
 
     if (Array.isArray((modifier as any).modifiers) && (modifier as any).modifiers.length > 0) {
-      const nested = collectModifierDetails(
+      const nested = collectModifierDetailsInternal(
         modifier as unknown as ToastSelection,
         menuIndex,
         parentQuantity * modifierQuantity
       );
-      output.push(...nested.modifiers);
+      output.push(...nested);
     }
   }
 
-  const collapsed = collapseOrderItemModifiers(output);
-  const totalCents = collapsed.reduce((sum, mod) => sum + mod.priceCents, 0);
-
-  return { modifiers: collapsed, totalCents };
+  return output;
 }
 
-function collapseOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemModifier[] {
-  const aggregated: OrderItemModifier[] = [];
+function collapseOrderItemModifiers(modifiers: RawOrderItemModifier[]): OrderItemModifier[] {
+  const aggregated = new Map<
+    string,
+    { id: string | null; name: string; groupName: string | null; priceCents: number; quantity: number }
+  >();
 
   for (const modifier of modifiers) {
-    const candidateId = modifier.id ?? null;
-    const candidateName = modifier.name;
-    const candidateGroup = modifier.groupName ?? null;
+    const identifier = modifier.id
+      ? `id:${modifier.id}`
+      : `name:${modifier.name.toLowerCase()}`;
+    const groupKey = (modifier.groupName ?? "").toLowerCase();
+    const unitKey = modifier.unitPriceCents !== null ? modifier.unitPriceCents : "unknown";
+    const aggregateKey = `${identifier}|${groupKey}|${unitKey}`;
 
-    const existing = aggregated.find((entry) => {
-      if (entry.id !== candidateId) {
-        return false;
-      }
-      if (entry.name !== candidateName) {
-        return false;
-      }
-
-      if (entry.groupName === candidateGroup) {
-        return true;
-      }
-
-      if (entry.groupName === null || candidateGroup === null) {
-        return true;
-      }
-
-      return false;
-    });
-
+    const existing = aggregated.get(aggregateKey);
     if (!existing) {
-      aggregated.push({
-        id: candidateId,
-        name: candidateName,
-        groupName: candidateGroup,
+      aggregated.set(aggregateKey, {
+        id: modifier.id ?? null,
+        name: modifier.name,
+        groupName: modifier.groupName ?? null,
         priceCents: modifier.priceCents,
         quantity: modifier.quantity,
       });
@@ -1266,18 +1507,48 @@ function collapseOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemMo
     existing.quantity += modifier.quantity;
     existing.priceCents += modifier.priceCents;
 
-    if ((existing.groupName === null || existing.groupName === undefined) && candidateGroup) {
-      existing.groupName = candidateGroup;
+    if ((existing.groupName === null || existing.groupName === undefined) && modifier.groupName) {
+      existing.groupName = modifier.groupName;
     }
   }
 
-  return aggregated.map((entry) => ({
-    id: entry.id ?? null,
+  return Array.from(aggregated.values()).map((entry) => ({
+    id: entry.id,
     name: entry.name,
-    groupName: entry.groupName ?? null,
+    groupName: entry.groupName,
     priceCents: entry.priceCents,
     quantity: entry.quantity,
   }));
+}
+
+function sortOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemModifier[] {
+  if (!Array.isArray(modifiers) || modifiers.length === 0) {
+    return [];
+  }
+
+  return [...modifiers].sort(compareOrderItemModifiers);
+}
+
+function compareOrderItemModifiers(a: OrderItemModifier, b: OrderItemModifier): number {
+  const groupA = (a.groupName ?? "").toLowerCase();
+  const groupB = (b.groupName ?? "").toLowerCase();
+  if (groupA !== groupB) {
+    return groupA < groupB ? -1 : 1;
+  }
+
+  const nameA = a.name.toLowerCase();
+  const nameB = b.name.toLowerCase();
+  if (nameA !== nameB) {
+    return nameA < nameB ? -1 : 1;
+  }
+
+  const idA = a.id ?? "";
+  const idB = b.id ?? "";
+  if (idA !== idB) {
+    return idA < idB ? -1 : 1;
+  }
+
+  return 0;
 }
 
 function sumDiscountAmounts(discounts: unknown): number {
@@ -1416,7 +1687,7 @@ function isVoidedOrder(order: ToastOrder): boolean {
 }
 
 function extractOrderTime(order: ToastOrder): string | null {
-  const candidates = [order.createdDate, order.openedDate, order.modifiedDate];
+  const candidates = [order.createdDate, order.openedDate];
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate) {
       return candidate;
