@@ -176,6 +176,8 @@ interface OrderAccumulator {
 interface ItemSortMetadata {
   displayOrder: number | null;
   createdTimeMs: number | null;
+  receiptLinePosition: number | null;
+  selectionIndex: number | null;
   seatNumber: number | null;
   itemNameLower: string;
 }
@@ -199,6 +201,17 @@ interface DiningOptionRecord {
   name: string | null;
 }
 
+interface DiagnosticsCounters {
+  dropped_time_parse: number;
+  dropped_location_status: number;
+  dropped_voided: number;
+  dropped_non_lineitem: number;
+  pages_fetched: number;
+  orders_seen: number;
+  qualifying_found: number;
+  lookback_windows_used: number;
+}
+
 export function createItemsExpandedHandler(
   deps: ItemsExpandedDeps = { getOrdersBulk, getPublishedMenus, getDiningOptions }
 ) {
@@ -212,6 +225,9 @@ export function createItemsExpandedHandler(
     const statusParam = url.searchParams.get("status");
     const locationParam = url.searchParams.get("locationId");
     const limitParam = url.searchParams.get("limit");
+    const debugParam = url.searchParams.get("debug");
+    const enableDiagnostics =
+      typeof debugParam === "string" && ["1", "true", "debug"].includes(debugParam.toLowerCase());
 
     const parsedEnd = parseDateParam(endParam);
     if (endParam && !(parsedEnd instanceof Date && !isNaN(parsedEnd.getTime()))) {
@@ -251,21 +267,38 @@ export function createItemsExpandedHandler(
     let lastWindowStartIso: string | null = null;
     let lastWindowEndIso: string | null = null;
 
+    const aggregates = new Map<string, OrderAccumulator>();
+    const processedKeys = new Set<string>();
+    const qualifyingKeys = new Set<string>();
+    let qualifyingCount = 0;
+    const itemSortMetadata = new WeakMap<ExpandedOrderItem, ItemSortMetadata>();
+    const diagnostics: DiagnosticsCounters = {
+      dropped_time_parse: 0,
+      dropped_location_status: 0,
+      dropped_voided: 0,
+      dropped_non_lineitem: 0,
+      pages_fetched: 0,
+      orders_seen: 0,
+      qualifying_found: 0,
+      lookback_windows_used: 0,
+    };
+
     try {
       const menuDoc = await deps.getPublishedMenus(env);
       const menuIndex = createMenuIndex(menuDoc);
 
-      const aggregates = new Map<string, OrderAccumulator>();
-      const processedKeys = new Set<string>();
-      const qualifyingKeys = new Set<string>();
-      const itemSortMetadata = new WeakMap<ExpandedOrderItem, ItemSortMetadata>();
-
       const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
       const timedOut = () => Date.now() > deadline;
-      const collectedEnough = () => qualifyingKeys.size >= limit;
+      const collectedEnough = () => qualifyingCount >= limit;
       const markQualifying = (key: string, accumulator: OrderAccumulator) => {
-        if (accumulator.items.length > 0 || hasNonZeroTotals(accumulator)) {
+        const qualifies = accumulator.items.length > 0 || hasNonZeroTotals(accumulator);
+        const already = qualifyingKeys.has(key);
+        if (qualifies && !already) {
           qualifyingKeys.add(key);
+          qualifyingCount += 1;
+        } else if (!qualifies && already) {
+          qualifyingKeys.delete(key);
+          qualifyingCount = Math.max(0, qualifyingCount - 1);
         }
       };
 
@@ -284,16 +317,19 @@ export function createItemsExpandedHandler(
             continue;
           }
 
-          if (!orderMatches(order, locationParam, statusParam)) {
+          diagnostics.orders_seen += 1;
+
+          if (!orderMatches(order, locationParam, statusParam, diagnostics)) {
             continue;
           }
 
-          const orderTime = extractOrderTime(order);
-          if (!orderTime) {
+          const resolvedOrderTime = extractOrderTime(order, diagnostics);
+          if (!resolvedOrderTime) {
             continue;
           }
 
-          const orderTimeMs = parseToastTimestamp(orderTime);
+          const orderTime = resolvedOrderTime.iso;
+          const orderTimeMs = resolvedOrderTime.ms;
           const timeDue = extractOrderDueTime(order);
           const orderNumber = extractOrderNumber(order);
           const locationId = extractOrderLocation(order);
@@ -312,6 +348,7 @@ export function createItemsExpandedHandler(
             }
 
             if ((check as any)?.deleted) {
+              diagnostics.dropped_voided += 1;
               continue;
             }
 
@@ -392,21 +429,35 @@ export function createItemsExpandedHandler(
             processedKeys.add(key);
 
             const selections = Array.isArray(check.selections) ? check.selections : [];
-            for (const selection of selections) {
+            for (let selectionIndex = 0; selectionIndex < selections.length; selectionIndex += 1) {
+              const selection = selections[selectionIndex];
               if (timedOut() || collectedEnough()) {
                 aborted = true;
                 break;
               }
 
-              if (!selection || typeof selection.guid !== "string") {
+              if (!selection || typeof selection !== "object") {
                 continue;
               }
 
-              if (!isLineItem(selection)) {
+              if (isSelectionVoided(selection as ToastSelection)) {
+                diagnostics.dropped_voided += 1;
                 continue;
               }
 
-              if (isSelectionVoided(selection)) {
+              if (!isLineItem(selection as ToastSelection)) {
+                diagnostics.dropped_non_lineitem += 1;
+                continue;
+              }
+
+              const lineItemId = resolveSelectionLineItemId(
+                order.guid,
+                check.guid ?? null,
+                selection as ToastSelection,
+                selectionIndex
+              );
+              if (!lineItemId) {
+                diagnostics.dropped_non_lineitem += 1;
                 continue;
               }
 
@@ -429,22 +480,25 @@ export function createItemsExpandedHandler(
                 }
               }
 
-              const menuItem = menuIndex.findItem(selection.item);
+              const menuItem = menuIndex.findItem((selection as ToastSelection).item);
               const itemName =
                 getKitchenTicketName(menuItem) ??
-                getSelectionDisplayName(selection) ??
-                selection.item?.guid ??
+                getSelectionDisplayName(selection as ToastSelection) ??
+                (selection as any)?.item?.guid ??
                 "Unknown item";
 
-              const menuItemId = selection.item?.guid ?? null;
-              const quantity = normalizeQuantity(selection.quantity);
+              const menuItemId =
+                typeof (selection as any)?.item?.guid === "string" && (selection as any).item.guid
+                  ? (selection as any).item.guid
+                  : null;
+              const quantity = normalizeQuantity((selection as ToastSelection).quantity);
               const modifierDetails = collectModifierDetails(
-                selection,
+                selection as ToastSelection,
                 menuIndex,
                 quantity
               );
-              const specialInstructions = extractSpecialInstructions(selection, itemName);
-              const unitPrice = extractReceiptLinePrice(selection);
+              const specialInstructions = extractSpecialInstructions(selection as ToastSelection, itemName);
+              const unitPrice = extractReceiptLinePrice(selection as ToastSelection);
               const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
               const baseTotalCents =
                 baseEachCents !== null ? baseEachCents * quantity : null;
@@ -482,11 +536,11 @@ export function createItemsExpandedHandler(
               }
 
               const item: ExpandedOrderItem = {
-                lineItemId: selection.guid,
+                lineItemId,
                 menuItemId,
                 itemName,
                 quantity,
-                fulfillmentStatus: selectionFulfillmentStatus,
+                fulfillmentStatus: selectionFulfillmentStatus ?? null,
                 modifiers: modifierDetails.modifiers,
               };
 
@@ -499,7 +553,10 @@ export function createItemsExpandedHandler(
               }
 
               accumulator.items.push(item);
-              itemSortMetadata.set(item, buildItemSortMetadata(selection, itemName));
+              itemSortMetadata.set(
+                item,
+                buildItemSortMetadata(selection as ToastSelection, itemName, selectionIndex)
+              );
 
               if (resolvedBase !== null) {
                 accumulator.baseItemsSubtotalCents += resolvedBase;
@@ -568,9 +625,9 @@ export function createItemsExpandedHandler(
         const endIso = toToastIsoUtc(windowEnd);
         lastWindowStartIso = startIso;
         lastWindowEndIso = endIso;
+        diagnostics.lookback_windows_used += 1;
 
         let page = 1;
-        let lastPageSignature = "";
 
         while (pagesProcessed < MAX_PAGES) {
           if (timedOut() || collectedEnough()) {
@@ -587,21 +644,11 @@ export function createItemsExpandedHandler(
           });
 
           pagesProcessed += 1;
+          diagnostics.pages_fetched += 1;
 
           if (!Array.isArray(orders) || orders.length === 0) {
             break;
           }
-
-          const signaturePayload = [
-            orders[0]?.guid ?? null,
-            orders[orders.length - 1]?.guid ?? null,
-            nextPage,
-          ];
-          const signature = JSON.stringify(signaturePayload);
-          if (signature === lastPageSignature) {
-            break;
-          }
-          lastPageSignature = signature;
 
           const { aborted } = await processOrdersPage(orders);
 
@@ -617,13 +664,15 @@ export function createItemsExpandedHandler(
             return true;
           }
 
-          const hasMore = typeof nextPage === "number" && nextPage > page;
+          const nextPageNumber = typeof nextPage === "number" && nextPage > page ? nextPage : page + 1;
+          const hasMore =
+            (typeof nextPage === "number" && nextPage > page) || orders.length === PAGE_SIZE;
 
           if (!hasMore) {
             break;
           }
 
-          page = nextPage;
+          page = nextPageNumber;
         }
 
         return false;
@@ -678,6 +727,16 @@ export function createItemsExpandedHandler(
         toExpandedOrder(entry, itemSortMetadata)
       );
 
+      diagnostics.qualifying_found = qualifyingCount;
+      if (enableDiagnostics) {
+        console.debug("items-expanded diagnostics", {
+          ...diagnostics,
+          aggregates: aggregates.size,
+          qualifying_keys: qualifyingKeys.size,
+          pages_processed: pagesProcessed,
+        });
+      }
+
       return jsonResponse({ orders: ordersResponse });
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
@@ -698,6 +757,16 @@ export function createItemsExpandedHandler(
         endIso: lastWindowEndIso,
         error: err,
       });
+
+      if (enableDiagnostics) {
+        diagnostics.qualifying_found = qualifyingCount;
+        console.debug("items-expanded diagnostics", {
+          ...diagnostics,
+          aggregates: aggregates.size,
+          qualifying_keys: qualifyingKeys.size,
+          pages_processed: pagesProcessed,
+        });
+      }
 
       return errorResponse(status, message, code);
     }
@@ -1189,6 +1258,34 @@ function compareExpandedOrderItems(
     }
   }
 
+  if (metaA.receiptLinePosition !== null || metaB.receiptLinePosition !== null) {
+    if (
+      metaA.receiptLinePosition !== null &&
+      metaB.receiptLinePosition !== null &&
+      metaA.receiptLinePosition !== metaB.receiptLinePosition
+    ) {
+      return metaA.receiptLinePosition - metaB.receiptLinePosition;
+    }
+    if (metaA.receiptLinePosition !== null && metaB.receiptLinePosition === null) {
+      return -1;
+    }
+    if (metaA.receiptLinePosition === null && metaB.receiptLinePosition !== null) {
+      return 1;
+    }
+  }
+
+  if (metaA.selectionIndex !== null || metaB.selectionIndex !== null) {
+    if (metaA.selectionIndex !== null && metaB.selectionIndex !== null && metaA.selectionIndex !== metaB.selectionIndex) {
+      return metaA.selectionIndex - metaB.selectionIndex;
+    }
+    if (metaA.selectionIndex !== null && metaB.selectionIndex === null) {
+      return -1;
+    }
+    if (metaA.selectionIndex === null && metaB.selectionIndex !== null) {
+      return 1;
+    }
+  }
+
   if (metaA.seatNumber !== null || metaB.seatNumber !== null) {
     if (metaA.seatNumber !== null && metaB.seatNumber !== null && metaA.seatNumber !== metaB.seatNumber) {
       return metaA.seatNumber - metaB.seatNumber;
@@ -1205,6 +1302,12 @@ function compareExpandedOrderItems(
     return metaA.itemNameLower < metaB.itemNameLower ? -1 : 1;
   }
 
+  const menuItemA = (a.menuItemId ?? "").toString();
+  const menuItemB = (b.menuItemId ?? "").toString();
+  if (menuItemA !== menuItemB) {
+    return menuItemA.localeCompare(menuItemB, undefined, { sensitivity: "base" });
+  }
+
   if (a.lineItemId !== b.lineItemId) {
     return a.lineItemId < b.lineItemId ? -1 : 1;
   }
@@ -1216,18 +1319,57 @@ function fallbackItemSortMetadata(item: ExpandedOrderItem): ItemSortMetadata {
   return {
     displayOrder: null,
     createdTimeMs: null,
+    receiptLinePosition: null,
+    selectionIndex: null,
     seatNumber: null,
     itemNameLower: item.itemName.toLowerCase(),
   };
 }
 
-function buildItemSortMetadata(selection: ToastSelection, itemName: string): ItemSortMetadata {
+function buildItemSortMetadata(
+  selection: ToastSelection,
+  itemName: string,
+  fallbackSelectionIndex: number | null
+): ItemSortMetadata {
   return {
     displayOrder: extractSelectionDisplayOrder(selection),
     createdTimeMs: extractSelectionCreatedTime(selection),
+    receiptLinePosition: extractSelectionReceiptLinePosition(selection),
+    selectionIndex: extractSelectionIndex(selection, fallbackSelectionIndex),
     seatNumber: extractSelectionSeatNumber(selection),
     itemNameLower: itemName.toLowerCase(),
   };
+}
+
+function resolveSelectionLineItemId(
+  orderId: string,
+  checkId: string | null,
+  selection: ToastSelection,
+  selectionIndex: number
+): string | null {
+  if (typeof selection.guid === "string" && selection.guid.trim() !== "") {
+    return selection.guid;
+  }
+
+  const itemGuid = (selection as any)?.item?.guid;
+  if (typeof itemGuid === "string" && itemGuid.trim() !== "") {
+    return `${orderId}:${checkId ?? ""}:item:${itemGuid}:${selectionIndex}`;
+  }
+
+  const displayName = getSelectionDisplayName(selection);
+  if (displayName) {
+    const normalized = displayName.trim().toLowerCase().replace(/\s+/g, "-");
+    const receiptPosition = extractSelectionReceiptLinePosition(selection);
+    const suffix = receiptPosition !== null ? `${receiptPosition}` : `${selectionIndex}`;
+    return `${orderId}:${checkId ?? ""}:name:${normalized}:${suffix}`;
+  }
+
+  const receiptPrice = extractReceiptLinePrice(selection);
+  if (receiptPrice !== null) {
+    return `${orderId}:${checkId ?? ""}:open:${selectionIndex}`;
+  }
+
+  return null;
 }
 
 function extractSelectionDisplayOrder(selection: ToastSelection): number | null {
@@ -1244,6 +1386,8 @@ function extractSelectionDisplayOrder(selection: ToastSelection): number | null 
     (selection as any)?.posDisplaySequence,
     (selection as any)?.context?.displayOrder,
     (selection as any)?.context?.displaySequence,
+    (selection as any)?.receiptLinePosition,
+    (selection as any)?.selectionIndex,
   ];
 
   for (const candidate of candidates) {
@@ -1311,6 +1455,35 @@ function extractSelectionSeatNumber(selection: ToastSelection): number | null {
   }
 
   return null;
+}
+
+function extractSelectionReceiptLinePosition(selection: ToastSelection): number | null {
+  const candidates: unknown[] = [
+    (selection as any)?.receiptLinePosition,
+    (selection as any)?.receiptLineIndex,
+    (selection as any)?.receiptPosition,
+    (selection as any)?.receiptIndex,
+  ];
+
+  for (const candidate of candidates) {
+    const value = normalizeMaybeInteger(candidate);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function extractSelectionIndex(selection: ToastSelection, fallback: number | null): number | null {
+  const explicit = normalizeMaybeInteger((selection as any)?.selectionIndex);
+  if (explicit !== null) {
+    return explicit;
+  }
+  if (fallback === null || fallback === undefined) {
+    return null;
+  }
+  return fallback;
 }
 
 function normalizeMaybeNumber(value: unknown): number | null {
@@ -1660,14 +1833,25 @@ function resolveModifierUnitPriceCents(modifier: ToastSelection): number | null 
   return toCents(receiptPrice);
 }
 
-function orderMatches(order: ToastOrder, locationId: string | null, status: string | null): boolean {
+function orderMatches(
+  order: ToastOrder,
+  locationId: string | null,
+  status: string | null,
+  diagnostics?: DiagnosticsCounters
+): boolean {
   if (isVoidedOrder(order)) {
+    if (diagnostics) {
+      diagnostics.dropped_voided += 1;
+    }
     return false;
   }
 
   if (locationId) {
     const value = extractOrderLocation(order);
     if (!value || value !== locationId) {
+      if (diagnostics) {
+        diagnostics.dropped_location_status += 1;
+      }
       return false;
     }
   }
@@ -1675,6 +1859,9 @@ function orderMatches(order: ToastOrder, locationId: string | null, status: stri
   if (status) {
     const orderStatus = extractOrderStatus(order);
     if (!orderStatus || orderStatus.toLowerCase() !== status.toLowerCase()) {
+      if (diagnostics) {
+        diagnostics.dropped_location_status += 1;
+      }
       return false;
     }
   }
@@ -1686,13 +1873,36 @@ function isVoidedOrder(order: ToastOrder): boolean {
   return Boolean((order as any)?.voided);
 }
 
-function extractOrderTime(order: ToastOrder): string | null {
-  const candidates = [order.createdDate, order.openedDate];
-  for (const candidate of candidates) {
+interface ResolvedOrderTime {
+  iso: string;
+  ms: number;
+}
+
+function extractOrderTime(order: ToastOrder, diagnostics?: DiagnosticsCounters): ResolvedOrderTime | null {
+  const primaryCandidates = [order.createdDate, order.openedDate];
+  for (const candidate of primaryCandidates) {
     if (typeof candidate === "string" && candidate) {
-      return candidate;
+      const parsed = parseToastTimestamp(candidate);
+      if (parsed !== null) {
+        return { iso: candidate, ms: parsed };
+      }
     }
   }
+
+  const fallbackCandidates = [order.promisedDate, (order as any)?.readyDate];
+  for (const candidate of fallbackCandidates) {
+    if (typeof candidate === "string" && candidate) {
+      const parsed = parseToastTimestamp(candidate);
+      if (parsed !== null) {
+        return { iso: candidate, ms: parsed };
+      }
+    }
+  }
+
+  if (diagnostics) {
+    diagnostics.dropped_time_parse += 1;
+  }
+
   return null;
 }
 

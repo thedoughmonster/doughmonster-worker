@@ -920,6 +920,181 @@ test('items-expanded exposes aggregated fulfillment status on orderData', async 
   assert.deepEqual(statuses, ['NEW', 'READY']);
 });
 
+test('items-expanded paginates to collect the newest qualifying orders and keeps item order stable', async () => {
+  const pagedResponses = {
+    1: {
+      orders: [
+        {
+          guid: 'order-new-2',
+          createdDate: '2024-01-01T12:30:00.000+0000',
+          checks: [
+            {
+              guid: 'order-new-2-check',
+              selections: [
+                {
+                  guid: 'sel-new-2',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  receiptLinePrice: 9,
+                  item: { guid: 'item-new-2' },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          guid: 'order-non-1',
+          createdDate: '2024-01-01T12:15:00.000+0000',
+          checks: [
+            {
+              guid: 'order-non-1-check',
+              selections: [],
+            },
+          ],
+        },
+      ],
+      nextPage: 2,
+    },
+    2: {
+      orders: [
+        {
+          guid: 'order-new-3',
+          createdDate: '2024-01-01T12:00:00.000+0000',
+          checks: [
+            {
+              guid: 'order-new-3-check',
+              selections: [
+                {
+                  selectionType: 'OPEN_ITEM',
+                  displayName: 'Chef Special',
+                  quantity: 1,
+                  receiptLinePrice: 7,
+                  selectionIndex: 3,
+                  item: {},
+                },
+              ],
+            },
+          ],
+        },
+        {
+          guid: 'order-non-2',
+          createdDate: '2024-01-01T11:45:00.000+0000',
+          checks: [
+            {
+              guid: 'order-non-2-check',
+              selections: [],
+            },
+          ],
+        },
+      ],
+      nextPage: 3,
+    },
+    3: {
+      orders: [
+        {
+          guid: 'order-new-1',
+          createdDate: '2024-01-01T13:00:00.000+0000',
+          checks: [
+            {
+              guid: 'order-new-1-check',
+              selections: [
+                {
+                  guid: 'sel-b',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  receiptLinePrice: 4,
+                  receiptLinePosition: 2,
+                  selectionIndex: 2,
+                  item: { guid: 'item-b' },
+                },
+                {
+                  selectionType: 'OPEN_ITEM',
+                  displayName: 'Daily Special',
+                  quantity: 1,
+                  receiptLinePrice: 3,
+                  receiptLinePosition: 3,
+                  selectionIndex: 3,
+                  item: {},
+                },
+                {
+                  guid: 'sel-a',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  receiptLinePrice: 5,
+                  receiptLinePosition: 1,
+                  selectionIndex: 1,
+                  item: { guid: 'item-a' },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          guid: 'order-old',
+          createdDate: '2024-01-01T11:00:00.000+0000',
+          checks: [
+            {
+              guid: 'order-old-check',
+              selections: [
+                {
+                  guid: 'sel-old',
+                  selectionType: 'MENU_ITEM',
+                  quantity: 1,
+                  receiptLinePrice: 2,
+                  item: { guid: 'item-old' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      nextPage: null,
+    },
+  };
+
+  const handler = createItemsExpandedHandler({
+    async getOrdersBulk(_env, params) {
+      const page = params?.page ?? 1;
+      const response = pagedResponses[page] ?? { orders: [], nextPage: null };
+      const cloned = JSON.parse(JSON.stringify(response));
+      return { orders: cloned.orders, nextPage: cloned.nextPage };
+    },
+    async getPublishedMenus() {
+      return null;
+    },
+    async getDiningOptions() {
+      return [];
+    },
+  });
+
+  const env = createEnv();
+  const request = new Request('https://worker.test/api/items-expanded?limit=3');
+
+  const responseA = await handler(env, request);
+  const bodyA = await responseA.json();
+
+  assert.equal(responseA.status, 200);
+  assert.equal(bodyA.orders.length, 3);
+  assert.deepEqual(
+    bodyA.orders.map((order) => order.orderData.orderId),
+    ['order-new-1', 'order-new-2', 'order-new-3']
+  );
+  const topItemsA = bodyA.orders[0].items.map((item) => item.lineItemId);
+
+  const responseB = await handler(env, request);
+  const bodyB = await responseB.json();
+
+  assert.equal(responseB.status, 200);
+  assert.deepEqual(
+    bodyB.orders.map((order) => order.orderData.orderId),
+    ['order-new-1', 'order-new-2', 'order-new-3']
+  );
+  assert.deepEqual(
+    bodyB.orders[0].items.map((item) => item.lineItemId),
+    topItemsA
+  );
+});
+
 test('items-expanded reports READY_FOR_PICKUP when all selections are ready', async () => {
   const orders = [
     {
