@@ -252,6 +252,24 @@ interface MenuFetchResult {
   updatedAt: string | null;
 }
 
+interface UpstreamTrace {
+  url: string | null;
+  status: number | null;
+  ok: boolean | null;
+  bytes: number | null;
+  snippet: string | null;
+}
+
+interface MenuUpstreamTrace extends UpstreamTrace {
+  cacheStatus: string | null;
+  updatedAt: string | null;
+}
+
+interface UpstreamTraceContainer {
+  orders: UpstreamTrace;
+  menu: MenuUpstreamTrace;
+}
+
 export function createItemsExpandedHandler(
   deps: ItemsExpandedDeps = {
     fetch: defaultFetch,
@@ -262,29 +280,107 @@ export function createItemsExpandedHandler(
   return async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    const requestId = crypto.randomUUID();
+    const t0 = Date.now();
+
+    const debugParam = url.searchParams.get("debug");
+    const enableDiagnostics =
+      typeof debugParam === "string" && ["1", "true", "debug"].includes(debugParam.toLowerCase());
+
+    const traces: UpstreamTraceContainer = {
+      orders: { url: null, status: null, ok: null, bytes: null, snippet: null },
+      menu: {
+        url: null,
+        status: null,
+        ok: null,
+        bytes: null,
+        snippet: null,
+        cacheStatus: null,
+        updatedAt: null,
+      },
+    };
+
     const now = new Date();
     const endParam = url.searchParams.get("end");
     const startParam = url.searchParams.get("start");
     const statusParam = url.searchParams.get("status");
     const locationParam = url.searchParams.get("locationId");
     const limitParam = url.searchParams.get("limit");
-    const debugParam = url.searchParams.get("debug");
-    const enableDiagnostics =
-      typeof debugParam === "string" && ["1", "true", "debug"].includes(debugParam.toLowerCase());
 
     const parsedEnd = parseDateParam(endParam);
+    const requestedLimit =
+      limitParam !== null && limitParam !== "" ? Number(limitParam) : Number.NaN;
+    const limit = clampNumber(Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_LIMIT, 1, MAX_LIMIT);
+
+    const diagnostics: DiagnosticsCounters = {
+      dropped_time_parse: 0,
+      dropped_location_status: 0,
+      dropped_voided: 0,
+      dropped_non_lineitem: 0,
+      pages_fetched: 0,
+      orders_seen: 0,
+      qualifying_found: 0,
+      lookback_windows_used: 0,
+    };
+
+    let pagesProcessed = 0;
+    let lastPage = 1;
+    let lastWindowStartIso: string | null = null;
+    let lastWindowEndIso: string | null = null;
+    let qualifyingCount = 0;
+
+    const buildHeaders = () => ({
+      "content-type": "application/json; charset=utf-8",
+      "x-request-id": requestId,
+      "x-items-expanded-debug": "1",
+      "x-up-orders-status": traces.orders.status !== null ? String(traces.orders.status) : "",
+      "x-up-menu-status": traces.menu.status !== null ? String(traces.menu.status) : "",
+      "x-qualifying-found": String(qualifyingCount),
+    });
+
+    const buildDebugObject = (includeLastPage: boolean) => {
+      diagnostics.qualifying_found = qualifyingCount;
+      const debugBase = {
+        requestId,
+        timingMs: Date.now() - t0,
+        ordersUpstream: { ...traces.orders },
+        menuUpstream: { ...traces.menu },
+        diagnostics: { ...diagnostics },
+        window: {
+          startIso: lastWindowStartIso,
+          endIso: lastWindowEndIso,
+        },
+        limit,
+        pagesProcessed,
+      };
+
+      if (includeLastPage) {
+        return {
+          ...debugBase,
+          lastPage,
+        };
+      }
+
+      return debugBase;
+    };
+
+    const respondWithError = (status: number, message: string, code = "BAD_REQUEST") => {
+      const headers = enableDiagnostics ? buildHeaders() : undefined;
+      const debugPayload = enableDiagnostics ? buildDebugObject(true) : undefined;
+      return errorResponse(status, message, code, {
+        headers,
+        debug: debugPayload,
+      });
+    };
+
     if (endParam && !(parsedEnd instanceof Date && !isNaN(parsedEnd.getTime()))) {
-      return errorResponse(400, "Invalid end parameter");
+      return respondWithError(400, "Invalid end parameter");
     }
 
     const parsedStart = parseDateParam(startParam);
     if (startParam && !(parsedStart instanceof Date && !isNaN(parsedStart.getTime()))) {
-      return errorResponse(400, "Invalid start parameter");
+      return respondWithError(400, "Invalid start parameter");
     }
-
-    const requestedLimit =
-      limitParam !== null && limitParam !== "" ? Number(limitParam) : Number.NaN;
-    const limit = clampNumber(Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_LIMIT, 1, MAX_LIMIT);
 
     const rangeMode = Boolean(parsedStart || parsedEnd);
 
@@ -301,14 +397,9 @@ export function createItemsExpandedHandler(
       }
 
       if (effectiveStart.getTime() >= effectiveEnd.getTime()) {
-        return errorResponse(400, "start must be before end");
+        return respondWithError(400, "start must be before end");
       }
     }
-
-    let pagesProcessed = 0;
-    let lastPage = 1;
-    let lastWindowStartIso: string | null = null;
-    let lastWindowEndIso: string | null = null;
 
     if (rangeMode) {
       lastWindowStartIso = effectiveStart ? toToastIsoUtc(effectiveStart) : null;
@@ -318,18 +409,7 @@ export function createItemsExpandedHandler(
     const aggregates = new Map<string, OrderAccumulator>();
     const processedKeys = new Set<string>();
     const qualifyingKeys = new Set<string>();
-    let qualifyingCount = 0;
     const itemSortMetadata = new WeakMap<ExpandedOrderItem, ItemSortMetadata>();
-    const diagnostics: DiagnosticsCounters = {
-      dropped_time_parse: 0,
-      dropped_location_status: 0,
-      dropped_voided: 0,
-      dropped_non_lineitem: 0,
-      pages_fetched: 0,
-      orders_seen: 0,
-      qualifying_found: 0,
-      lookback_windows_used: 0,
-    };
 
     const ordersFetchLimit = Math.min(MAX_LIMIT, Math.max(limit, limit * 3));
 
@@ -343,13 +423,15 @@ export function createItemsExpandedHandler(
           effectiveStart,
           effectiveEnd,
           rangeMode,
-        }),
-        fetchMenuFromWorker(deps.fetch, request, refreshParam),
+        }, traces),
+        fetchMenuFromWorker(deps.fetch, request, refreshParam, traces),
       ]);
       diagnostics.lookback_windows_used = ordersData.length > 0 ? 1 : 0;
 
       const { document: menuDoc, cacheStatus: menuCacheStatus, updatedAt: menuUpdatedAt } =
         menuFetchResult;
+      traces.menu.cacheStatus = menuCacheStatus ?? null;
+      traces.menu.updatedAt = menuUpdatedAt ?? null;
       const menuIndex = createMenuIndex(menuDoc);
 
       const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
@@ -718,13 +800,21 @@ export function createItemsExpandedHandler(
         });
       }
 
-      return jsonResponse({
+      const responseBody: Record<string, unknown> = {
         orders: ordersResponse,
         cacheInfo: {
           menu: menuCacheStatus,
           menuUpdatedAt: menuUpdatedAt ?? undefined,
         },
-      });
+      };
+
+      if (enableDiagnostics) {
+        responseBody.debug = buildDebugObject(false);
+      }
+
+      const responseInit = enableDiagnostics ? { headers: buildHeaders() } : undefined;
+
+      return jsonResponse(responseBody, responseInit);
     } catch (err: any) {
       const status = typeof err?.status === "number" ? err.status : 500;
       const code = typeof err?.code === "string" ? err.code : status === 500 ? "INTERNAL_ERROR" : "ERROR";
@@ -745,8 +835,8 @@ export function createItemsExpandedHandler(
         error: err,
       });
 
+      diagnostics.qualifying_found = qualifyingCount;
       if (enableDiagnostics) {
-        diagnostics.qualifying_found = qualifyingCount;
         console.debug("items-expanded diagnostics", {
           ...diagnostics,
           aggregates: aggregates.size,
@@ -755,7 +845,7 @@ export function createItemsExpandedHandler(
         });
       }
 
-      return errorResponse(status, message, code);
+      return respondWithError(status, message, code);
     }
   };
 }
@@ -794,14 +884,29 @@ function toToastIsoUtc(date: Date): string {
   return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
 }
 
-function errorResponse(status: number, message: string, code = "BAD_REQUEST"): Response {
-  return jsonResponse({ error: { message, code } }, { status });
+function errorResponse(
+  status: number,
+  message: string,
+  code = "BAD_REQUEST",
+  options?: { debug?: Record<string, unknown>; headers?: Record<string, string> }
+): Response {
+  const body: Record<string, unknown> = { error: { message, code } };
+  if (options?.debug) {
+    body.debug = options.debug;
+  }
+
+  if (options?.headers) {
+    return jsonResponse(body, { status, headers: options.headers });
+  }
+
+  return jsonResponse(body, { status });
 }
 
 async function fetchOrdersFromWorker(
   fetcher: ItemsExpandedDeps["fetch"],
   request: Request,
-  options: FetchOrdersOptions
+  options: FetchOrdersOptions,
+  traceContainer?: UpstreamTraceContainer
 ): Promise<ToastOrder[]> {
   const url = new URL(ORDERS_ENDPOINT, request.url);
   url.searchParams.set("limit", String(Math.max(1, options.fetchLimit)));
@@ -824,17 +929,59 @@ async function fetchOrdersFromWorker(
     }
   }
 
+  const trace = traceContainer?.orders ?? null;
+  const relativeUrl = `${url.pathname}${url.search}`;
+  if (trace) {
+    trace.url = relativeUrl;
+    trace.status = null;
+    trace.ok = null;
+    trace.bytes = null;
+    trace.snippet = null;
+  }
+
   let response: Response;
   try {
     response = await fetcher(url.toString());
   } catch (err) {
+    if (trace) {
+      trace.status = null;
+      trace.ok = false;
+      trace.bytes = null;
+      const snippet = err instanceof Error ? err.message : String(err ?? "");
+      trace.snippet = snippet ? snippet.slice(0, 512) : null;
+    }
     const error = new UpstreamUnavailableError("Failed to load recent orders");
     (error as any).cause = err;
+    (error as any).upstreamStatus = trace?.status ?? null;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    if (trace?.snippet) {
+      (error as any).bodySnippet = trace.snippet;
+    }
     throw error;
   }
 
+  if (trace) {
+    trace.status = response.status;
+    trace.ok = response.ok;
+    const lengthHeader = response.headers.get("content-length");
+    const parsedLength = lengthHeader ? Number(lengthHeader) : Number.NaN;
+    trace.bytes = Number.isFinite(parsedLength) ? parsedLength : null;
+    trace.snippet = null;
+  }
+
   if (!response.ok) {
-    throw new UpstreamUnavailableError("Failed to load recent orders");
+    const bodyText = await response.text().catch(() => "");
+    const snippet = bodyText.slice(0, 512);
+    const measuredBytes = new TextEncoder().encode(bodyText).length;
+    if (trace) {
+      trace.bytes = trace.bytes ?? measuredBytes;
+      trace.snippet = snippet;
+    }
+    const error = new UpstreamUnavailableError("Failed to load recent orders");
+    (error as any).bodySnippet = snippet;
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    throw error;
   }
 
   let payload: OrdersLatestResponseBody;
@@ -843,11 +990,16 @@ async function fetchOrdersFromWorker(
   } catch (err) {
     const error = new UpstreamUnavailableError("Failed to parse recent orders");
     (error as any).cause = err;
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
     throw error;
   }
 
   if (!payload?.ok || !Array.isArray(payload.data)) {
-    throw new UpstreamUnavailableError("Orders service unavailable");
+    const error = new UpstreamUnavailableError("Orders service unavailable");
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    throw error;
   }
 
   return payload.data;
@@ -856,24 +1008,69 @@ async function fetchOrdersFromWorker(
 async function fetchMenuFromWorker(
   fetcher: ItemsExpandedDeps["fetch"],
   request: Request,
-  refreshParam: string | null
+  refreshParam: string | null,
+  traceContainer?: UpstreamTraceContainer
 ): Promise<MenuFetchResult> {
   const url = new URL(MENUS_ENDPOINT, request.url);
   if (refreshParam) {
     url.searchParams.set("refresh", refreshParam);
   }
 
+  const trace = traceContainer?.menu ?? null;
+  const relativeUrl = `${url.pathname}${url.search}`;
+  if (trace) {
+    trace.url = relativeUrl;
+    trace.status = null;
+    trace.ok = null;
+    trace.bytes = null;
+    trace.snippet = null;
+    trace.cacheStatus = null;
+    trace.updatedAt = null;
+  }
+
   let response: Response;
   try {
     response = await fetcher(url.toString());
   } catch (err) {
+    if (trace) {
+      trace.status = null;
+      trace.ok = false;
+      trace.bytes = null;
+      const snippet = err instanceof Error ? err.message : String(err ?? "");
+      trace.snippet = snippet ? snippet.slice(0, 512) : null;
+    }
     const error = new UpstreamUnavailableError("Failed to load menu document");
     (error as any).cause = err;
+    (error as any).upstreamStatus = trace?.status ?? null;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    if (trace?.snippet) {
+      (error as any).bodySnippet = trace.snippet;
+    }
     throw error;
   }
 
+  if (trace) {
+    trace.status = response.status;
+    trace.ok = response.ok;
+    const lengthHeader = response.headers.get("content-length");
+    const parsedLength = lengthHeader ? Number(lengthHeader) : Number.NaN;
+    trace.bytes = Number.isFinite(parsedLength) ? parsedLength : null;
+    trace.snippet = null;
+  }
+
   if (!response.ok) {
-    throw new UpstreamUnavailableError("Failed to load menu document");
+    const bodyText = await response.text().catch(() => "");
+    const snippet = bodyText.slice(0, 512);
+    const measuredBytes = new TextEncoder().encode(bodyText).length;
+    if (trace) {
+      trace.bytes = trace.bytes ?? measuredBytes;
+      trace.snippet = snippet;
+    }
+    const error = new UpstreamUnavailableError("Failed to load menu document");
+    (error as any).bodySnippet = snippet;
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    throw error;
   }
 
   let payload: MenusResponseBody;
@@ -882,11 +1079,16 @@ async function fetchMenuFromWorker(
   } catch (err) {
     const error = new UpstreamUnavailableError("Failed to parse menu document");
     (error as any).cause = err;
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
     throw error;
   }
 
   if (!payload?.ok) {
-    throw new UpstreamUnavailableError("Menu service unavailable");
+    const error = new UpstreamUnavailableError("Menu service unavailable");
+    (error as any).upstreamStatus = response.status;
+    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    throw error;
   }
 
   const updatedAt =
