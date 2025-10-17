@@ -1,10 +1,8 @@
 import type { AppEnv } from "../../../config/env.js";
 import { getOrdersBulk } from "../../../clients/toast.js";
 import { jsonResponse } from "../../../lib/http.js";
-import {
-  collectLatestOrders,
-  normalizeToastTimestamp,
-} from "../../../lib/collectLatestOrders.js";
+import { collectLatestOrders } from "../../../lib/collectLatestOrders.js";
+import { normalizeToastTimestamp } from "../../../lib/order-utils.js";
 
 const EXPAND_FULL = [
   "checks",
@@ -21,7 +19,7 @@ export interface OrdersLatestDeps {
 }
 
 const LIMIT_MIN = 1;
-const LIMIT_MAX = 500;
+const LIMIT_MAX = 200;
 
 export function createOrdersLatestHandler(
   deps: OrdersLatestDeps = { getOrdersBulk }
@@ -32,10 +30,14 @@ export function createOrdersLatestHandler(
     const limitRaw = parseNumber(url.searchParams.get("limit"), 20);
     const limit = clamp(limitRaw ?? 20, LIMIT_MIN, LIMIT_MAX);
 
+    const detailParam = url.searchParams.get("detail");
+    const detail = detailParam === "ids" ? "ids" : "full";
+
     const minutesValue = parseNumber(url.searchParams.get("minutes"), null);
 
     const startParam = url.searchParams.get("start");
     const endParam = url.searchParams.get("end");
+    const sinceParam = url.searchParams.get("since");
 
     const locationId = url.searchParams.get("locationId");
     const status = url.searchParams.get("status");
@@ -48,7 +50,7 @@ export function createOrdersLatestHandler(
     try {
       const now = new Date();
 
-      const { start, end, allowWidening, minutesUsed } = resolveWindow({
+      const { windowOverride, minutesUsed } = resolveWindow({
         startParam,
         endParam,
         minutesValue,
@@ -59,26 +61,30 @@ export function createOrdersLatestHandler(
         env,
         deps,
         limit,
+        detail,
         locationId,
         status,
-        start,
-        end,
-        allowWidening,
+        since: parseIsoToDate(sinceParam),
+        windowOverride,
         debug: includeDebug,
       });
 
       const responseBody: any = {
         ok: true,
         route: "/api/orders/latest",
+        limit,
+        detail,
         minutes: minutesUsed ?? result.minutes,
         window: result.window,
-        detail: "full",
         expandUsed: EXPAND_FULL,
-        count: result.orders.length,
+        count: result.orderIds.length,
         ids: result.orderIds,
         orders: result.orderIds,
-        data: result.orders,
       };
+
+      if (detail === "full") {
+        responseBody.data = result.orders;
+      }
 
       if (includeDebug && result.debug) {
         responseBody.debug = result.debug;
@@ -118,9 +124,7 @@ function resolveWindow({
   minutesValue: number | null;
   now: Date;
 }): {
-  start: Date;
-  end: Date;
-  allowWidening: boolean;
+  windowOverride: { start: Date; end: Date } | null;
   minutesUsed: number | null;
 } {
   const parsedStart = parseIsoToDate(startParam);
@@ -128,9 +132,7 @@ function resolveWindow({
 
   if (parsedStart && parsedEnd && parsedStart.getTime() < parsedEnd.getTime()) {
     return {
-      start: parsedStart,
-      end: parsedEnd,
-      allowWidening: false,
+      windowOverride: { start: parsedStart, end: parsedEnd },
       minutesUsed: Math.round((parsedEnd.getTime() - parsedStart.getTime()) / 60_000),
     };
   }
@@ -138,19 +140,17 @@ function resolveWindow({
   const minutes = minutesValue ?? null;
   if (minutes !== null && minutes > 0) {
     return {
-      start: new Date(now.getTime() - minutes * 60_000),
-      end: new Date(now.getTime()),
-      allowWidening: true,
+      windowOverride: {
+        start: new Date(now.getTime() - minutes * 60_000),
+        end: new Date(now.getTime()),
+      },
       minutesUsed: minutes,
     };
   }
 
-  const fallbackMinutes = 60;
   return {
-    start: new Date(now.getTime() - fallbackMinutes * 60_000),
-    end: new Date(now.getTime()),
-    allowWidening: true,
-    minutesUsed: fallbackMinutes,
+    windowOverride: null,
+    minutesUsed: null,
   };
 }
 

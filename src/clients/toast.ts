@@ -7,6 +7,7 @@ export interface GetOrdersBulkParams {
   endIso: string;
   page: number;
   pageSize?: number;
+  expansions?: string[];
 }
 
 export interface OrdersBulkResult {
@@ -39,6 +40,14 @@ export async function getOrdersBulk(env: AppEnv, params: GetOrdersBulkParams): P
   url.searchParams.set("endDate", params.endIso);
   url.searchParams.set("page", String(params.page));
   url.searchParams.set("pageSize", String(params.pageSize ?? 100));
+
+  if (Array.isArray(params.expansions)) {
+    for (const expansion of params.expansions) {
+      if (typeof expansion === "string" && expansion.trim()) {
+        url.searchParams.append("expand", expansion.trim());
+      }
+    }
+  }
 
   const headers = await getToastHeaders(env);
   const response = await fetchWithBackoff(url.toString(), { method: "GET", headers });

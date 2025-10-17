@@ -7,20 +7,27 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | ------ | ---- | ----------- | ------- |
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
-| `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and adaptive lookback. Supports `limit`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
+| `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
 
 ### `/api/orders/latest`
 The handler supports flexible time-range and filter parameters:
 
-- `limit` (default 20, maximum 500) controls how many of the latest orders are returned.
-- Provide `start` and `end` ISO timestamps to use an explicit window with no widening.
-- Provide `minutes` to search `[now - minutes, now]` with automatic widening when there are not enough orders.
+- `limit` (default 20, maximum 200) controls how many of the latest orders are returned.
+- `detail` toggles payload verbosity: `detail=full` (default) returns hydrated order payloads, while `detail=ids` only returns GUIDs.
+- `since` accepts an ISO8601 timestamp to override the KV cursor for debugging.
+- Provide `start`/`end` or `minutes` to force a manual window instead of the incremental cursor.
 - Optional `status` and `locationId` filters match Toast order status and location GUIDs (case-insensitive).
 
-It returns the familiar payload shape `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`. When both `DEBUG` is truthy in the environment and `?debug=1` is passed, a concise debug summary is included to surface paging and filtering diagnostics.
+The response shape remains `{ ok, route, limit, detail, minutes, window, expandUsed, count, ids, orders, data?, debug? }`. When both `DEBUG` is truthy in the environment and `?debug=1` is passed, a concise debug summary is included to surface paging and filtering diagnostics.
 
-When no start/end is given, the endpoint searches the most recent hour and widens in 60-minute steps (up to 7 days) until it finds `limit` orders or reaches the cap. Results are deduped by order GUID and sorted by order time (descending) then order GUID (ascending) for deterministic output.
+When no manual window override is supplied, the worker reads the latest fulfilled cursor from KV, fetches Toast orders strictly after that timestamp, merges them into cache, and returns the most recent orders from the cached indices. Results are deduped by order GUID and sorted by opened date (descending) then order GUID (ascending) for deterministic output.
+
+### Incremental Toast Order Caching
+
+`/api/orders/latest` now persists lightweight order snapshots in the `CACHE_KV` binding so each poll only asks Toast for new or updated records. Every order is stored at `orders:byId:<guid>`, daily descending indices live at `orders:index:YYYYMMDD`, and a rolling multi-day list is maintained at `orders:recentIndex`. After each sync the worker advances `orders:lastFulfilledCursor` to the most recent order that normalized to a ready/fulfilled state (`READY_FOR_PICKUP`, `DELIVERED`, `COMPLETED`, etc.), so subsequent requests query Toast starting strictly after that timestamp.
+
+Indices are rewritten on every update to keep GUID ordering stable, and the response is assembled entirely from KV so the UI sees consistent ordering even when Toast returns duplicate pages. To completely clear the cache, delete the `orders:*` keys from the `CACHE_KV` namespace; the next `/api/orders/latest` call will backfill state from Toast within the default 24-hour lookback.
 
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
