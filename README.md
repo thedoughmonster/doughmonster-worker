@@ -7,11 +7,20 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | ------ | ---- | ----------- | ------- |
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
-| `GET` | `/api/orders/latest` | Returns the most recent Toast orders (default 60 minute window, max 120). Accepts `?minutes=` and optional `?debug=1` for diagnostics. | `curl -s "https://<worker>/api/orders/latest?minutes=30" \| jq` |
+| `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and adaptive lookback. Supports `limit`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
 
 ### `/api/orders/latest`
-The handler accepts an optional `?minutes=` query parameter that clamps between 1 and 120 minutes (default 60) and fetches all pages from `orders/v2/ordersBulk` until no more data is available. It returns the familiar payload shape `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`. When `?debug=1` is present an additional `debug.pages` array is included that details each paginated request.
+The handler supports flexible time-range and filter parameters:
+
+- `limit` (default 20, maximum 500) controls how many of the latest orders are returned.
+- Provide `start` and `end` ISO timestamps to use an explicit window with no widening.
+- Provide `minutes` to search `[now - minutes, now]` with automatic widening when there are not enough orders.
+- Optional `status` and `locationId` filters match Toast order status and location GUIDs (case-insensitive).
+
+It returns the familiar payload shape `{ ok, route, minutes, window, detail, expandUsed, count, ids, orders, data, debug? }`. When both `DEBUG` is truthy in the environment and `?debug=1` is passed, a concise debug summary is included to surface paging and filtering diagnostics.
+
+When no start/end is given, the endpoint searches the most recent hour and widens in 60-minute steps (up to 7 days) until it finds `limit` orders or reaches the cap. Results are deduped by order GUID and sorted by order time (descending) then order GUID (ascending) for deterministic output.
 
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
