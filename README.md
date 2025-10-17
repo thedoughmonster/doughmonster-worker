@@ -29,6 +29,16 @@ When no manual window override is supplied, the worker reads the latest fulfille
 
 Indices are rewritten on every update to keep GUID ordering stable, and the response is assembled entirely from KV so the UI sees consistent ordering even when Toast returns duplicate pages. To completely clear the cache, delete the `orders:*` keys from the `CACHE_KV` namespace; the next `/api/orders/latest` call will backfill state from Toast within the default 24-hour lookback.
 
+#### Caching telemetry (debug mode)
+
+When the worker runs with `DEBUG` set and you append `?debug=1` (or `?debug=true`) to `/api/orders/latest`, the response includes a `debug` block plus additional telemetry-only fields:
+
+- A parallel `sources` array indicates whether each order in the payload came from the existing KV copy (`cache`), a brand new Toast fetch (`api`), or a refreshed merge of KV and Toast data (`merged`). When `detail=full`, the corresponding `data` entries also include a `_meta` object with the source classification and the KV key that was read.
+- The `debug` object now summarizes KV usage (`debug.kv.reads`, `writes`, `indexLoads`, `indexWrites`, and byte estimates), cache effectiveness (`debug.cache.hits`, `.misses`, `.updated`), Toast fetch activity (`debug.api.requests` plus per-page stats), cursor state before/after the run, request parameters echoed back, and request timings (`toastFetchMs`, `kvMs`, `totalMs`).
+- Response headers mirror the highlights for quick inspection: `X-Orders-Cache-Hits`, `X-Orders-Cache-Misses`, `X-Orders-Cache-Updated`, `X-Orders-API-Requests`, and `X-Orders-TotalMs`.
+
+Production consumers should continue calling the endpoint without `debug`; the telemetry fields are optional and only materialize when explicitly requested so the normal payload and caching behavior remain unchanged.
+
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
 
