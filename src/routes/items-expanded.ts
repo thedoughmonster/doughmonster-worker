@@ -7,6 +7,7 @@ import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orde
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 500;
 const PAGE_SIZE = 100;
+const MAX_PAGES = 200;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export interface ItemsExpandedDeps {
@@ -212,8 +213,15 @@ export function createItemsExpandedHandler(
       return errorResponse(400, "Invalid start parameter");
     }
 
-    const effectiveEnd = parsedEnd ?? (parsedStart ? now : null) ?? now;
-    const effectiveStart = parsedStart ?? new Date(effectiveEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+    const useFallbackWindow = !parsedStart && !parsedEnd;
+    const fallbackEnd = useFallbackWindow ? now : null;
+    const fallbackStart = useFallbackWindow
+      ? new Date(now.getTime() - DEFAULT_FALLBACK_RANGE_MS)
+      : null;
+
+    const effectiveEnd = parsedEnd ?? (parsedStart ? now : fallbackEnd ?? now);
+    const effectiveStart =
+      parsedStart ?? fallbackStart ?? new Date(effectiveEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
 
     if (parsedStart && parsedStart.getTime() >= effectiveEnd.getTime()) {
       return errorResponse(400, "start must be before end");
@@ -234,8 +242,14 @@ export function createItemsExpandedHandler(
 
       const aggregates = new Map<string, OrderAccumulator>();
       let page = 1;
+      let pagesFetched = 0;
 
       while (true) {
+        pagesFetched += 1;
+        if (pagesFetched > MAX_PAGES) {
+          break;
+        }
+
         const { orders, nextPage } = await deps.getOrdersBulk(env, {
           startIso,
           endIso,
@@ -246,6 +260,8 @@ export function createItemsExpandedHandler(
         if (!Array.isArray(orders) || orders.length === 0) {
           break;
         }
+
+        let newKeysThisPage = 0;
 
         for (const order of orders) {
           if (!order || typeof order.guid !== "string") {
@@ -288,6 +304,7 @@ export function createItemsExpandedHandler(
             const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
             const webhookFulfillmentStatus = extractGuestOrderFulfillmentStatus(order, check);
             const key = `${order.guid}:${check.guid}`;
+            const previousSize = aggregates.size;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
               orderNumber,
@@ -313,6 +330,10 @@ export function createItemsExpandedHandler(
               takeoutEstimatedFulfillmentDate:
                 behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
             });
+
+            if (aggregates.size > previousSize) {
+              newKeysThisPage += 1;
+            }
 
             updateAccumulatorMeta(accumulator, {
               orderNumber,
@@ -472,23 +493,21 @@ export function createItemsExpandedHandler(
           }
         }
 
-        const qualifyingCount = countQualifyingOrders(aggregates);
-        if (qualifyingCount >= limit) {
+        if (aggregates.size >= limit || countQualifyingOrders(aggregates) >= limit) {
           break;
         }
 
-        const hasMore =
-          (typeof nextPage === "number" && nextPage > page) || orders.length === PAGE_SIZE;
+        if (newKeysThisPage === 0) {
+          break;
+        }
+
+        const hasMore = typeof nextPage === "number" && nextPage > page;
 
         if (!hasMore) {
           break;
         }
 
-        const next = typeof nextPage === "number" && nextPage > page ? nextPage : page + 1;
-        if (next === page) {
-          break;
-        }
-        page = next;
+        page = nextPage;
       }
 
       const ordered = Array.from(aggregates.values())
