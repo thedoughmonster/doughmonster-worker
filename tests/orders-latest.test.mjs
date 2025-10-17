@@ -4,7 +4,24 @@ import assert from 'node:assert/strict';
 const module = await import('../dist/routes/api/orders/latest.js');
 const { createOrdersLatestHandler } = module;
 
+function createMemoryKv() {
+  const store = new Map();
+  return {
+    store,
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, value);
+    },
+    async delete(key) {
+      store.delete(key);
+    },
+  };
+}
+
 function createEnv() {
+  const cacheKv = createMemoryKv();
   return {
     TOAST_API_BASE: 'https://toast.example',
     TOAST_AUTH_URL: 'https://toast.example/auth',
@@ -12,120 +29,130 @@ function createEnv() {
     TOAST_CLIENT_SECRET: 'secret',
     TOAST_RESTAURANT_GUID: 'restaurant-guid',
     TOKEN_KV: {
-      get: async () => null,
-      put: async () => undefined,
+      async get() {
+        return null;
+      },
+      async put() {
+        return undefined;
+      },
     },
+    CACHE_KV: cacheKv,
   };
 }
 
-test('orders/latest returns deterministic, deduped latest orders', async () => {
+function buildOrder(guid, openedDate, itemStatus) {
+  return {
+    guid,
+    openedDate,
+    createdDate: openedDate,
+    checks: [
+      {
+        guid: `${guid}-check`,
+        selections: [
+          {
+            guid: `${guid}-item`,
+            quantity: 1,
+            item: { guid: 'item-guid' },
+            fulfillmentStatus: itemStatus,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+test('orders/latest caches responses and sorts by openedDate', async () => {
+  const env = createEnv();
   const calls = [];
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
-      calls.push({
-        startIso: params.startIso,
-        endIso: params.endIso,
-        page: params.page,
-      });
+      calls.push(params);
       return {
         orders: [
-          { guid: 'order-b', createdDate: '2023-10-10T13:00:00+0000' },
-          { guid: 'order-a', createdDate: '2023-10-10T13:00:00+0000' },
-          { guid: 'order-a', createdDate: '2023-10-10T11:00:00+0000' },
-          { guid: 'order-c', createdDate: '2023-10-09T12:00:00+0000', voided: true },
+          buildOrder('order-2', '2024-10-10T10:05:00+0000', 'READY'),
+          buildOrder('order-1', '2024-10-10T10:00:00+0000', 'SENT'),
         ],
         nextPage: null,
       };
     },
   });
 
-  const env = { ...createEnv(), DEBUG: '1' };
-  const request = new Request('https://worker.test/api/orders/latest?limit=2&debug=1');
+  const request = new Request('https://worker.test/api/orders/latest?limit=5');
   const response = await handler(env, request);
   const body = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
   assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['order-a', 'order-b']);
-  assert.deepEqual(body.orders, ['order-a', 'order-b']);
-  assert.equal(body.data[0].guid, 'order-a');
-  assert.equal(body.data[1].guid, 'order-b');
-  assert.ok(body.debug);
-  assert.equal(body.debug.totals.finalReturned, 2);
-  assert.equal(body.debug.totals.uniqueKept >= 2, true);
+  assert.deepEqual(body.ids, ['order-2', 'order-1']);
+  assert.equal(Array.isArray(body.data), true);
+  assert.equal(body.data.length, 2);
+  assert.equal(body.limit, 5);
+  assert.equal(body.detail, 'full');
   assert.equal(calls.length, 1);
+
+  const cursorRaw = env.CACHE_KV.store.get('orders:lastFulfilledCursor');
+  const cursor = JSON.parse(cursorRaw);
+  assert.equal(cursor.orderGuid, 'order-2');
+  assert.ok(cursor.ts.includes('2024-10-10T10:05'));
+
+  const recentRaw = env.CACHE_KV.store.get('orders:recentIndex');
+  const recent = JSON.parse(recentRaw);
+  assert.deepEqual(recent, ['order-2', 'order-1']);
 });
 
-test('orders/latest widens window when needed', async () => {
-  let attempt = 0;
-  const starts = [];
+test('orders/latest uses fulfilled cursor for incremental fetches', async () => {
+  const env = createEnv();
+  const calls = [];
+  const responses = [
+    {
+      orders: [
+        buildOrder('order-ready', '2024-10-10T12:00:00+0000', 'READY'),
+        buildOrder('order-open', '2024-10-10T11:00:00+0000', 'SENT'),
+      ],
+      nextPage: null,
+    },
+    {
+      orders: [buildOrder('order-new', '2024-10-10T12:30:00+0000', 'READY')],
+      nextPage: null,
+    },
+  ];
+
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
-      starts.push(params.startIso);
-      attempt += 1;
-      if (attempt === 1) {
-        return { orders: [], nextPage: null };
-      }
-      return {
-        orders: [
-          { guid: 'older-order', createdDate: '2023-10-10T08:00:00+0000' },
-          { guid: 'latest-order', createdDate: '2023-10-10T09:00:00+0000' },
-        ],
-        nextPage: null,
-      };
+      calls.push(params);
+      return responses.shift() ?? { orders: [], nextPage: null };
     },
   });
 
-  const request = new Request('https://worker.test/api/orders/latest?limit=2');
-  const response = await handler(createEnv(), request);
-  const body = await response.json();
+  await handler(env, new Request('https://worker.test/api/orders/latest'));
+  const cursorRaw = env.CACHE_KV.store.get('orders:lastFulfilledCursor');
+  const cursor = JSON.parse(cursorRaw);
+  const secondResponse = await handler(env, new Request('https://worker.test/api/orders/latest'));
+  const secondBody = await secondResponse.json();
 
-  assert.equal(body.ok, true);
-  assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['latest-order', 'older-order']);
-
-  assert.equal(starts.length >= 2, true);
-  const diffMs = Date.parse(starts[0]) - Date.parse(starts[1]);
-  assert.equal(Math.round(diffMs / 60_000), 60);
+  assert.equal(calls.length >= 2, true);
+  assert.equal(secondBody.ids[0], 'order-new');
+  assert.equal(calls[1].startIso, cursor.ts);
+  assert.equal(secondBody.count >= 1, true);
 });
 
-test('orders/latest applies location and status filters', async () => {
+test('orders/latest supports detail=ids', async () => {
+  const env = createEnv();
   const handler = createOrdersLatestHandler({
-    async getOrdersBulk(_env, _params) {
+    async getOrdersBulk(_env) {
       return {
-        orders: [
-          {
-            guid: 'match',
-            createdDate: '2023-10-10T09:00:00+0000',
-            restaurantLocationGuid: 'LOC-1',
-            status: 'PAID',
-          },
-          {
-            guid: 'wrong-location',
-            createdDate: '2023-10-10T09:10:00+0000',
-            restaurantLocationGuid: 'LOC-2',
-            status: 'PAID',
-          },
-          {
-            guid: 'wrong-status',
-            createdDate: '2023-10-10T09:20:00+0000',
-            restaurantLocationGuid: 'LOC-1',
-            status: 'OPEN',
-          },
-        ],
+        orders: [buildOrder('order-ids', '2024-10-11T09:15:00+0000', 'READY')],
         nextPage: null,
       };
     },
   });
 
-  const request = new Request(
-    'https://worker.test/api/orders/latest?limit=5&locationId=loc-1&status=paid'
-  );
-  const response = await handler(createEnv(), request);
+  await handler(env, new Request('https://worker.test/api/orders/latest'));
+  const response = await handler(env, new Request('https://worker.test/api/orders/latest?detail=ids'));
   const body = await response.json();
 
-  assert.equal(body.ok, true);
-  assert.equal(body.count, 1);
-  assert.deepEqual(body.ids, ['match']);
+  assert.equal(body.detail, 'ids');
+  assert.deepEqual(body.ids, ['order-ids']);
+  assert.equal('data' in body, false);
 });

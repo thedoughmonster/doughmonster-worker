@@ -5,6 +5,7 @@ export interface AppEnv {
   TOAST_CLIENT_SECRET: string;
   TOAST_RESTAURANT_GUID: string;
   TOKEN_KV: KVNamespace;
+  CACHE_KV: KVNamespace;
 }
 
 const REQUIRED_STRING_KEYS: Array<keyof AppEnv> = [
@@ -27,6 +28,11 @@ export function getEnv(rawEnv: Record<string, unknown>): AppEnv {
     throw new Error("TOKEN_KV binding missing or invalid");
   }
 
+  const cacheKv = rawEnv.CACHE_KV;
+  if (!isKvNamespace(cacheKv)) {
+    throw new Error("CACHE_KV binding missing or invalid");
+  }
+
   return {
     TOAST_API_BASE: String(rawEnv.TOAST_API_BASE),
     TOAST_AUTH_URL: String(rawEnv.TOAST_AUTH_URL),
@@ -34,6 +40,7 @@ export function getEnv(rawEnv: Record<string, unknown>): AppEnv {
     TOAST_CLIENT_SECRET: String(rawEnv.TOAST_CLIENT_SECRET),
     TOAST_RESTAURANT_GUID: String(rawEnv.TOAST_RESTAURANT_GUID),
     TOKEN_KV: tokenKv,
+    CACHE_KV: cacheKv,
   };
 }
 
