@@ -1,6 +1,47 @@
 import type { AppEnv } from "../config/env.js";
 import { getToastHeaders } from "../lib/auth.js";
 import { fetchWithBackoff } from "../lib/http.js";
+import type { ToastMenusDocument } from "../types/toast-menus.js";
+
+const MENU_CACHE_KEY = "menu:published:v1";
+const MENU_CACHE_META_KEY = "menu:published:meta:v1";
+const MENU_STALE_AFTER_MS = 30 * 60 * 1000;
+const MENU_EXPIRE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+type MenuCacheStatus =
+  | "hit-fresh"
+  | "hit-stale-revalidate"
+  | "miss-network"
+  | "manual-refresh"
+  | "hit-stale-error";
+
+interface MenuCacheMeta {
+  updatedAt: string;
+  staleAt: string;
+  expireAt: string;
+  etag?: string;
+}
+
+interface MenuCacheInfo {
+  status: MenuCacheStatus;
+  updatedAt?: string;
+}
+
+const requestMenuCacheInfo = new WeakMap<Request, MenuCacheInfo>();
+
+export function getMenuCacheInfo(request?: Request): MenuCacheInfo | undefined {
+  if (!request) {
+    return undefined;
+  }
+  return requestMenuCacheInfo.get(request);
+}
+
+function setMenuCacheInfoForRequest(request: Request | undefined, info: MenuCacheInfo): void {
+  if (!request) {
+    return;
+  }
+  requestMenuCacheInfo.set(request, info);
+}
 
 export interface GetOrdersBulkParams {
   startIso: string;
@@ -25,7 +66,7 @@ export interface MenuMetadataResponse {
   lastUpdated: string;
 }
 
-export type PublishedMenuResponse = any;
+export type PublishedMenuResponse = ToastMenusDocument;
 
 export interface DiningOptionConfig {
   guid: string;
@@ -109,18 +150,85 @@ export async function getMenuMetadata(env: AppEnv): Promise<MenuMetadataResponse
 }
 
 export async function getPublishedMenus(env: AppEnv): Promise<PublishedMenuResponse | null> {
-  const base = env.TOAST_API_BASE.replace(/\/+$/, "");
-  const url = `${base}/menus/v2/menus`;
-  const headers = await getToastHeaders(env);
+  const result = await fetchPublishedMenusFromToast(env);
+  return result.document;
+}
+
+export async function getPublishedMenusCached(
+  env: AppEnv,
+  request?: Request
+): Promise<ToastMenusDocument | null> {
+  const forceRefresh = shouldForceRefresh(request);
+  const cache = await readMenuCache(env);
+  const { meta } = cache;
+
+  const updatedAtMs = typeof meta?.updatedAt === "string" ? Date.parse(meta.updatedAt) : Number.NaN;
+  const hasValidMeta = Boolean(meta?.updatedAt) && !Number.isNaN(updatedAtMs);
+  const staleAtMs = hasValidMeta
+    ? coerceTime(meta?.staleAt, updatedAtMs + MENU_STALE_AFTER_MS)
+    : Number.NaN;
+  const expireAtMs = hasValidMeta
+    ? coerceTime(meta?.expireAt, updatedAtMs + MENU_EXPIRE_AFTER_MS)
+    : Number.NaN;
+
+  if (forceRefresh) {
+    try {
+      const { document, meta: freshMeta } = await fetchAndCacheMenu(env);
+      setMenuCacheInfoForRequest(request, {
+        status: "manual-refresh",
+        updatedAt: freshMeta.updatedAt,
+      });
+      return document;
+    } catch (err) {
+      if (cache.hasDocument && hasValidMeta) {
+        console.error("manual menu refresh failed, serving cached copy", { err });
+        setMenuCacheInfoForRequest(request, {
+          status: "hit-stale-error",
+          updatedAt: meta?.updatedAt,
+        });
+        return cache.document;
+      }
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  if (cache.hasDocument && hasValidMeta) {
+    const nowMs = Date.now();
+    if (nowMs <= staleAtMs) {
+      setMenuCacheInfoForRequest(request, {
+        status: "hit-fresh",
+        updatedAt: meta?.updatedAt,
+      });
+      return cache.document;
+    }
+
+    if (nowMs <= expireAtMs) {
+      setMenuCacheInfoForRequest(request, {
+        status: "hit-stale-revalidate",
+        updatedAt: meta?.updatedAt,
+      });
+      scheduleMenuRefresh(env);
+      return cache.document;
+    }
+  }
 
   try {
-    const response = await fetchWithBackoff(url, { method: "GET", headers });
-    const text = await response.text();
-    return text ? JSON.parse(text) : null;
+    const { document, meta: freshMeta } = await fetchAndCacheMenu(env);
+    setMenuCacheInfoForRequest(request, {
+      status: "miss-network",
+      updatedAt: freshMeta.updatedAt,
+    });
+    return document;
   } catch (err) {
-    if (isToastNotFound(err)) {
-      return null;
+    if (cache.hasDocument && hasValidMeta) {
+      console.error("menu fetch failed, serving cached copy", { err });
+      setMenuCacheInfoForRequest(request, {
+        status: "hit-stale-error",
+        updatedAt: meta?.updatedAt,
+      });
+      return cache.document;
     }
+
     throw err instanceof Error ? err : new Error(String(err));
   }
 }
@@ -152,6 +260,14 @@ export async function getDiningOptions(env: AppEnv): Promise<DiningOptionConfig[
   }
 }
 
+export async function refreshMenu(env: AppEnv): Promise<void> {
+  try {
+    await fetchAndCacheMenu(env);
+  } catch (err) {
+    console.error("failed to refresh published menu", { err });
+  }
+}
+
 function headersToObject(headers: Headers): Record<string, string> {
   const out: Record<string, string> = {};
   headers.forEach((value, key) => {
@@ -166,4 +282,152 @@ function isToastNotFound(err: unknown): boolean {
     return typeof status === "number" && status === 404;
   }
   return false;
+}
+
+interface MenuCacheReadResult {
+  document: ToastMenusDocument | null;
+  meta: MenuCacheMeta | null;
+  hasDocument: boolean;
+}
+
+async function fetchAndCacheMenu(env: AppEnv): Promise<{
+  document: ToastMenusDocument | null;
+  meta: MenuCacheMeta;
+}> {
+  const { document, etag } = await fetchPublishedMenusFromToast(env);
+  const meta = await writeMenuCache(env, document, etag ?? undefined);
+  return { document, meta };
+}
+
+async function readMenuCache(env: AppEnv): Promise<MenuCacheReadResult> {
+  const [rawDocument, rawMeta] = await Promise.all([
+    env.CACHE_KV.get(MENU_CACHE_KEY),
+    env.CACHE_KV.get(MENU_CACHE_META_KEY),
+  ]);
+
+  let hasDocument = false;
+  let document: ToastMenusDocument | null = null;
+
+  if (rawDocument !== null) {
+    try {
+      document = rawDocument ? (JSON.parse(rawDocument) as ToastMenusDocument) : null;
+      hasDocument = true;
+    } catch (err) {
+      console.warn("invalid cached menu document, ignoring", { err });
+      document = null;
+      hasDocument = false;
+    }
+  }
+
+  const meta = parseMenuCacheMeta(rawMeta);
+
+  return { document, meta, hasDocument };
+}
+
+async function writeMenuCache(
+  env: AppEnv,
+  document: ToastMenusDocument | null,
+  etag?: string
+): Promise<MenuCacheMeta> {
+  const now = Date.now();
+  const meta: MenuCacheMeta = {
+    updatedAt: new Date(now).toISOString(),
+    staleAt: new Date(now + MENU_STALE_AFTER_MS).toISOString(),
+    expireAt: new Date(now + MENU_EXPIRE_AFTER_MS).toISOString(),
+  };
+
+  if (etag) {
+    meta.etag = etag;
+  }
+
+  const payload = JSON.stringify(document ?? null);
+  await Promise.all([
+    env.CACHE_KV.put(MENU_CACHE_KEY, payload),
+    env.CACHE_KV.put(MENU_CACHE_META_KEY, JSON.stringify(meta)),
+  ]);
+
+  return meta;
+}
+
+function scheduleMenuRefresh(env: AppEnv): void {
+  const promise = refreshMenu(env);
+  if (typeof env.waitUntil === "function") {
+    env.waitUntil(promise);
+  }
+}
+
+function shouldForceRefresh(request?: Request): boolean {
+  if (!request) {
+    return false;
+  }
+
+  try {
+    const url = new URL(request.url);
+    return url.searchParams.get("refresh") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function coerceTime(value: string | undefined, fallbackMs: number): number {
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return fallbackMs;
+}
+
+function parseMenuCacheMeta(value: string | null): MenuCacheMeta | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.updatedAt === "string" &&
+      typeof parsed.staleAt === "string" &&
+      typeof parsed.expireAt === "string"
+    ) {
+      const meta: MenuCacheMeta = {
+        updatedAt: parsed.updatedAt,
+        staleAt: parsed.staleAt,
+        expireAt: parsed.expireAt,
+      };
+      if (typeof parsed.etag === "string" && parsed.etag) {
+        meta.etag = parsed.etag;
+      }
+      return meta;
+    }
+  } catch (err) {
+    console.warn("invalid cached menu metadata, ignoring", { err });
+  }
+
+  return null;
+}
+
+async function fetchPublishedMenusFromToast(
+  env: AppEnv
+): Promise<{ document: ToastMenusDocument | null; etag?: string | null }> {
+  const base = env.TOAST_API_BASE.replace(/\/+$/, "");
+  const url = `${base}/menus/v2/menus`;
+  const headers = await getToastHeaders(env);
+
+  try {
+    const response = await fetchWithBackoff(url, { method: "GET", headers });
+    const etag = response.headers.get("etag");
+    const text = await response.text();
+    const document = text ? (JSON.parse(text) as ToastMenusDocument) : null;
+    return { document, etag };
+  } catch (err) {
+    if (isToastNotFound(err)) {
+      return { document: null, etag: null };
+    }
+
+    throw err instanceof Error ? err : new Error(String(err));
+  }
 }

@@ -48,7 +48,9 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
 - Accepts optional ISO-8601 `start`/`end` query parameters; when omitted the endpoint falls back to the adaptive window strategy described above and returns whatever it collected before the limit, safety caps, or time budget kicked in.
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
-- Loads the published menu document once per request to hydrate item and modifier names.
+- Loads the published menu document once per request to hydrate item and modifier names. The response now includes a `cacheInfo` block that reports how the menu was resolved:
+  - `cacheInfo.menu` is one of `hit-fresh`, `hit-stale-revalidate`, `miss-network`, `manual-refresh`, or `hit-stale-error`.
+  - `cacheInfo.menuUpdatedAt` surfaces the ISO timestamp stored alongside the cached document (undefined until the first successful fetch populates KV).
 
 #### Filters
 
@@ -70,11 +72,17 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 
 - `metadata` mirrors Toast's `menus/v2/metadata` payload so clients can track last update timestamps.
 - `menu` matches the Toast `menus/v2/menus` response or `null` when Toast has no published menu data.
-- `cacheHit` reports whether the worker served the data from its in-memory cache (see below).
+- `cacheHit` reports whether the worker served the data from its lightweight in-memory metadata cache (the full menu document is cached in KV, described below).
 
 #### Menu caching strategy
 
-The worker keeps the most recent published menu in memory and reuses it until Toast reports a different `lastUpdated` value. This minimizes Toast API traffic while still returning fresh data as soon as Toast publishes a new menu. The cache is per-worker instance and resets when the worker is cold-started or redeployed.
+The published menu is cached in the shared `CACHE_KV` namespace:
+
+- The full document lives at `menu:published:v1`; metadata (`updatedAt`, `staleAt`, `expireAt`, optional `etag`) is stored at `menu:published:meta:v1`.
+- Reads are considered fresh for 30 minutes. Between 30 minutes and 24 hours the worker serves the cached document immediately and schedules a background refresh via `waitUntil`.
+- After 24 hours the worker blocks on Toast before replying and overwrites both KV entries with the new payload and timestamps.
+- Appending `?refresh=1` to a request that loads the menu (for example `/api/items-expanded?refresh=1`) forces a synchronous revalidate and updates the KV entries regardless of age.
+- Responses that rely on the cached menu surface `cacheInfo.menuUpdatedAt` so you can see when the document was last refreshed.
 
 ## Operations UI
 
@@ -106,6 +114,7 @@ The experience mirrors the needs of an expediter station and runs entirely in th
 | `TOAST_CLIENT_SECRET` | secret | Machine client secret for Toast auth. |
 | `TOAST_RESTAURANT_GUID` | string | Toast restaurant GUID forwarded via headers. |
 | `TOKEN_KV` | KV namespace | Stores the cached bearer token. |
+| `CACHE_KV` | KV namespace | Holds shared caches, including the published menu document. |
 
 ## Run locally / deploy
 ```bash

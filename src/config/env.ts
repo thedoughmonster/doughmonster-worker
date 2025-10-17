@@ -6,6 +6,7 @@ export interface AppEnv {
   TOAST_RESTAURANT_GUID: string;
   TOKEN_KV: KVNamespace;
   CACHE_KV: KVNamespace;
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 const REQUIRED_STRING_KEYS: Array<keyof AppEnv> = [
