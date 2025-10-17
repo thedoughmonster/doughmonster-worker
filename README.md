@@ -31,7 +31,7 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 | `end`        | ISO-8601 timestamp (UTC) for the end of the window. Optional; defaults to "now" when only `start` is provided.             | `/api/items-expanded?end=2024-03-09T16:00:00Z`     |
 | `status`     | Case-insensitive Toast order status filter.                                                   | `/api/items-expanded?status=paid`                  |
 | `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/items-expanded?locationId=<location-guid>`   |
-| `limit`      | Maximum number of orders to return (1-500, default 20).                                       | `/api/items-expanded?limit=25`                     |
+| `limit`      | Maximum number of orders to return (1-500, default 20). Values above 500 are automatically clamped. | `/api/items-expanded?limit=25`                     |
 
 #### Sample requests
 

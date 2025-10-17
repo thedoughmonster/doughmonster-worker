@@ -213,43 +213,48 @@ export function createItemsExpandedHandler(
       return errorResponse(400, "Invalid start parameter");
     }
 
-    const useFallbackWindow = !parsedStart && !parsedEnd;
-    const fallbackEnd = useFallbackWindow ? now : null;
-    const fallbackStart = useFallbackWindow
-      ? new Date(now.getTime() - DEFAULT_FALLBACK_RANGE_MS)
-      : null;
+    let fallbackStart: Date | null = null;
+    let fallbackEnd: Date | null = null;
 
-    const effectiveEnd = parsedEnd ?? (parsedStart ? now : fallbackEnd ?? now);
-    const effectiveStart =
-      parsedStart ?? fallbackStart ?? new Date(effectiveEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+    if (!parsedStart && !parsedEnd) {
+      fallbackEnd = new Date(now.getTime());
+      fallbackStart = new Date(fallbackEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+    }
 
-    if (parsedStart && parsedStart.getTime() >= effectiveEnd.getTime()) {
+    let effectiveStart = parsedStart ?? fallbackStart;
+    let effectiveEnd = parsedEnd ?? fallbackEnd;
+
+    if (!effectiveEnd) {
+      effectiveEnd = new Date(now.getTime());
+    }
+
+    if (!effectiveStart) {
+      const anchor = parsedEnd ?? effectiveEnd;
+      effectiveStart = new Date(anchor.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+    }
+
+    if ((parsedStart || parsedEnd) && effectiveStart.getTime() >= effectiveEnd.getTime()) {
       return errorResponse(400, "start must be before end");
     }
 
-    const limit = clampNumber(
-      Number.isFinite(Number(limitParam)) ? Number(limitParam) : DEFAULT_LIMIT,
-      1,
-      MAX_LIMIT
-    );
+    const requestedLimit =
+      limitParam !== null && limitParam !== "" ? Number(limitParam) : Number.NaN;
+    const limit = clampNumber(Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_LIMIT, 1, MAX_LIMIT);
 
     const startIso = toToastIsoUtc(effectiveStart);
     const endIso = toToastIsoUtc(effectiveEnd);
+
+    let page = 1;
+    let pages = 0;
+    let lastPageSignature = "";
 
     try {
       const menuDoc = await deps.getPublishedMenus(env);
       const menuIndex = createMenuIndex(menuDoc);
 
       const aggregates = new Map<string, OrderAccumulator>();
-      let page = 1;
-      let pagesFetched = 0;
 
-      while (true) {
-        pagesFetched += 1;
-        if (pagesFetched > MAX_PAGES) {
-          break;
-        }
-
+      while (pages < MAX_PAGES && aggregates.size < limit) {
         const { orders, nextPage } = await deps.getOrdersBulk(env, {
           startIso,
           endIso,
@@ -260,6 +265,13 @@ export function createItemsExpandedHandler(
         if (!Array.isArray(orders) || orders.length === 0) {
           break;
         }
+
+        const signaturePayload = [orders[0]?.guid ?? null, orders[orders.length - 1]?.guid ?? null, nextPage];
+        const signature = JSON.stringify(signaturePayload);
+        if (signature === lastPageSignature) {
+          break;
+        }
+        lastPageSignature = signature;
 
         let newKeysThisPage = 0;
 
@@ -493,11 +505,11 @@ export function createItemsExpandedHandler(
           }
         }
 
-        if (aggregates.size >= limit || countQualifyingOrders(aggregates) >= limit) {
+        if (newKeysThisPage === 0) {
           break;
         }
 
-        if (newKeysThisPage === 0) {
+        if (aggregates.size >= limit || countQualifyingOrders(aggregates) >= limit) {
           break;
         }
 
@@ -508,6 +520,7 @@ export function createItemsExpandedHandler(
         }
 
         page = nextPage;
+        pages += 1;
       }
 
       const ordered = Array.from(aggregates.values())
@@ -528,6 +541,16 @@ export function createItemsExpandedHandler(
           : typeof err?.bodySnippet === "string"
           ? err.bodySnippet
           : "Unexpected error";
+
+      console.error("items-expanded error", {
+        status,
+        code,
+        page,
+        pages,
+        startIso,
+        endIso,
+        error: err,
+      });
 
       return errorResponse(status, message, code);
     }
