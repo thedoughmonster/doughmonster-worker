@@ -9,6 +9,9 @@ const MAX_LIMIT = 500;
 const PAGE_SIZE = 100;
 const MAX_PAGES = 200;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const HANDLER_TIME_BUDGET_MS = 3_000;
+const BACKFILL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const MAX_BACKFILL_WINDOWS = 48; // 48 hours of lookback
 
 export interface ItemsExpandedDeps {
   getOrdersBulk: typeof getOrdersBulk;
@@ -213,69 +216,63 @@ export function createItemsExpandedHandler(
       return errorResponse(400, "Invalid start parameter");
     }
 
-    let fallbackStart: Date | null = null;
-    let fallbackEnd: Date | null = null;
-
-    if (!parsedStart && !parsedEnd) {
-      fallbackEnd = new Date(now.getTime());
-      fallbackStart = new Date(fallbackEnd.getTime() - DEFAULT_FALLBACK_RANGE_MS);
-    }
-
-    let effectiveStart = parsedStart ?? fallbackStart;
-    let effectiveEnd = parsedEnd ?? fallbackEnd;
-
-    if (!effectiveEnd) {
-      effectiveEnd = new Date(now.getTime());
-    }
-
-    if (!effectiveStart) {
-      const anchor = parsedEnd ?? effectiveEnd;
-      effectiveStart = new Date(anchor.getTime() - DEFAULT_FALLBACK_RANGE_MS);
-    }
-
-    if ((parsedStart || parsedEnd) && effectiveStart.getTime() >= effectiveEnd.getTime()) {
-      return errorResponse(400, "start must be before end");
-    }
-
     const requestedLimit =
       limitParam !== null && limitParam !== "" ? Number(limitParam) : Number.NaN;
     const limit = clampNumber(Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_LIMIT, 1, MAX_LIMIT);
 
-    const startIso = toToastIsoUtc(effectiveStart);
-    const endIso = toToastIsoUtc(effectiveEnd);
+    const rangeMode = Boolean(parsedStart || parsedEnd);
 
-    let page = 1;
-    let pages = 0;
-    let lastPageSignature = "";
+    let effectiveStart: Date | null = null;
+    let effectiveEnd: Date | null = null;
+
+    if (rangeMode) {
+      effectiveEnd = parsedEnd ? new Date(parsedEnd.getTime()) : new Date(now.getTime());
+      if (parsedStart) {
+        effectiveStart = new Date(parsedStart.getTime());
+      } else {
+        const anchor = parsedEnd ?? effectiveEnd;
+        effectiveStart = new Date(anchor.getTime() - DEFAULT_FALLBACK_RANGE_MS);
+      }
+
+      if (effectiveStart.getTime() >= effectiveEnd.getTime()) {
+        return errorResponse(400, "start must be before end");
+      }
+    }
+
+    let pagesProcessed = 0;
+    let lastPage = 1;
+    let lastWindowStartIso: string | null = null;
+    let lastWindowEndIso: string | null = null;
 
     try {
       const menuDoc = await deps.getPublishedMenus(env);
       const menuIndex = createMenuIndex(menuDoc);
 
       const aggregates = new Map<string, OrderAccumulator>();
+      const processedKeys = new Set<string>();
+      const qualifyingKeys = new Set<string>();
 
-      while (pages < MAX_PAGES && aggregates.size < limit) {
-        const { orders, nextPage } = await deps.getOrdersBulk(env, {
-          startIso,
-          endIso,
-          page,
-          pageSize: PAGE_SIZE,
-        });
-
-        if (!Array.isArray(orders) || orders.length === 0) {
-          break;
+      const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
+      const timedOut = () => Date.now() > deadline;
+      const collectedEnough = () => qualifyingKeys.size >= limit;
+      const markQualifying = (key: string, accumulator: OrderAccumulator) => {
+        if (accumulator.items.length > 0 || hasNonZeroTotals(accumulator)) {
+          qualifyingKeys.add(key);
         }
+      };
 
-        const signaturePayload = [orders[0]?.guid ?? null, orders[orders.length - 1]?.guid ?? null, nextPage];
-        const signature = JSON.stringify(signaturePayload);
-        if (signature === lastPageSignature) {
-          break;
-        }
-        lastPageSignature = signature;
-
+      const processOrdersPage = async (
+        orders: ToastOrder[]
+      ): Promise<{ newKeysThisPage: number; aborted: boolean }> => {
         let newKeysThisPage = 0;
+        let aborted = false;
 
         for (const order of orders) {
+          if (timedOut() || collectedEnough()) {
+            aborted = true;
+            break;
+          }
+
           if (!order || typeof order.guid !== "string") {
             continue;
           }
@@ -298,11 +295,25 @@ export function createItemsExpandedHandler(
 
           const checks = Array.isArray(order.checks) ? order.checks : [];
           for (const check of checks) {
+            if (timedOut() || collectedEnough()) {
+              aborted = true;
+              break;
+            }
+
             if (!check || typeof check.guid !== "string") {
               continue;
             }
 
             if ((check as any)?.deleted) {
+              continue;
+            }
+
+            const key = `${order.guid}:${check.guid}`;
+            if (processedKeys.has(key)) {
+              const existing = aggregates.get(key);
+              if (existing) {
+                markQualifying(key, existing);
+              }
               continue;
             }
 
@@ -313,9 +324,14 @@ export function createItemsExpandedHandler(
               check,
               diningOptionResolver
             );
+
+            if (timedOut() || collectedEnough()) {
+              aborted = true;
+              break;
+            }
+
             const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
             const webhookFulfillmentStatus = extractGuestOrderFulfillmentStatus(order, check);
-            const key = `${order.guid}:${check.guid}`;
             const previousSize = aggregates.size;
             const accumulator = getOrCreateAccumulator(aggregates, key, {
               orderId: order.guid,
@@ -371,8 +387,15 @@ export function createItemsExpandedHandler(
                 behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
             });
 
+            processedKeys.add(key);
+
             const selections = Array.isArray(check.selections) ? check.selections : [];
             for (const selection of selections) {
+              if (timedOut() || collectedEnough()) {
+                aborted = true;
+                break;
+              }
+
               if (!selection || typeof selection.guid !== "string") {
                 continue;
               }
@@ -482,6 +505,17 @@ export function createItemsExpandedHandler(
               if (selectionDiscountCents > 0) {
                 accumulator.discountTotalCents += selectionDiscountCents;
               }
+
+              markQualifying(key, accumulator);
+
+              if (timedOut() || collectedEnough()) {
+                aborted = true;
+                break;
+              }
+            }
+
+            if (aborted) {
+              break;
             }
 
             if (!accumulator.checkTotalsHydrated) {
@@ -502,25 +536,114 @@ export function createItemsExpandedHandler(
 
               accumulator.checkTotalsHydrated = true;
             }
+
+            markQualifying(key, accumulator);
+
+            if (timedOut() || collectedEnough()) {
+              aborted = true;
+              break;
+            }
+          }
+
+          if (aborted) {
+            break;
           }
         }
 
-        if (newKeysThisPage === 0) {
-          break;
+        return { newKeysThisPage, aborted };
+      };
+
+      const collectWindow = async (windowStart: Date, windowEnd: Date): Promise<boolean> => {
+        const startIso = toToastIsoUtc(windowStart);
+        const endIso = toToastIsoUtc(windowEnd);
+        lastWindowStartIso = startIso;
+        lastWindowEndIso = endIso;
+
+        let page = 1;
+        let lastPageSignature = "";
+
+        while (pagesProcessed < MAX_PAGES) {
+          if (timedOut() || collectedEnough()) {
+            return true;
+          }
+
+          lastPage = page;
+
+          const { orders, nextPage } = await deps.getOrdersBulk(env, {
+            startIso,
+            endIso,
+            page,
+            pageSize: PAGE_SIZE,
+          });
+
+          pagesProcessed += 1;
+
+          if (!Array.isArray(orders) || orders.length === 0) {
+            break;
+          }
+
+          const signaturePayload = [
+            orders[0]?.guid ?? null,
+            orders[orders.length - 1]?.guid ?? null,
+            nextPage,
+          ];
+          const signature = JSON.stringify(signaturePayload);
+          if (signature === lastPageSignature) {
+            break;
+          }
+          lastPageSignature = signature;
+
+          const { newKeysThisPage, aborted } = await processOrdersPage(orders);
+
+          if (aborted) {
+            return true;
+          }
+
+          if (aggregates.size >= limit || collectedEnough()) {
+            return true;
+          }
+
+          if (timedOut()) {
+            return true;
+          }
+
+          if (newKeysThisPage === 0) {
+            break;
+          }
+
+          const hasMore = typeof nextPage === "number" && nextPage > page;
+
+          if (!hasMore) {
+            break;
+          }
+
+          page = nextPage;
         }
 
-        if (aggregates.size >= limit || countQualifyingOrders(aggregates) >= limit) {
-          break;
+        return false;
+      };
+
+      if (rangeMode && effectiveStart && effectiveEnd) {
+        await collectWindow(effectiveStart, effectiveEnd);
+      } else {
+        let windows = 0;
+        let windowEnd = new Date(now.getTime());
+        let windowStart = new Date(windowEnd.getTime() - BACKFILL_WINDOW_MS);
+
+        while (
+          windows < MAX_BACKFILL_WINDOWS &&
+          pagesProcessed < MAX_PAGES &&
+          !timedOut() &&
+          !collectedEnough()
+        ) {
+          const stop = await collectWindow(windowStart, windowEnd);
+          if (stop) {
+            break;
+          }
+          windows += 1;
+          windowEnd = new Date(windowStart.getTime());
+          windowStart = new Date(windowEnd.getTime() - BACKFILL_WINDOW_MS);
         }
-
-        const hasMore = typeof nextPage === "number" && nextPage > page;
-
-        if (!hasMore) {
-          break;
-        }
-
-        page = nextPage;
-        pages += 1;
       }
 
       const ordered = Array.from(aggregates.values())
@@ -545,10 +668,10 @@ export function createItemsExpandedHandler(
       console.error("items-expanded error", {
         status,
         code,
-        page,
-        pages,
-        startIso,
-        endIso,
+        page: lastPage,
+        pages: pagesProcessed,
+        startIso: lastWindowStartIso,
+        endIso: lastWindowEndIso,
         error: err,
       });
 

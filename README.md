@@ -16,10 +16,10 @@ The handler accepts an optional `?minutes=` query parameter that clamps between 
 ### `/api/items-expanded`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
 
-- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. The worker automatically pages through up to the last seven days of Toast data to surface the latest results without requiring a time window.
+- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. The worker walks backwards in one-hour windows (up to 48 hours or until a short handler time budget expires) so it surfaces the latest results without depending on a massive static lookback window.
 - Each order groups all items for a Toast check and includes modifier breakdowns, per-item pricing (base, modifier, total), order timing, customer/location metadata, and aggregated totals (base, modifiers, discounts, service charges, tips, and grand total).
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
-- Accepts optional ISO-8601 `start`/`end` query parameters; when omitted the endpoint simply returns the latest orders.
+- Accepts optional ISO-8601 `start`/`end` query parameters; when omitted the endpoint falls back to the adaptive window strategy described above and returns whatever it collected before the limit, safety caps, or time budget kicked in.
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500).
 - Loads the published menu document once per request to hydrate item and modifier names.
 
