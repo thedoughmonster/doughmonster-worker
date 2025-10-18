@@ -158,3 +158,17 @@ Configure secrets/KV bindings via `wrangler.toml`, `.dev.vars`, or the Cloudflar
 - Provide `?selfOrigin=https://<your-host>` when debugging mismatched hosts; the override is used for worker self-fetches only.
 - When `?debug=1` is present, the handler logs the absolute self-fetch URLs alongside detailed upstream diagnostics.
 - On a 404 from `/api/orders/latest`, the handler falls back to dispatching the internal handler directly to avoid routing gaps.
+
+## `/api/items-expanded`
+
+### Query parameters
+- `limit` (default 20, max 500): number of expanded orders to return after aggregation.
+- `start`, `end`: ISO timestamps forwarded to `/api/orders/latest`.
+- `status`, `locationId`, `detail`: forwarded filters for the upstream orders endpoint (defaults to `detail=full`).
+- `refresh=1`: bypasses the cached menu document.
+- `debug=1`: appends verbose diagnostics in the JSON response.
+
+### Response
+- `orders`: array of expanded orders (newest first) containing `orderData`, `items`, and `totals` blocks.
+- `cacheInfo`: object with `menu` cache status (`hit-fresh` or `miss-network`) and `menuUpdatedAt` timestamp.
+- `debug` (when `debug=1`): includes upstream request traces, processing timers, counters for filtered items, and `timedOut` when the 3s budget is exceeded.
