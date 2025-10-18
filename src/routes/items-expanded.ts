@@ -1,6 +1,8 @@
 import type { AppEnv } from "../config/env.js";
 import { getDiningOptions } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
+import { buildSelfUrl, stringifyForLog } from "../lib/selfUrl.js";
+import handleOrdersLatest from "./api/orders/latest.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
@@ -8,9 +10,6 @@ import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orde
  * items-expanded composes data from internal Worker endpoints (orders + menu)
  * so we can reuse the Worker KV cache instead of calling Toast APIs directly.
  */
-
-const ORDERS_ENDPOINT = "/api/orders/latest";
-const MENUS_ENDPOINT = "/api/menus";
 
 const defaultFetch: typeof fetch = (...args) => fetch(...args);
 
@@ -254,10 +253,17 @@ interface MenuFetchResult {
 
 interface UpstreamTrace {
   url: string | null;
+  absoluteUrl: string | null;
   status: number | null;
   ok: boolean | null;
   bytes: number | null;
   snippet: string | null;
+}
+
+interface OrdersUpstreamTrace extends UpstreamTrace {
+  internalFallbackUsed: boolean;
+  fallbackStatus: number | null;
+  fallbackSnippet: string | null;
 }
 
 interface MenuUpstreamTrace extends UpstreamTrace {
@@ -266,7 +272,7 @@ interface MenuUpstreamTrace extends UpstreamTrace {
 }
 
 interface UpstreamTraceContainer {
-  orders: UpstreamTrace;
+  orders: OrdersUpstreamTrace;
   menu: MenuUpstreamTrace;
 }
 
@@ -280,6 +286,9 @@ export function createItemsExpandedHandler(
   return async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    const originSeen = url.origin;
+    const selfOrigin = url.searchParams.get("selfOrigin") ?? undefined;
+
     const requestId = crypto.randomUUID();
     const t0 = Date.now();
 
@@ -288,9 +297,20 @@ export function createItemsExpandedHandler(
       typeof debugParam === "string" && ["1", "true", "debug"].includes(debugParam.toLowerCase());
 
     const traces: UpstreamTraceContainer = {
-      orders: { url: null, status: null, ok: null, bytes: null, snippet: null },
+      orders: {
+        url: null,
+        absoluteUrl: null,
+        status: null,
+        ok: null,
+        bytes: null,
+        snippet: null,
+        internalFallbackUsed: false,
+        fallbackStatus: null,
+        fallbackSnippet: null,
+      },
       menu: {
         url: null,
+        absoluteUrl: null,
         status: null,
         ok: null,
         bytes: null,
@@ -352,6 +372,8 @@ export function createItemsExpandedHandler(
         },
         limit,
         pagesProcessed,
+        originSeen,
+        selfOriginOverride: selfOrigin ?? null,
       };
 
       if (includeLastPage) {
@@ -415,16 +437,45 @@ export function createItemsExpandedHandler(
 
     try {
       const refreshParam = url.searchParams.get("refresh");
+      const ordersUrl = buildSelfUrl(request, "api/orders/latest", selfOrigin);
+      const menusUrl = buildSelfUrl(request, "api/menus", selfOrigin);
+
+      if (enableDiagnostics) {
+        console.debug("items-expanded self-fetch targets", {
+          requestId,
+          ordersAbsoluteUrl: stringifyForLog(ordersUrl),
+          menuAbsoluteUrl: stringifyForLog(menusUrl),
+          selfOriginOverride: selfOrigin ?? null,
+        });
+      }
+
       const [ordersData, menuFetchResult] = await Promise.all([
-        fetchOrdersFromWorker(deps.fetch, request, {
-          fetchLimit: ordersFetchLimit,
-          statusParam,
-          locationParam,
-          effectiveStart,
-          effectiveEnd,
-          rangeMode,
-        }, traces),
-        fetchMenuFromWorker(deps.fetch, request, refreshParam, traces),
+        fetchOrdersFromWorker(
+          deps.fetch,
+          request,
+          env,
+          ordersUrl,
+          {
+            fetchLimit: ordersFetchLimit,
+            statusParam,
+            locationParam,
+            effectiveStart,
+            effectiveEnd,
+            rangeMode,
+          },
+          traces,
+          requestId,
+          enableDiagnostics
+        ),
+        fetchMenuFromWorker(
+          deps.fetch,
+          request,
+          menusUrl,
+          refreshParam,
+          traces,
+          requestId,
+          enableDiagnostics
+        ),
       ]);
       diagnostics.lookback_windows_used = ordersData.length > 0 ? 1 : 0;
 
@@ -904,11 +955,15 @@ function errorResponse(
 
 async function fetchOrdersFromWorker(
   fetcher: ItemsExpandedDeps["fetch"],
-  request: Request,
+  _request: Request,
+  env: AppEnv,
+  baseUrl: URL,
   options: FetchOrdersOptions,
-  traceContainer?: UpstreamTraceContainer
+  traceContainer: UpstreamTraceContainer | undefined,
+  requestId: string,
+  enableDiagnostics: boolean
 ): Promise<ToastOrder[]> {
-  const url = new URL(ORDERS_ENDPOINT, request.url);
+  const url = new URL(baseUrl.toString());
   url.searchParams.set("limit", String(Math.max(1, options.fetchLimit)));
   url.searchParams.set("detail", "full");
 
@@ -929,19 +984,32 @@ async function fetchOrdersFromWorker(
     }
   }
 
+  const absoluteUrl = stringifyForLog(url);
   const trace = traceContainer?.orders ?? null;
   const relativeUrl = `${url.pathname}${url.search}`;
   if (trace) {
     trace.url = relativeUrl;
+    trace.absoluteUrl = absoluteUrl;
     trace.status = null;
     trace.ok = null;
     trace.bytes = null;
     trace.snippet = null;
+    trace.internalFallbackUsed = false;
+    trace.fallbackStatus = null;
+    trace.fallbackSnippet = null;
+  }
+
+  if (!/^https?:\/\//i.test(absoluteUrl)) {
+    throw new Error("Bad self URL");
+  }
+
+  if (enableDiagnostics) {
+    console.debug("items-expanded orders fetch", { requestId, absoluteUrl });
   }
 
   let response: Response;
   try {
-    response = await fetcher(url.toString());
+    response = await fetcher(absoluteUrl);
   } catch (err) {
     if (trace) {
       trace.status = null;
@@ -953,7 +1021,7 @@ async function fetchOrdersFromWorker(
     const error = new UpstreamUnavailableError("Failed to load recent orders");
     (error as any).cause = err;
     (error as any).upstreamStatus = trace?.status ?? null;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? relativeUrl;
     if (trace?.snippet) {
       (error as any).bodySnippet = trace.snippet;
     }
@@ -969,6 +1037,68 @@ async function fetchOrdersFromWorker(
     trace.snippet = null;
   }
 
+  if (response.status === 404) {
+    const bodyText = await response.text().catch(() => "");
+    const snippet = bodyText.slice(0, 512);
+    const measuredBytes = new TextEncoder().encode(bodyText).length;
+    if (trace) {
+      trace.fallbackStatus = response.status;
+      trace.fallbackSnippet = snippet;
+      trace.bytes = measuredBytes;
+      trace.snippet = snippet;
+    }
+
+    if (enableDiagnostics) {
+      console.debug("items-expanded orders fallback", {
+        requestId,
+        absoluteUrl,
+        fallbackStatus: response.status,
+      });
+    }
+
+    const internalRequest = new Request(absoluteUrl, { method: "GET" });
+    const internalResponse = await handleOrdersLatest(env, internalRequest);
+    const internalText = await internalResponse.text().catch(() => "");
+    const internalSnippet = internalText.slice(0, 512);
+    const internalBytes = new TextEncoder().encode(internalText).length;
+
+    if (trace) {
+      trace.status = internalResponse.status;
+      trace.ok = internalResponse.ok;
+      trace.bytes = internalBytes;
+      trace.snippet = internalSnippet;
+      trace.internalFallbackUsed = true;
+    }
+
+    if (!internalResponse.ok) {
+      const error = new UpstreamUnavailableError("Failed to load recent orders");
+      (error as any).bodySnippet = internalSnippet;
+      (error as any).upstreamStatus = internalResponse.status;
+      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
+      throw error;
+    }
+
+    let payload: OrdersLatestResponseBody;
+    try {
+      payload = JSON.parse(internalText) as OrdersLatestResponseBody;
+    } catch (err) {
+      const error = new UpstreamUnavailableError("Failed to parse recent orders");
+      (error as any).cause = err;
+      (error as any).upstreamStatus = internalResponse.status;
+      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
+      throw error;
+    }
+
+    if (!payload?.ok || !Array.isArray(payload.data)) {
+      const error = new UpstreamUnavailableError("Orders service unavailable");
+      (error as any).upstreamStatus = internalResponse.status;
+      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
+      throw error;
+    }
+
+    return payload.data;
+  }
+
   if (!response.ok) {
     const bodyText = await response.text().catch(() => "");
     const snippet = bodyText.slice(0, 512);
@@ -980,7 +1110,7 @@ async function fetchOrdersFromWorker(
     const error = new UpstreamUnavailableError("Failed to load recent orders");
     (error as any).bodySnippet = snippet;
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
@@ -991,14 +1121,14 @@ async function fetchOrdersFromWorker(
     const error = new UpstreamUnavailableError("Failed to parse recent orders");
     (error as any).cause = err;
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
   if (!payload?.ok || !Array.isArray(payload.data)) {
     const error = new UpstreamUnavailableError("Orders service unavailable");
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
@@ -1007,19 +1137,24 @@ async function fetchOrdersFromWorker(
 
 async function fetchMenuFromWorker(
   fetcher: ItemsExpandedDeps["fetch"],
-  request: Request,
+  _request: Request,
+  baseUrl: URL,
   refreshParam: string | null,
-  traceContainer?: UpstreamTraceContainer
+  traceContainer: UpstreamTraceContainer | undefined,
+  requestId: string,
+  enableDiagnostics: boolean
 ): Promise<MenuFetchResult> {
-  const url = new URL(MENUS_ENDPOINT, request.url);
+  const url = new URL(baseUrl.toString());
   if (refreshParam) {
     url.searchParams.set("refresh", refreshParam);
   }
 
+  const absoluteUrl = stringifyForLog(url);
   const trace = traceContainer?.menu ?? null;
   const relativeUrl = `${url.pathname}${url.search}`;
   if (trace) {
     trace.url = relativeUrl;
+    trace.absoluteUrl = absoluteUrl;
     trace.status = null;
     trace.ok = null;
     trace.bytes = null;
@@ -1028,9 +1163,13 @@ async function fetchMenuFromWorker(
     trace.updatedAt = null;
   }
 
+  if (enableDiagnostics) {
+    console.debug("items-expanded menu fetch", { requestId, absoluteUrl });
+  }
+
   let response: Response;
   try {
-    response = await fetcher(url.toString());
+    response = await fetcher(absoluteUrl);
   } catch (err) {
     if (trace) {
       trace.status = null;
@@ -1042,7 +1181,7 @@ async function fetchMenuFromWorker(
     const error = new UpstreamUnavailableError("Failed to load menu document");
     (error as any).cause = err;
     (error as any).upstreamStatus = trace?.status ?? null;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     if (trace?.snippet) {
       (error as any).bodySnippet = trace.snippet;
     }
@@ -1069,7 +1208,7 @@ async function fetchMenuFromWorker(
     const error = new UpstreamUnavailableError("Failed to load menu document");
     (error as any).bodySnippet = snippet;
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
@@ -1080,14 +1219,14 @@ async function fetchMenuFromWorker(
     const error = new UpstreamUnavailableError("Failed to parse menu document");
     (error as any).cause = err;
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
   if (!payload?.ok) {
     const error = new UpstreamUnavailableError("Menu service unavailable");
     (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.url ?? relativeUrl;
+    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
     throw error;
   }
 
@@ -1097,6 +1236,11 @@ async function fetchMenuFromWorker(
       : null;
 
   const cacheStatus = payload?.cacheHit ? "hit-fresh" : "miss-network";
+
+  if (trace) {
+    trace.cacheStatus = cacheStatus;
+    trace.updatedAt = updatedAt;
+  }
 
   return {
     document: payload?.menu ?? null,
