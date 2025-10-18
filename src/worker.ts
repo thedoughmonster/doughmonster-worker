@@ -3,7 +3,8 @@ import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
 import handleItemsExpanded from "./routes/items-expanded.js";
-import ordersMergedHandler from "./api/orders-merged";
+import ordersMergedHandler from "./routes/api/orders-merged";
+=======
 
 type Env = ReturnType<typeof getEnv>;
 
