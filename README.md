@@ -10,6 +10,8 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
 
+All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/items-expanded` can self-fetch them without leaving the worker boundary.
+
 ### `/api/orders/latest`
 The handler supports flexible time-range and filter parameters:
 

@@ -1,8 +1,47 @@
 import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
-import handleMenus from "./routes/api/menus.js";
-import handleOrdersLatest from "./routes/api/orders/latest.js";
+import menusHandler from "./routes/api/menus";
+import ordersLatestHandler from "./routes/api/orders/latest";
 import handleItemsExpanded from "./routes/items-expanded.js";
+
+type Env = ReturnType<typeof getEnv>;
+
+type RouteHandler = (
+  env: Env,
+  request: Request
+) => Promise<Response> | Response;
+
+class WorkerRouter {
+  #getRoutes = new Map<string, RouteHandler>();
+
+  get(path: string, handler: RouteHandler): void {
+    this.#getRoutes.set(path, handler);
+  }
+
+  async handle(
+    method: string,
+    path: string,
+    env: Env,
+    request: Request
+  ): Promise<Response | null> {
+    if (method !== "GET") {
+      return null;
+    }
+
+    const handler = this.#getRoutes.get(path);
+    if (!handler) {
+      return null;
+    }
+
+    return await handler(env, request);
+  }
+}
+
+const router = new WorkerRouter();
+
+router.get("/api/menus", menusHandler);
+router.get("/api/orders/latest", ordersLatestHandler);
+router.get("/api/items-expanded", handleItemsExpanded);
 
 const STATIC_CACHE_SECONDS = 60;
 
@@ -34,16 +73,9 @@ export default {
         return handleHealth();
       }
 
-      if (request.method === "GET" && path === "/api/menus") {
-        return await handleMenus(env, request);
-      }
-
-      if (request.method === "GET" && path === "/api/orders/latest") {
-        return await handleOrdersLatest(env, request);
-      }
-
-      if (request.method === "GET" && path === "/api/items-expanded") {
-        return await handleItemsExpanded(env, request);
+      const routeResponse = await router.handle(request.method, path, env, request);
+      if (routeResponse) {
+        return routeResponse;
       }
 
       return new Response(
