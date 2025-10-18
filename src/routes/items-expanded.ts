@@ -7,9 +7,8 @@ import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orde
 
 const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 500;
-const ORDERS_DEFAULT_LIMIT = 60;
 const ORDERS_UPSTREAM_MAX = 200;
-const HANDLER_TIME_BUDGET_MS = 3_000;
+const HANDLER_TIME_BUDGET_MS = 12_000; // allow partial aggregation to complete
 const SNIPPET_LENGTH = 256;
 const TEXT_ENCODER = new TextEncoder();
 
@@ -132,13 +131,14 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
 
   const debugRequested = url.searchParams.get("debug") === "1";
   const refreshRequested = url.searchParams.get("refresh") === "1";
-  const finalLimit = clamp(parseNumber(url.searchParams.get("limit"), DEFAULT_OUTPUT_LIMIT), 1, MAX_OUTPUT_LIMIT);
+  const requestedLimit = parseNumber(url.searchParams.get("limit"), DEFAULT_OUTPUT_LIMIT);
+  const finalLimit = clamp(requestedLimit, 1, MAX_OUTPUT_LIMIT);
   const startParam = url.searchParams.get("start");
   const endParam = url.searchParams.get("end");
   const statusParam = url.searchParams.get("status");
   const locationParam = url.searchParams.get("locationId");
   const detailParam = url.searchParams.get("detail");
-  const upstreamLimit = clamp(parseNumber(url.searchParams.get("limit"), ORDERS_DEFAULT_LIMIT), 1, ORDERS_UPSTREAM_MAX);
+  const upstreamLimit = clamp(requestedLimit, 1, ORDERS_UPSTREAM_MAX);
 
   const ordersUrl = new URL("/api/orders/latest", origin);
   ordersUrl.searchParams.set("limit", String(upstreamLimit));
@@ -164,6 +164,17 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   const menuPayload = menuResult.ok ? menuResult.data.payload : null;
   const ordersOk = Boolean(ordersPayload && (ordersPayload as OrdersLatestResponse).ok);
   const menuOk = Boolean(menuPayload && (menuPayload as MenusResponse).ok);
+
+  let ordersData: ToastOrder[] | null = null;
+  if (ordersOk && ordersPayload) {
+    const okPayload = ordersPayload as OrdersLatestResponse & { ok: true };
+    ordersData = Array.isArray(okPayload.data)
+      ? okPayload.data
+      : Array.isArray((okPayload as any).orders)
+      ? ((okPayload as any).orders as ToastOrder[])
+      : null;
+  }
+  const upstreamOrdersCount = Array.isArray(ordersData) ? ordersData.length : 0;
 
   if (!ordersResult.ok || !menuResult.ok || !ordersOk || !menuOk) {
     const ordersBody = ordersOk ? (ordersPayload as OrdersLatestResponse & { ok: true }) : null;
@@ -236,6 +247,7 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
       lastPage: 1,
       timedOut: build.timedOut,
       diagnostics: build.diagnostics,
+      upstreamOrdersCount,
     });
   }
 
@@ -253,6 +265,7 @@ function buildDebugPayload(args: {
   lastPage: number;
   timedOut: boolean;
   diagnostics?: DiagnosticsCounters;
+  upstreamOrdersCount?: number;
 }) {
   return { ...args, ordersUpstream: args.ordersTrace, menuUpstream: args.menuTrace };
 }
@@ -263,6 +276,12 @@ async function fetchOrdersFromWorker(
   url: URL
 ): Promise<FetchResult<OrdersLatestResponse>> {
   const trace = createTrace(url, "direct");
+
+  // Respect incoming detail param if present
+  const incomingDetail = new URL(originalRequest.url).searchParams.get("detail");
+  if (incomingDetail) {
+    url.searchParams.set("detail", incomingDetail);
+  }
 
   try {
     const payload = await callOrdersLatestDirect(env, url);
