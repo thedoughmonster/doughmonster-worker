@@ -7,6 +7,8 @@ const MENU_CACHE_KEY = "menu:published:v1";
 const MENU_CACHE_META_KEY = "menu:published:meta:v1";
 const MENU_STALE_AFTER_MS = 30 * 60 * 1000;
 const MENU_EXPIRE_AFTER_MS = 24 * 60 * 60 * 1000;
+const DINING_OPTIONS_CACHE_KEY = "toast:diningOptions:v2";
+const DINING_OPTIONS_CACHE_TTL_SECONDS = 30 * 60;
 
 type MenuCacheStatus =
   | "hit-fresh"
@@ -234,24 +236,48 @@ export async function getPublishedMenusCached(
 }
 
 export async function getDiningOptions(env: AppEnv): Promise<DiningOptionConfig[]> {
+  const cached = await env.CACHE_KV.get(DINING_OPTIONS_CACHE_KEY);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as DiningOptionConfig[];
+      }
+    } catch (err) {
+      console.warn("invalid cached dining options, ignoring", { err });
+    }
+  }
+
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = `${base}/config/v2/diningOptions`;
   const headers = await getToastHeaders(env);
+  headers["content-type"] = "application/json";
+
+  const externalId = normalizeString((env as any)?.TOAST_RESTAURANT_EXTERNAL_ID);
+  if (externalId) {
+    headers["Toast-Restaurant-External-ID"] = externalId;
+  }
 
   try {
     const response = await fetchWithBackoff(url, { method: "GET", headers });
     const text = await response.text();
     const json = text ? JSON.parse(text) : null;
 
-    if (Array.isArray(json?.diningOptions)) {
-      return json.diningOptions as DiningOptionConfig[];
-    }
+    const rawOptions = Array.isArray(json?.diningOptions)
+      ? (json.diningOptions as any[])
+      : Array.isArray(json)
+      ? (json as any[])
+      : [];
 
-    if (Array.isArray(json)) {
-      return json as DiningOptionConfig[];
-    }
+    const normalized = rawOptions
+      .map((option) => normalizeDiningOption(option))
+      .filter((option): option is DiningOptionConfig => option !== null);
 
-    return [];
+    await env.CACHE_KV.put(DINING_OPTIONS_CACHE_KEY, JSON.stringify(normalized), {
+      expirationTtl: DINING_OPTIONS_CACHE_TTL_SECONDS,
+    });
+
+    return normalized;
   } catch (err) {
     if (isToastNotFound(err)) {
       return [];
@@ -408,6 +434,33 @@ function parseMenuCacheMeta(value: string | null): MenuCacheMeta | null {
   }
 
   return null;
+}
+
+function normalizeDiningOption(value: any): DiningOptionConfig | null {
+  const guid = normalizeString(value?.guid) ?? normalizeString(value?.id);
+  if (!guid) {
+    return null;
+  }
+
+  const behaviorCandidate =
+    normalizeString(value?.behavior) ??
+    normalizeString(value?.type) ??
+    normalizeString(value?.mode);
+  const nameCandidate = normalizeString(value?.name) ?? normalizeString(value?.displayName);
+
+  return {
+    guid,
+    behavior: behaviorCandidate ?? null,
+    name: nameCandidate ?? null,
+  };
+}
+
+function normalizeString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 async function fetchPublishedMenusFromToast(
