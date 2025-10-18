@@ -8,6 +8,7 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
+| `GET` | `/api/orders-merged` | Fetches `/api/orders/latest` and `/api/menus`, returning both payloads without modifying either response body. | `curl -s "https://<worker>/api/orders-merged" \| jq` |
 | `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
 
 All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/items-expanded` can self-fetch them without leaving the worker boundary.
@@ -75,6 +76,21 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - Append `?debug=1` (or `true`/`debug`) to enable a rich debug payload along with diagnostic headers.
 - Debug mode adds the `x-request-id`, `x-items-expanded-debug`, `x-up-orders-status`, `x-up-menu-status`, and `x-qualifying-found` headers to responses.
 - Response body snippets in debug output are limited to 512 characters and are only emitted when debug mode is explicitly enabled.
+
+### `/api/orders-merged`
+This helper endpoint keeps `/api/orders/latest` and `/api/menus` as independent payloads while bundling them into a single response:
+
+```
+{
+  ok: true,
+  route: "/api/orders-merged",
+  orders: <payload from /api/orders/latest>,
+  menus: <payload from /api/menus>
+}
+```
+
+- Call it with `curl -s "https://<worker>/api/orders-merged" \| jq` to receive the aggregated JSON.
+- If either upstream request fails or returns non-JSON, the worker responds with HTTP 502 and echoes lightweight status details for troubleshooting.
 
 ### `/api/menus`
 `GET /api/menus` responds with:

@@ -3,6 +3,7 @@ import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
 import handleItemsExpanded from "./routes/items-expanded.js";
+import ordersMergedHandler from "./api/orders-merged";
 
 type Env = ReturnType<typeof getEnv>;
 
@@ -42,6 +43,7 @@ const router = new WorkerRouter();
 router.get("/api/menus", menusHandler);
 router.get("/api/orders/latest", ordersLatestHandler);
 router.get("/api/items-expanded", handleItemsExpanded);
+router.get("/api/orders-merged", ordersMergedHandler);
 
 const STATIC_CACHE_SECONDS = 60;
 
