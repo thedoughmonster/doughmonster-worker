@@ -75,11 +75,22 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - Response body snippets in debug output are limited to 512 characters and are only emitted when debug mode is explicitly enabled.
 
 ### `/api/menus`
-`/api/menus` returns `{ ok, metadata, menu, cacheHit }` where:
+`GET /api/menus` responds with:
 
-- `metadata` mirrors Toast's `menus/v2/metadata` payload so clients can track last update timestamps.
-- `menu` matches the Toast `menus/v2/menus` response or `null` when Toast has no published menu data.
-- `cacheHit` reports whether the worker served the data from its lightweight in-memory metadata cache (the full menu document is cached in KV, described below).
+```
+{
+  ok: true,
+  menu: <ToastMenusDocument | null>,
+  metadata: { lastUpdated: <ISO string | null> },
+  cacheHit: <boolean>
+}
+```
+
+- `menu` is the cached Toast `menus/v2/menus` document (or `null` when Toast has nothing published).
+- `metadata.lastUpdated` echoes the timestamp saved alongside the cached document so downstream services can track refreshes.
+- `cacheHit` is `true` when the worker satisfied the request from KV without needing to hit Toast.
+
+Append `?refresh=1` (or any other truthy value such as `true`, `yes`, `on`) to force a synchronous refresh that bypasses the cached copy. Non-truthy values leave the cache untouched while still returning the stored payload.
 
 #### Menu caching strategy
 
@@ -88,7 +99,7 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 - The full document lives at `menu:published:v1`; metadata (`updatedAt`, `staleAt`, `expireAt`, optional `etag`) is stored at `menu:published:meta:v1`.
 - Reads are considered fresh for 30 minutes. Between 30 minutes and 24 hours the worker serves the cached document immediately and schedules a background refresh via `waitUntil`.
 - After 24 hours the worker blocks on Toast before replying and overwrites both KV entries with the new payload and timestamps.
-- Appending `?refresh=1` to a request that loads the menu (for example `/api/items-expanded?refresh=1`) forces a synchronous revalidate and updates the KV entries regardless of age.
+- Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1` or `/api/items-expanded?refresh=true`) forces a synchronous revalidate and updates the KV entries regardless of age.
 - Responses that rely on the cached menu surface `cacheInfo.menuUpdatedAt` so you can see when the document was last refreshed.
 
 ## Operations UI

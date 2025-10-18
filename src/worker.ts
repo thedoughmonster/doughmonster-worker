@@ -35,7 +35,7 @@ export default {
       }
 
       if (request.method === "GET" && path === "/api/menus") {
-        return await handleMenus(env);
+        return await handleMenus(env, request);
       }
 
       if (request.method === "GET" && path === "/api/orders/latest") {
