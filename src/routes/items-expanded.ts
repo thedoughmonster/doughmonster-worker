@@ -9,7 +9,8 @@ const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 500;
 const ORDERS_DEFAULT_LIMIT = 60;
 const ORDERS_UPSTREAM_MAX = 200;
-const HANDLER_TIME_BUDGET_MS = 3_000;
+const HANDLER_TIME_BUDGET_MS = 10_000;
+const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
 const SNIPPET_LENGTH = 256;
 const TEXT_ENCODER = new TextEncoder();
 
@@ -139,6 +140,9 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   const locationParam = url.searchParams.get("locationId");
   const detailParam = url.searchParams.get("detail");
   const upstreamLimit = clamp(parseNumber(url.searchParams.get("limit"), ORDERS_DEFAULT_LIMIT), 1, ORDERS_UPSTREAM_MAX);
+  const rangeMode = Boolean(startParam || endParam);
+  const lookbackWindowsTried: number[] = [];
+  let ordersFetched = 0;
 
   const ordersUrl = new URL("/api/orders/latest", origin);
   ordersUrl.searchParams.set("limit", String(upstreamLimit));
@@ -152,7 +156,7 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   if (refreshRequested) menuUrl.searchParams.set("refresh", "1");
 
   const [ordersResult, menuResult] = await Promise.all([
-    fetchOrdersFromWorker(env, request, ordersUrl),
+    fetchOrdersFromWorker(env, request, ordersUrl, { rangeMode }),
     fetchMenuFromWorker(env, request, menuUrl),
   ]);
 
@@ -180,6 +184,8 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
       originSeen: origin,
       lastPage: 1,
       timedOut: false,
+      lookbackWindowsTried,
+      ordersFetched,
     });
 
     const message = !ordersResult.ok
@@ -199,8 +205,39 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
     );
   }
 
-  const ordersBody = ordersPayload as OrdersLatestResponse & { ok: true };
+  let ordersBody = ordersPayload as OrdersLatestResponse & { ok: true };
   const menuBody = menuPayload as MenusResponse & { ok: true };
+
+  const uniqueOrders = new Map<string, ToastOrder>();
+  const addOrders = (orders: ToastOrder[]) => {
+    for (const order of orders) {
+      if (!order || typeof order !== "object") continue;
+      const guid = typeof (order as any)?.guid === "string" ? (order as any).guid : null;
+      if (!guid || uniqueOrders.has(guid)) continue;
+      uniqueOrders.set(guid, order);
+    }
+  };
+
+  addOrders(extractOrders(ordersBody));
+
+  if (!rangeMode && uniqueOrders.size < finalLimit) {
+    const lookbackWindows = [60, 240, 480, 1440, 2880, 4320, 10080];
+    for (const minutes of lookbackWindows) {
+      if (uniqueOrders.size >= finalLimit) break;
+      if (minutes * 60_000 > DEFAULT_FALLBACK_RANGE_MS) break;
+      const lookbackUrl = new URL(ordersUrl.toString());
+      const nextResult = await fetchOrdersFromWorker(env, request, lookbackUrl, { rangeMode, minutes });
+      lookbackWindowsTried.push(minutes);
+      if (!nextResult.ok) break;
+      const nextPayload = nextResult.data;
+      if (!nextPayload?.ok) break;
+      addOrders(extractOrders(nextPayload as OrdersLatestResponse & { ok: true }));
+    }
+  }
+
+  const aggregatedOrders = Array.from(uniqueOrders.values());
+  ordersFetched = aggregatedOrders.length;
+  ordersBody = { ...ordersBody, data: aggregatedOrders, orders: aggregatedOrders };
 
   menuTrace.cacheStatus = menuBody.cacheHit ? "hit-fresh" : "miss-network";
   menuTrace.updatedAt = menuBody.metadata?.lastUpdated ?? null;
@@ -235,6 +272,8 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
       originSeen: origin,
       lastPage: 1,
       timedOut: build.timedOut,
+      lookbackWindowsTried,
+      ordersFetched,
       diagnostics: build.diagnostics,
     });
   }
@@ -253,15 +292,30 @@ function buildDebugPayload(args: {
   lastPage: number;
   timedOut: boolean;
   diagnostics?: DiagnosticsCounters;
+  lookbackWindowsTried?: number[];
+  ordersFetched?: number;
 }) {
-  return { ...args, ordersUpstream: args.ordersTrace, menuUpstream: args.menuTrace };
+  const lookback = Array.isArray(args.lookbackWindowsTried) ? args.lookbackWindowsTried : [];
+  const fetched = typeof args.ordersFetched === "number" ? args.ordersFetched : 0;
+  return {
+    ...args,
+    lookbackWindowsTried: lookback,
+    ordersFetched: fetched,
+    ordersUpstream: args.ordersTrace,
+    menuUpstream: args.menuTrace,
+  };
 }
 
 async function fetchOrdersFromWorker(
   env: AppEnv,
   originalRequest: Request,
-  url: URL
+  url: URL,
+  options: { minutes?: number; rangeMode?: boolean } = {}
 ): Promise<FetchResult<OrdersLatestResponse>> {
+  const { minutes, rangeMode: optionsRangeMode = false } = options ?? {};
+  if (!optionsRangeMode && typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) {
+    url.searchParams.set("minutes", String(minutes));
+  }
   const trace = createTrace(url, "direct");
 
   try {
