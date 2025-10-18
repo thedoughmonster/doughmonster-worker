@@ -1210,3 +1210,22 @@ test('items-expanded prioritizes webhook-derived fulfillment status over selecti
   assert.equal(order.orderData.fulfillmentStatus, 'READY_FOR_PICKUP');
   assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['HOLD']);
 });
+
+test('items-expanded surfaces menu cache info and upstream diagnostics', async () => {
+  const handler = createHandlerWithOrders([], { menus: [] }, { menuCacheHit: true });
+  const request = new Request('https://worker.test/api/items-expanded?debug=1&limit=5');
+  const response = await handler(createEnv(), request);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(Array.isArray(body.orders), true);
+  assert.equal(body.orders.length, 0);
+  assert.equal(body.cacheInfo.menu, 'hit-fresh');
+  assert.equal(body.cacheInfo.menuUpdatedAt, '2024-01-01T00:00:00Z');
+  assert.equal(typeof body.debug, 'object');
+  assert.equal(body.debug.menuUpstream.ok, true);
+  assert.equal(body.debug.menuUpstream.status, 200);
+  assert.equal(typeof body.debug.menuUpstream.absoluteUrl, 'string');
+  assert.ok(body.debug.menuUpstream.absoluteUrl.includes('/api/menus'));
+  assert.equal(body.debug.menuUpstream.snippet, null);
+});
