@@ -1,34 +1,38 @@
 import type { AppEnv } from "../config/env.js";
-import { getDiningOptions } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
-import { buildSelfUrl, stringifyForLog } from "../lib/selfUrl.js";
-import handleOrdersLatest from "./api/orders/latest.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
-/**
- * items-expanded composes data from internal Worker endpoints (orders + menu)
- * so we can reuse the Worker KV cache instead of calling Toast APIs directly.
- */
-
-const defaultFetch: typeof fetch = (...args) => fetch(...args);
-
-const DEFAULT_LIMIT = 20;
-const MAX_LIMIT = 500;
-const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const DEFAULT_OUTPUT_LIMIT = 20;
+const MAX_OUTPUT_LIMIT = 500;
+const ORDERS_DEFAULT_LIMIT = 60;
+const ORDERS_UPSTREAM_MAX = 200;
 const HANDLER_TIME_BUDGET_MS = 3_000;
+const SNIPPET_LENGTH = 256;
+const TEXT_ENCODER = new TextEncoder();
 
-class UpstreamUnavailableError extends Error {
-  status = 502;
-  code = "UPSTREAM_UNAVAILABLE" as const;
+interface UpstreamTrace {
+  url: string;
+  absoluteUrl: string;
+  status: number | null;
+  ok: boolean | null;
+  bytes: number | null;
+  snippet: string | null;
+  cacheStatus?: string | null;
+  updatedAt?: string | null;
 }
 
-export interface ItemsExpandedDeps {
-  fetch: typeof fetch;
-  getDiningOptions: typeof getDiningOptions;
-}
+type ItemFulfillmentStatus = "NEW" | "HOLD" | "SENT" | "READY";
 
-export interface OrderItemModifier {
+type OrdersLatestResponse =
+  | { ok: true; data?: ToastOrder[]; orders?: ToastOrder[]; window?: { start?: string | null; end?: string | null } }
+  | { ok: false; error?: { message?: string } | string | null };
+
+type MenusResponse =
+  | { ok: true; menu: ToastMenusDocument | null; metadata?: { lastUpdated?: string | null }; cacheHit?: boolean }
+  | { ok: false; error?: { message?: string } | string | null };
+
+interface ExpandedOrderItemModifier {
   id: string | null;
   name: string;
   groupName?: string | null;
@@ -36,104 +40,47 @@ export interface OrderItemModifier {
   quantity: number;
 }
 
-export interface OrderItemMoney {
+interface ExpandedOrderItemMoney {
   baseItemPriceCents?: number;
   modifierTotalCents?: number;
   totalItemPriceCents?: number;
 }
 
-export interface ExpandedOrderItem {
+interface ExpandedOrderItem {
   lineItemId: string;
   menuItemId?: string | null;
   itemName: string;
   quantity: number;
-  fulfillmentStatus: ItemFulfillmentStatus | null;
-  modifiers: OrderItemModifier[];
+  fulfillmentStatus?: string | null;
+  modifiers: ExpandedOrderItemModifier[];
   specialInstructions?: string | null;
-  money?: OrderItemMoney;
+  money?: ExpandedOrderItemMoney;
 }
 
-export type OrderType =
-  | "TAKEOUT"
-  | "DELIVERY"
-  | "DINE_IN"
-  | "CURBSIDE"
-  | "DRIVE_THRU"
-  | "CATERING"
-  | "UNKNOWN";
+type OrderType = "TAKEOUT" | "DELIVERY" | "DINE_IN" | "CURBSIDE" | "DRIVE_THRU" | "CATERING" | "UNKNOWN";
 
-type ItemFulfillmentStatus = "NEW" | "HOLD" | "SENT" | "READY";
-
-const FULFILLMENT_STATUS_RANK: Record<ItemFulfillmentStatus, number> = {
-  NEW: 0,
-  HOLD: 1,
-  SENT: 2,
-  READY: 3,
-};
-
-function normalizeItemFulfillmentStatus(value: unknown): ItemFulfillmentStatus | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim().toUpperCase();
-  if (!trimmed) {
-    return null;
-  }
-
-  if (trimmed === "NEW" || trimmed === "HOLD" || trimmed === "SENT" || trimmed === "READY") {
-    return trimmed as ItemFulfillmentStatus;
-  }
-
-  return null;
-}
-
-function mergeFulfillmentStatuses(
-  current: ItemFulfillmentStatus | null,
-  next: ItemFulfillmentStatus | null
-): ItemFulfillmentStatus | null {
-  if (!next) {
-    return current;
-  }
-
-  if (!current) {
-    return next;
-  }
-
-  const nextRank = FULFILLMENT_STATUS_RANK[next];
-  const currentRank = FULFILLMENT_STATUS_RANK[current];
-
-  if (nextRank >= currentRank) {
-    return next;
-  }
-
-  return current;
-}
-
-export interface OrderDataBlock {
-  orderId: string;
-  location: { locationId?: string | null };
-  orderTime: string;
-  timeDue: string | null;
-  orderNumber: string | null;
-  checkId: string | null;
-  status: string | null;
-  fulfillmentStatus: string | null;
-  customerName: string | null;
-  orderType: OrderType;
-  diningOptionGuid: string | null;
-  deliveryState?: string | null;
-  deliveryInfo?: Record<string, unknown>;
-  curbsidePickupInfo?: Record<string, unknown>;
-  table?: Record<string, unknown>;
-  seats?: number[];
-  employee?: Record<string, unknown>;
-  promisedDate?: string;
-  estimatedFulfillmentDate?: string;
-}
-
-export interface ExpandedOrder {
-  orderData: OrderDataBlock;
+interface ExpandedOrder {
+  orderData: {
+    orderId: string;
+    location: { locationId?: string | null };
+    orderTime: string;
+    timeDue: string | null;
+    orderNumber: string | null;
+    checkId: string | null;
+    status: string | null;
+    fulfillmentStatus: string | null;
+    customerName: string | null;
+    orderType: OrderType;
+    diningOptionGuid: string | null;
+    deliveryState?: string | null;
+    deliveryInfo?: Record<string, unknown> | null;
+    curbsidePickupInfo?: Record<string, unknown> | null;
+    table?: Record<string, unknown> | null;
+    seats?: number[];
+    employee?: Record<string, unknown> | null;
+    promisedDate?: string | null;
+    estimatedFulfillmentDate?: string | null;
+  };
   currency?: string | null;
   items: ExpandedOrderItem[];
   totals: {
@@ -146,1890 +93,566 @@ export interface ExpandedOrder {
   };
 }
 
-interface OrderAccumulator {
-  key: string;
-  orderId: string;
-  orderNumber: string | null;
-  checkId: string | null;
-  status: string | null;
-  webhookFulfillmentStatus: string | null;
-  selectionFulfillmentStatus: ItemFulfillmentStatus | null;
-  hasItemFulfillmentStatuses: boolean;
-  anyItemStatusNotReady: boolean;
-  allItemStatusesReady: boolean;
-  currency: string | null;
-  customerName: string | null;
-  orderType: OrderType;
-  diningOptionGuid: string | null;
-  locationId: string | null;
-  orderTime: string;
-  orderTimeMs: number | null;
-  timeDue: string | null;
-  deliveryState: string | null;
-  deliveryInfo?: Record<string, unknown> | null;
-  curbsidePickupInfo?: Record<string, unknown> | null;
-  dineInTable?: Record<string, unknown> | null;
-  dineInSeatNumbers: Set<number>;
-  dineInEmployee?: Record<string, unknown> | null;
-  takeoutPromisedDate: string | null;
-  takeoutEstimatedFulfillmentDate: string | null;
-  items: ExpandedOrderItem[];
-  baseItemsSubtotalCents: number;
-  modifiersSubtotalCents: number;
-  discountTotalCents: number;
-  serviceChargeCents: number;
-  tipCents: number;
-  checkTotalsHydrated: boolean;
-}
-
-interface ItemSortMetadata {
-  displayOrder: number | null;
-  createdTimeMs: number | null;
-  receiptLinePosition: number | null;
-  selectionIndex: number | null;
-  seatNumber: number | null;
-  itemNameLower: string;
-}
-
-interface OrderBehaviorMetadata {
-  orderType: OrderType;
-  diningOptionGuid: string | null;
-  deliveryState?: string | null;
-  deliveryInfo?: Record<string, unknown> | null;
-  curbsidePickupInfo?: Record<string, unknown> | null;
-  dineInTable?: Record<string, unknown> | null;
-  dineInSeats?: number[];
-  dineInEmployee?: Record<string, unknown> | null;
-  takeoutPromisedDate?: string | null;
-  takeoutEstimatedFulfillmentDate?: string | null;
-}
-
-interface DiningOptionRecord {
-  guid: string;
-  behavior: string | null;
-  name: string | null;
-}
-
 interface DiagnosticsCounters {
-  dropped_time_parse: number;
-  dropped_location_status: number;
-  dropped_voided: number;
-  dropped_non_lineitem: number;
-  pages_fetched: number;
-  orders_seen: number;
-  qualifying_found: number;
-  lookback_windows_used: number;
+  ordersSeen: number;
+  checksSeen: number;
+  itemsIncluded: number;
+  dropped: { ordersVoided: number; ordersTimeParse: number; selectionsVoided: number; selectionsFiltered: number };
+  totals: {
+    baseItemsSubtotalCents: number;
+    modifiersSubtotalCents: number;
+    discountTotalCents: number;
+    serviceChargeCents: number;
+    tipCents: number;
+    grandTotalCents: number;
+  };
 }
 
-interface OrdersLatestResponseBody {
-  ok: boolean;
-  data?: ToastOrder[];
-  detail?: string;
-  error?: unknown;
-}
+export default async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
+  const startedAt = Date.now();
+  const requestId = Math.random().toString(36).slice(2, 10);
+  const url = new URL(request.url);
+  const origin = url.origin;
 
-interface MenusResponseBody {
-  ok: boolean;
-  menu: ToastMenusDocument | null;
-  metadata?: { lastUpdated?: string | null } | null;
-  cacheHit?: boolean;
-  error?: unknown;
-}
+  const debugRequested = url.searchParams.get("debug") === "1";
+  const refreshRequested = url.searchParams.get("refresh") === "1";
+  const finalLimit = clamp(parseNumber(url.searchParams.get("limit"), DEFAULT_OUTPUT_LIMIT), 1, MAX_OUTPUT_LIMIT);
+  const startParam = url.searchParams.get("start");
+  const endParam = url.searchParams.get("end");
+  const statusParam = url.searchParams.get("status");
+  const locationParam = url.searchParams.get("locationId");
+  const detailParam = url.searchParams.get("detail");
+  const upstreamLimit = clamp(parseNumber(url.searchParams.get("limit"), ORDERS_DEFAULT_LIMIT), 1, ORDERS_UPSTREAM_MAX);
 
-interface FetchOrdersOptions {
-  fetchLimit: number;
-  statusParam: string | null;
-  locationParam: string | null;
-  effectiveStart: Date | null;
-  effectiveEnd: Date | null;
-  rangeMode: boolean;
-}
+  const ordersUrl = new URL("/api/orders/latest", origin);
+  ordersUrl.searchParams.set("limit", String(upstreamLimit));
+  ordersUrl.searchParams.set("detail", detailParam ?? "full");
+  if (startParam) ordersUrl.searchParams.set("start", startParam);
+  if (endParam) ordersUrl.searchParams.set("end", endParam);
+  if (statusParam) ordersUrl.searchParams.set("status", statusParam);
+  if (locationParam) ordersUrl.searchParams.set("locationId", locationParam);
 
-interface MenuFetchResult {
-  document: ToastMenusDocument | null;
-  cacheStatus: string;
-  updatedAt: string | null;
-}
+  const menuUrl = new URL("/api/menus", origin);
+  if (refreshRequested) menuUrl.searchParams.set("refresh", "1");
 
-interface UpstreamTrace {
-  url: string | null;
-  absoluteUrl: string | null;
-  status: number | null;
-  ok: boolean | null;
-  bytes: number | null;
-  snippet: string | null;
-}
+  const [ordersResult, menuResult] = await Promise.all([
+    fetchJsonWithTrace<OrdersLatestResponse>(ordersUrl, request),
+    fetchJsonWithTrace<MenusResponse>(menuUrl, request),
+  ]);
 
-interface OrdersUpstreamTrace extends UpstreamTrace {
-  internalFallbackUsed: boolean;
-  fallbackStatus: number | null;
-  fallbackSnippet: string | null;
-}
+  const timingMs = Date.now() - startedAt;
+  const ordersTrace = ordersResult.trace;
+  const menuTrace = menuResult.trace;
 
-interface MenuUpstreamTrace extends UpstreamTrace {
-  cacheStatus: string | null;
-  updatedAt: string | null;
-}
+  const ordersPayload = ordersResult.ok ? ordersResult.data : null;
+  const menuPayload = menuResult.ok ? menuResult.data : null;
+  const ordersOk = Boolean(ordersPayload && (ordersPayload as OrdersLatestResponse).ok);
+  const menuOk = Boolean(menuPayload && (menuPayload as MenusResponse).ok);
 
-interface UpstreamTraceContainer {
-  orders: OrdersUpstreamTrace;
-  menu: MenuUpstreamTrace;
-}
-
-export function createItemsExpandedHandler(
-  deps: ItemsExpandedDeps = {
-    fetch: defaultFetch,
-    getDiningOptions,
-  }
-) {
-  const diningOptionResolver = createDiningOptionResolver(deps.getDiningOptions);
-  return async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
-    const url = new URL(request.url);
-
-    const originSeen = url.origin;
-    const selfOrigin = url.searchParams.get("selfOrigin") ?? undefined;
-
-    const requestId = crypto.randomUUID();
-    const t0 = Date.now();
-
-    const debugParam = url.searchParams.get("debug");
-    const enableDiagnostics =
-      typeof debugParam === "string" && ["1", "true", "debug"].includes(debugParam.toLowerCase());
-
-    const traces: UpstreamTraceContainer = {
-      orders: {
-        url: null,
-        absoluteUrl: null,
-        status: null,
-        ok: null,
-        bytes: null,
-        snippet: null,
-        internalFallbackUsed: false,
-        fallbackStatus: null,
-        fallbackSnippet: null,
+  if (!ordersResult.ok || !menuResult.ok || !ordersOk || !menuOk) {
+    const ordersBody = ordersOk ? (ordersPayload as OrdersLatestResponse & { ok: true }) : null;
+    const debug = buildDebugPayload({
+      requestId,
+      timingMs,
+      ordersTrace,
+      menuTrace,
+      window: {
+        startIso: ordersBody?.window?.start ?? startParam ?? null,
+        endIso: ordersBody?.window?.end ?? endParam ?? null,
       },
-      menu: {
-        url: null,
-        absoluteUrl: null,
-        status: null,
-        ok: null,
-        bytes: null,
-        snippet: null,
-        cacheStatus: null,
-        updatedAt: null,
-      },
-    };
-
-    const now = new Date();
-    const endParam = url.searchParams.get("end");
-    const startParam = url.searchParams.get("start");
-    const statusParam = url.searchParams.get("status");
-    const locationParam = url.searchParams.get("locationId");
-    const limitParam = url.searchParams.get("limit");
-
-    const parsedEnd = parseDateParam(endParam);
-    const requestedLimit =
-      limitParam !== null && limitParam !== "" ? Number(limitParam) : Number.NaN;
-    const limit = clampNumber(Number.isFinite(requestedLimit) ? requestedLimit : DEFAULT_LIMIT, 1, MAX_LIMIT);
-
-    const diagnostics: DiagnosticsCounters = {
-      dropped_time_parse: 0,
-      dropped_location_status: 0,
-      dropped_voided: 0,
-      dropped_non_lineitem: 0,
-      pages_fetched: 0,
-      orders_seen: 0,
-      qualifying_found: 0,
-      lookback_windows_used: 0,
-    };
-
-    let pagesProcessed = 0;
-    let lastPage = 1;
-    let lastWindowStartIso: string | null = null;
-    let lastWindowEndIso: string | null = null;
-    let qualifyingCount = 0;
-
-    const buildHeaders = () => ({
-      "content-type": "application/json; charset=utf-8",
-      "x-request-id": requestId,
-      "x-items-expanded-debug": "1",
-      "x-up-orders-status": traces.orders.status !== null ? String(traces.orders.status) : "",
-      "x-up-menu-status": traces.menu.status !== null ? String(traces.menu.status) : "",
-      "x-qualifying-found": String(qualifyingCount),
+      limit: finalLimit,
+      originSeen: origin,
+      lastPage: 1,
+      timedOut: false,
     });
 
-    const buildDebugObject = (includeLastPage: boolean) => {
-      diagnostics.qualifying_found = qualifyingCount;
-      const debugBase = {
-        requestId,
-        timingMs: Date.now() - t0,
-        ordersUpstream: { ...traces.orders },
-        menuUpstream: { ...traces.menu },
-        diagnostics: { ...diagnostics },
-        window: {
-          startIso: lastWindowStartIso,
-          endIso: lastWindowEndIso,
-        },
-        limit,
-        pagesProcessed,
-        originSeen,
-        selfOriginOverride: selfOrigin ?? null,
-      };
-
-      if (includeLastPage) {
-        return {
-          ...debugBase,
-          lastPage,
-        };
-      }
-
-      return debugBase;
-    };
-
-    const respondWithError = (status: number, message: string, code = "BAD_REQUEST") => {
-      const headers = enableDiagnostics ? buildHeaders() : undefined;
-      const debugPayload = enableDiagnostics ? buildDebugObject(true) : undefined;
-      return errorResponse(status, message, code, {
-        headers,
-        debug: debugPayload,
-      });
-    };
-
-    if (endParam && !(parsedEnd instanceof Date && !isNaN(parsedEnd.getTime()))) {
-      return respondWithError(400, "Invalid end parameter");
-    }
-
-    const parsedStart = parseDateParam(startParam);
-    if (startParam && !(parsedStart instanceof Date && !isNaN(parsedStart.getTime()))) {
-      return respondWithError(400, "Invalid start parameter");
-    }
-
-    const rangeMode = Boolean(parsedStart || parsedEnd);
-
-    let effectiveStart: Date | null = null;
-    let effectiveEnd: Date | null = null;
-
-    if (rangeMode) {
-      effectiveEnd = parsedEnd ? new Date(parsedEnd.getTime()) : new Date(now.getTime());
-      if (parsedStart) {
-        effectiveStart = new Date(parsedStart.getTime());
-      } else {
-        const anchor = parsedEnd ?? effectiveEnd;
-        effectiveStart = new Date(anchor.getTime() - DEFAULT_FALLBACK_RANGE_MS);
-      }
-
-      if (effectiveStart.getTime() >= effectiveEnd.getTime()) {
-        return respondWithError(400, "start must be before end");
-      }
-    }
-
-    if (rangeMode) {
-      lastWindowStartIso = effectiveStart ? toToastIsoUtc(effectiveStart) : null;
-      lastWindowEndIso = effectiveEnd ? toToastIsoUtc(effectiveEnd) : null;
-    }
-
-    const aggregates = new Map<string, OrderAccumulator>();
-    const processedKeys = new Set<string>();
-    const qualifyingKeys = new Set<string>();
-    const itemSortMetadata = new WeakMap<ExpandedOrderItem, ItemSortMetadata>();
-
-    const ordersFetchLimit = Math.min(MAX_LIMIT, Math.max(limit, limit * 3));
-
-    try {
-      const refreshParam = url.searchParams.get("refresh");
-      const ordersUrl = buildSelfUrl(request, "api/orders/latest", selfOrigin);
-      const menusUrl = buildSelfUrl(request, "api/menus", selfOrigin);
-
-      if (enableDiagnostics) {
-        console.debug("items-expanded self-fetch targets", {
-          requestId,
-          ordersAbsoluteUrl: stringifyForLog(ordersUrl),
-          menuAbsoluteUrl: stringifyForLog(menusUrl),
-          selfOriginOverride: selfOrigin ?? null,
-        });
-      }
-
-      const [ordersData, menuFetchResult] = await Promise.all([
-        fetchOrdersFromWorker(
-          deps.fetch,
-          request,
-          env,
-          ordersUrl,
-          {
-            fetchLimit: ordersFetchLimit,
-            statusParam,
-            locationParam,
-            effectiveStart,
-            effectiveEnd,
-            rangeMode,
-          },
-          traces,
-          requestId,
-          enableDiagnostics
-        ),
-        fetchMenuFromWorker(
-          deps.fetch,
-          request,
-          menusUrl,
-          refreshParam,
-          traces,
-          requestId,
-          enableDiagnostics
-        ),
-      ]);
-      diagnostics.lookback_windows_used = ordersData.length > 0 ? 1 : 0;
-
-      const { document: menuDoc, cacheStatus: menuCacheStatus, updatedAt: menuUpdatedAt } =
-        menuFetchResult;
-      traces.menu.cacheStatus = menuCacheStatus ?? null;
-      traces.menu.updatedAt = menuUpdatedAt ?? null;
-      const menuIndex = createMenuIndex(menuDoc);
-
-      const deadline = Date.now() + HANDLER_TIME_BUDGET_MS;
-      const timedOut = () => Date.now() > deadline;
-      const collectedEnough = () => qualifyingCount >= limit;
-      const markQualifying = (key: string, accumulator: OrderAccumulator) => {
-        const qualifies = accumulator.items.length > 0 || hasNonZeroTotals(accumulator);
-        const already = qualifyingKeys.has(key);
-        if (qualifies && !already) {
-          qualifyingKeys.add(key);
-          qualifyingCount += 1;
-        } else if (!qualifies && already) {
-          qualifyingKeys.delete(key);
-          qualifyingCount = Math.max(0, qualifyingCount - 1);
-        }
-      };
-
-      const processOrdersPage = async (
-        orders: ToastOrder[]
-      ): Promise<{ aborted: boolean }> => {
-        let aborted = false;
-
-        for (const order of orders) {
-          if (timedOut() || collectedEnough()) {
-            aborted = true;
-            break;
-          }
-
-          if (!order || typeof order.guid !== "string") {
-            continue;
-          }
-
-          diagnostics.orders_seen += 1;
-
-          if (!orderMatches(order, locationParam, statusParam, diagnostics)) {
-            continue;
-          }
-
-          const resolvedOrderTime = extractOrderTime(order, diagnostics);
-          if (!resolvedOrderTime) {
-            continue;
-          }
-
-          const orderTime = resolvedOrderTime.iso;
-          const orderTimeMs = resolvedOrderTime.ms;
-          const timeDue = extractOrderDueTime(order);
-          const orderNumber = extractOrderNumber(order);
-          const locationId = extractOrderLocation(order);
-          const orderStatus = extractOrderStatus(order);
-          const orderCurrency = extractOrderCurrency(order);
-
-          const checks = Array.isArray(order.checks) ? order.checks : [];
-          for (const check of checks) {
-            if (timedOut() || collectedEnough()) {
-              aborted = true;
-              break;
-            }
-
-            if (!check || typeof check.guid !== "string") {
-              continue;
-            }
-
-            if ((check as any)?.deleted) {
-              diagnostics.dropped_voided += 1;
-              continue;
-            }
-
-            const key = `${order.guid}:${check.guid}`;
-            if (processedKeys.has(key)) {
-              const existing = aggregates.get(key);
-              if (existing) {
-                markQualifying(key, existing);
-              }
-              continue;
-            }
-
-            const customerName = extractCustomerName(order, check);
-            const behaviorMeta = await resolveOrderBehavior(
-              env,
-              order,
-              check,
-              diningOptionResolver
-            );
-
-            if (timedOut() || collectedEnough()) {
-              aborted = true;
-              break;
-            }
-
-            const initialFulfillmentStatus = extractOrderFulfillmentStatus(order, check);
-            const webhookFulfillmentStatus = extractGuestOrderFulfillmentStatus(order, check);
-            const accumulator = getOrCreateAccumulator(aggregates, key, {
-              orderId: order.guid,
-              orderNumber,
-              checkId: check.guid ?? null,
-              status: orderStatus,
-              webhookFulfillmentStatus: webhookFulfillmentStatus ?? null,
-              selectionFulfillmentStatus: initialFulfillmentStatus ?? null,
-              currency: orderCurrency,
-              customerName,
-              orderType: behaviorMeta.orderType,
-              diningOptionGuid: behaviorMeta.diningOptionGuid,
-              locationId,
-              orderTime,
-              orderTimeMs,
-              timeDue,
-              deliveryState: behaviorMeta.deliveryState ?? null,
-              deliveryInfo: behaviorMeta.deliveryInfo ?? null,
-              curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
-              dineInTable: behaviorMeta.dineInTable ?? null,
-              dineInSeats: behaviorMeta.dineInSeats ?? [],
-              dineInEmployee: behaviorMeta.dineInEmployee ?? null,
-              takeoutPromisedDate: behaviorMeta.takeoutPromisedDate ?? null,
-              takeoutEstimatedFulfillmentDate:
-                behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
-            });
-
-            updateAccumulatorMeta(accumulator, {
-              orderNumber,
-              status: orderStatus,
-              webhookFulfillmentStatus: webhookFulfillmentStatus ?? null,
-              selectionFulfillmentStatus: initialFulfillmentStatus ?? null,
-              currency: orderCurrency,
-              customerName,
-              orderType: behaviorMeta.orderType,
-              diningOptionGuid: behaviorMeta.diningOptionGuid,
-              locationId,
-              orderTime,
-              orderTimeMs,
-              timeDue,
-              deliveryState: behaviorMeta.deliveryState ?? null,
-              deliveryInfo: behaviorMeta.deliveryInfo ?? null,
-              curbsidePickupInfo: behaviorMeta.curbsidePickupInfo ?? null,
-              dineInTable: behaviorMeta.dineInTable ?? null,
-              dineInSeats: behaviorMeta.dineInSeats ?? [],
-              dineInEmployee: behaviorMeta.dineInEmployee ?? null,
-              takeoutPromisedDate: behaviorMeta.takeoutPromisedDate ?? null,
-              takeoutEstimatedFulfillmentDate:
-                behaviorMeta.takeoutEstimatedFulfillmentDate ?? null,
-            });
-
-            processedKeys.add(key);
-
-            const selections = Array.isArray(check.selections) ? check.selections : [];
-            for (let selectionIndex = 0; selectionIndex < selections.length; selectionIndex += 1) {
-              const selection = selections[selectionIndex];
-              if (timedOut() || collectedEnough()) {
-                aborted = true;
-                break;
-              }
-
-              if (!selection || typeof selection !== "object") {
-                continue;
-              }
-
-              if (isSelectionVoided(selection as ToastSelection)) {
-                diagnostics.dropped_voided += 1;
-                continue;
-              }
-
-              if (!isLineItem(selection as ToastSelection)) {
-                diagnostics.dropped_non_lineitem += 1;
-                continue;
-              }
-
-              const lineItemId = resolveSelectionLineItemId(
-                order.guid,
-                check.guid ?? null,
-                selection as ToastSelection,
-                selectionIndex
-              );
-              if (!lineItemId) {
-                diagnostics.dropped_non_lineitem += 1;
-                continue;
-              }
-
-              const selectionFulfillmentStatus = normalizeItemFulfillmentStatus(
-                (selection as any)?.fulfillmentStatus
-              );
-              if (selectionFulfillmentStatus) {
-                accumulator.selectionFulfillmentStatus = mergeFulfillmentStatuses(
-                  accumulator.selectionFulfillmentStatus,
-                  selectionFulfillmentStatus
-                );
-                accumulator.hasItemFulfillmentStatuses = true;
-                if (selectionFulfillmentStatus === "READY") {
-                  if (!accumulator.anyItemStatusNotReady) {
-                    accumulator.allItemStatusesReady = true;
-                  }
-                } else {
-                  accumulator.anyItemStatusNotReady = true;
-                  accumulator.allItemStatusesReady = false;
-                }
-              }
-
-              const menuItem = menuIndex.findItem((selection as ToastSelection).item);
-              const itemName =
-                getKitchenTicketName(menuItem) ??
-                getSelectionDisplayName(selection as ToastSelection) ??
-                (selection as any)?.item?.guid ??
-                "Unknown item";
-
-              const menuItemId =
-                typeof (selection as any)?.item?.guid === "string" && (selection as any).item.guid
-                  ? (selection as any).item.guid
-                  : null;
-              const quantity = normalizeQuantity((selection as ToastSelection).quantity);
-              const modifierDetails = collectModifierDetails(
-                selection as ToastSelection,
-                menuIndex,
-                quantity
-              );
-              const specialInstructions = extractSpecialInstructions(selection as ToastSelection, itemName);
-              const unitPrice = extractReceiptLinePrice(selection as ToastSelection);
-              const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
-              const baseTotalCents =
-                baseEachCents !== null ? baseEachCents * quantity : null;
-              const totalItemPriceCents = toCents((selection as any)?.price);
-              const computedTotal =
-                baseTotalCents !== null
-                  ? baseTotalCents + modifierDetails.totalCents
-                  : modifierDetails.totalCents !== 0
-                  ? modifierDetails.totalCents
-                  : null;
-              let resolvedTotal: number | null = null;
-              if (totalItemPriceCents !== null && computedTotal !== null) {
-                resolvedTotal = Math.max(totalItemPriceCents, computedTotal);
-              } else {
-                resolvedTotal = totalItemPriceCents ?? computedTotal ?? baseTotalCents;
-              }
-              let resolvedBase = baseTotalCents;
-              if (resolvedBase === null && resolvedTotal !== null) {
-                resolvedBase = Math.max(resolvedTotal - modifierDetails.totalCents, 0);
-              }
-              if (resolvedBase !== null) {
-                resolvedBase = Math.max(resolvedBase, 0);
-              }
-
-              const money: OrderItemMoney = {};
-              if (resolvedBase !== null) {
-                money.baseItemPriceCents = resolvedBase;
-              }
-              if (modifierDetails.totalCents !== 0) {
-                money.modifierTotalCents = modifierDetails.totalCents;
-              }
-              if (resolvedTotal !== null) {
-                resolvedTotal = Math.max(resolvedTotal, 0);
-                money.totalItemPriceCents = resolvedTotal;
-              }
-
-              const item: ExpandedOrderItem = {
-                lineItemId,
-                menuItemId,
-                itemName,
-                quantity,
-                fulfillmentStatus: selectionFulfillmentStatus ?? null,
-                modifiers: modifierDetails.modifiers,
-              };
-
-              if (specialInstructions) {
-                item.specialInstructions = specialInstructions;
-              }
-
-              if (Object.keys(money).length > 0) {
-                item.money = money;
-              }
-
-              accumulator.items.push(item);
-              itemSortMetadata.set(
-                item,
-                buildItemSortMetadata(selection as ToastSelection, itemName, selectionIndex)
-              );
-
-              if (resolvedBase !== null) {
-                accumulator.baseItemsSubtotalCents += resolvedBase;
-              }
-
-              if (modifierDetails.totalCents !== 0) {
-                accumulator.modifiersSubtotalCents += modifierDetails.totalCents;
-              }
-
-              const selectionDiscountCents = sumDiscountAmounts(
-                (selection as any)?.appliedDiscounts
-              );
-              if (selectionDiscountCents > 0) {
-                accumulator.discountTotalCents += selectionDiscountCents;
-              }
-
-              markQualifying(key, accumulator);
-
-              if (timedOut() || collectedEnough()) {
-                aborted = true;
-                break;
-              }
-            }
-
-            if (aborted) {
-              break;
-            }
-
-            if (!accumulator.checkTotalsHydrated) {
-              const checkDiscountCents = sumDiscountAmounts((check as any)?.appliedDiscounts);
-              if (checkDiscountCents > 0) {
-                accumulator.discountTotalCents += checkDiscountCents;
-              }
-
-              const serviceChargeCents = sumServiceCharges((check as any)?.appliedServiceCharges);
-              if (serviceChargeCents > 0) {
-                accumulator.serviceChargeCents += serviceChargeCents;
-              }
-
-              const tipCents = sumTipAmounts((check as any)?.payments);
-              if (tipCents > 0) {
-                accumulator.tipCents += tipCents;
-              }
-
-              accumulator.checkTotalsHydrated = true;
-            }
-
-            markQualifying(key, accumulator);
-
-            if (timedOut() || collectedEnough()) {
-              aborted = true;
-              break;
-            }
-          }
-
-          if (aborted) {
-            break;
-          }
-        }
-
-        return { aborted };
-      };
-
-      if (ordersData.length > 0) {
-        const { aborted } = await processOrdersPage(ordersData);
-        pagesProcessed = 1;
-
-        if (aborted && !timedOut() && !collectedEnough()) {
-          lastPage = 1;
-        }
-      } else {
-        pagesProcessed = 0;
-      }
-
-      diagnostics.pages_fetched = pagesProcessed;
-
-      const ordered = Array.from(aggregates.values())
-        .filter((entry) => entry.items.length > 0 || hasNonZeroTotals(entry))
-        .sort((a, b) => compareAggregatedOrdersByOrderTime(a, b));
-
-      const limited = ordered.slice(0, limit);
-
-      const ordersResponse = limited.map((entry) =>
-        toExpandedOrder(entry, itemSortMetadata)
-      );
-
-      diagnostics.qualifying_found = qualifyingCount;
-      if (enableDiagnostics) {
-        console.debug("items-expanded diagnostics", {
-          ...diagnostics,
-          aggregates: aggregates.size,
-          qualifying_keys: qualifyingKeys.size,
-          pages_processed: pagesProcessed,
-        });
-      }
-
-      const responseBody: Record<string, unknown> = {
-        orders: ordersResponse,
-        cacheInfo: {
-          menu: menuCacheStatus,
-          menuUpdatedAt: menuUpdatedAt ?? undefined,
-        },
-      };
-
-      if (enableDiagnostics) {
-        responseBody.debug = buildDebugObject(false);
-      }
-
-      const responseInit = enableDiagnostics ? { headers: buildHeaders() } : undefined;
-
-      return jsonResponse(responseBody, responseInit);
-    } catch (err: any) {
-      const status = typeof err?.status === "number" ? err.status : 500;
-      const code = typeof err?.code === "string" ? err.code : status === 500 ? "INTERNAL_ERROR" : "ERROR";
-      const message =
-        typeof err?.message === "string"
-          ? err.message
-          : typeof err?.bodySnippet === "string"
-          ? err.bodySnippet
-          : "Unexpected error";
-
-      console.error("items-expanded error", {
-        status,
-        code,
-        page: lastPage,
-        pages: pagesProcessed,
-        startIso: lastWindowStartIso,
-        endIso: lastWindowEndIso,
-        error: err,
-      });
-
-      diagnostics.qualifying_found = qualifyingCount;
-      if (enableDiagnostics) {
-        console.debug("items-expanded diagnostics", {
-          ...diagnostics,
-          aggregates: aggregates.size,
-          qualifying_keys: qualifyingKeys.size,
-          pages_processed: pagesProcessed,
-        });
-      }
-
-      return respondWithError(status, message, code);
-    }
+    const message = !ordersResult.ok
+      ? ordersResult.error.message
+      : !menuResult.ok
+      ? menuResult.error.message
+      : !ordersOk
+      ? extractErrorMessage(ordersPayload as OrdersLatestResponse)
+      : extractErrorMessage(menuPayload as MenusResponse);
+
+    return jsonResponse(
+      {
+        error: { message: message ?? "Upstream service unavailable", code: "UPSTREAM_UNAVAILABLE" },
+        debug,
+      },
+      { status: 502 }
+    );
+  }
+
+  const ordersBody = ordersPayload as OrdersLatestResponse & { ok: true };
+  const menuBody = menuPayload as MenusResponse & { ok: true };
+
+  menuTrace.cacheStatus = menuBody.cacheHit ? "hit-fresh" : "miss-network";
+  menuTrace.updatedAt = menuBody.metadata?.lastUpdated ?? null;
+
+  const build = buildExpandedOrders({
+    ordersPayload: ordersBody,
+    menuDocument: menuBody.menu ?? null,
+    limit: finalLimit,
+    startedAt,
+  });
+
+  const response: any = {
+    orders: build.orders,
+    cacheInfo: {
+      menu: menuBody.cacheHit ? "hit-fresh" : "miss-network",
+      menuUpdatedAt: menuBody.metadata?.lastUpdated ?? null,
+    },
   };
+
+  if (debugRequested) {
+    response.debug = buildDebugPayload({
+      requestId,
+      timingMs,
+      ordersTrace,
+      menuTrace,
+      window: {
+        startIso: ordersBody.window?.start ?? startParam ?? null,
+        endIso: ordersBody.window?.end ?? endParam ?? null,
+      },
+      limit: finalLimit,
+      originSeen: origin,
+      lastPage: 1,
+      timedOut: build.timedOut,
+      diagnostics: build.diagnostics,
+    });
+  }
+
+  return jsonResponse(response);
 }
 
-export default createItemsExpandedHandler();
-
-function parseDateParam(value: string | null): Date | null {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Date.parse(value);
-  if (Number.isNaN(parsed)) {
-    return null;
-  }
-
-  return new Date(parsed);
+function buildDebugPayload(args: {
+  requestId: string;
+  timingMs: number;
+  ordersTrace: UpstreamTrace;
+  menuTrace: UpstreamTrace;
+  window: { startIso: string | null; endIso: string | null };
+  limit: number;
+  originSeen: string;
+  lastPage: number;
+  timedOut: boolean;
+  diagnostics?: DiagnosticsCounters;
+}) {
+  return { ...args, ordersUpstream: args.ordersTrace, menuUpstream: args.menuTrace };
 }
 
-function clampNumber(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.min(max, Math.max(min, Math.floor(value)));
-}
+async function fetchJsonWithTrace<T>(url: URL, originalRequest: Request): Promise<
+  | { ok: true; data: T; trace: UpstreamTrace }
+  | { ok: false; error: Error; trace: UpstreamTrace }
+> {
+  const trace: UpstreamTrace = {
+    url: `${url.pathname}${url.search}`,
+    absoluteUrl: url.toString(),
+    status: null,
+    ok: null,
+    bytes: null,
+    snippet: null,
+  };
 
-function toToastIsoUtc(date: Date): string {
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-  const yyyy = date.getUTCFullYear();
-  const MM = pad(date.getUTCMonth() + 1);
-  const dd = pad(date.getUTCDate());
-  const HH = pad(date.getUTCHours());
-  const mm = pad(date.getUTCMinutes());
-  const ss = pad(date.getUTCSeconds());
-  const mmm = pad(date.getUTCMilliseconds(), 3);
-  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}.${mmm}+0000`;
-}
-
-function errorResponse(
-  status: number,
-  message: string,
-  code = "BAD_REQUEST",
-  options?: { debug?: Record<string, unknown>; headers?: Record<string, string> }
-): Response {
-  const body: Record<string, unknown> = { error: { message, code } };
-  if (options?.debug) {
-    body.debug = options.debug;
-  }
-
-  if (options?.headers) {
-    return jsonResponse(body, { status, headers: options.headers });
-  }
-
-  return jsonResponse(body, { status });
-}
-
-async function fetchOrdersFromWorker(
-  fetcher: ItemsExpandedDeps["fetch"],
-  _request: Request,
-  env: AppEnv,
-  baseUrl: URL,
-  options: FetchOrdersOptions,
-  traceContainer: UpstreamTraceContainer | undefined,
-  requestId: string,
-  enableDiagnostics: boolean
-): Promise<ToastOrder[]> {
-  const url = new URL(baseUrl.toString());
-  url.searchParams.set("limit", String(Math.max(1, options.fetchLimit)));
-  url.searchParams.set("detail", "full");
-
-  if (options.statusParam) {
-    url.searchParams.set("status", options.statusParam);
-  }
-
-  if (options.locationParam) {
-    url.searchParams.set("locationId", options.locationParam);
-  }
-
-  if (options.rangeMode) {
-    if (options.effectiveStart) {
-      url.searchParams.set("start", toToastIsoUtc(options.effectiveStart));
-    }
-    if (options.effectiveEnd) {
-      url.searchParams.set("end", toToastIsoUtc(options.effectiveEnd));
-    }
-  }
-
-  const absoluteUrl = stringifyForLog(url);
-  const trace = traceContainer?.orders ?? null;
-  const relativeUrl = `${url.pathname}${url.search}`;
-  if (trace) {
-    trace.url = relativeUrl;
-    trace.absoluteUrl = absoluteUrl;
-    trace.status = null;
-    trace.ok = null;
-    trace.bytes = null;
-    trace.snippet = null;
-    trace.internalFallbackUsed = false;
-    trace.fallbackStatus = null;
-    trace.fallbackSnippet = null;
-  }
-
-  if (!/^https?:\/\//i.test(absoluteUrl)) {
-    throw new Error("Bad self URL");
-  }
-
-  if (enableDiagnostics) {
-    console.debug("items-expanded orders fetch", { requestId, absoluteUrl });
-  }
-
-  let response: Response;
   try {
-    response = await fetcher(absoluteUrl);
-  } catch (err) {
-    if (trace) {
-      trace.status = null;
-      trace.ok = false;
-      trace.bytes = null;
-      const snippet = err instanceof Error ? err.message : String(err ?? "");
-      trace.snippet = snippet ? snippet.slice(0, 512) : null;
-    }
-    const error = new UpstreamUnavailableError("Failed to load recent orders");
-    (error as any).cause = err;
-    (error as any).upstreamStatus = trace?.status ?? null;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? relativeUrl;
-    if (trace?.snippet) {
-      (error as any).bodySnippet = trace.snippet;
-    }
-    throw error;
-  }
-
-  if (trace) {
+    const response = await fetch(url.toString(), { method: "GET", headers: pickForwardHeaders(originalRequest.headers) });
     trace.status = response.status;
     trace.ok = response.ok;
-    const lengthHeader = response.headers.get("content-length");
-    const parsedLength = lengthHeader ? Number(lengthHeader) : Number.NaN;
-    trace.bytes = Number.isFinite(parsedLength) ? parsedLength : null;
-    trace.snippet = null;
-  }
-
-  if (response.status === 404) {
     const bodyText = await response.text().catch(() => "");
-    const snippet = bodyText.slice(0, 512);
-    const measuredBytes = new TextEncoder().encode(bodyText).length;
-    if (trace) {
-      trace.fallbackStatus = response.status;
-      trace.fallbackSnippet = snippet;
-      trace.bytes = measuredBytes;
-      trace.snippet = snippet;
+    trace.bytes = TEXT_ENCODER.encode(bodyText).length;
+    trace.snippet = bodyText.slice(0, SNIPPET_LENGTH);
+
+    if (!response.ok) {
+      const error = new Error(`Request failed with status ${response.status}`);
+      (error as any).upstreamStatus = response.status;
+      (error as any).upstreamBody = trace.snippet;
+      return { ok: false, error, trace };
     }
 
-    if (enableDiagnostics) {
-      console.debug("items-expanded orders fallback", {
-        requestId,
-        absoluteUrl,
-        fallbackStatus: response.status,
-      });
-    }
-
-    const internalRequest = new Request(absoluteUrl, { method: "GET" });
-    const internalResponse = await handleOrdersLatest(env, internalRequest);
-    const internalText = await internalResponse.text().catch(() => "");
-    const internalSnippet = internalText.slice(0, 512);
-    const internalBytes = new TextEncoder().encode(internalText).length;
-
-    if (trace) {
-      trace.status = internalResponse.status;
-      trace.ok = internalResponse.ok;
-      trace.bytes = internalBytes;
-      trace.snippet = internalSnippet;
-      trace.internalFallbackUsed = true;
-    }
-
-    if (!internalResponse.ok) {
-      const error = new UpstreamUnavailableError("Failed to load recent orders");
-      (error as any).bodySnippet = internalSnippet;
-      (error as any).upstreamStatus = internalResponse.status;
-      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-      throw error;
-    }
-
-    let payload: OrdersLatestResponseBody;
     try {
-      payload = JSON.parse(internalText) as OrdersLatestResponseBody;
+      const parsed = bodyText ? (JSON.parse(bodyText) as T) : ({} as T);
+      return { ok: true, data: parsed, trace };
     } catch (err) {
-      const error = new UpstreamUnavailableError("Failed to parse recent orders");
+      const error = new Error("Failed to parse upstream response");
       (error as any).cause = err;
-      (error as any).upstreamStatus = internalResponse.status;
-      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-      throw error;
+      return { ok: false, error, trace };
     }
-
-    if (!payload?.ok || !Array.isArray(payload.data)) {
-      const error = new UpstreamUnavailableError("Orders service unavailable");
-      (error as any).upstreamStatus = internalResponse.status;
-      (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-      throw error;
-    }
-
-    return payload.data;
-  }
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const snippet = bodyText.slice(0, 512);
-    const measuredBytes = new TextEncoder().encode(bodyText).length;
-    if (trace) {
-      trace.bytes = trace.bytes ?? measuredBytes;
-      trace.snippet = snippet;
-    }
-    const error = new UpstreamUnavailableError("Failed to load recent orders");
-    (error as any).bodySnippet = snippet;
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
-  }
-
-  let payload: OrdersLatestResponseBody;
-  try {
-    payload = (await response.json()) as OrdersLatestResponseBody;
   } catch (err) {
-    const error = new UpstreamUnavailableError("Failed to parse recent orders");
-    (error as any).cause = err;
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
+    const error = err instanceof Error ? err : new Error(String(err));
+    return { ok: false, error, trace };
   }
-
-  if (!payload?.ok || !Array.isArray(payload.data)) {
-    const error = new UpstreamUnavailableError("Orders service unavailable");
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
-  }
-
-  return payload.data;
 }
 
-async function fetchMenuFromWorker(
-  fetcher: ItemsExpandedDeps["fetch"],
-  _request: Request,
-  baseUrl: URL,
-  refreshParam: string | null,
-  traceContainer: UpstreamTraceContainer | undefined,
-  requestId: string,
-  enableDiagnostics: boolean
-): Promise<MenuFetchResult> {
-  const url = new URL(baseUrl.toString());
-  if (refreshParam) {
-    url.searchParams.set("refresh", refreshParam);
+function pickForwardHeaders(headers: Headers): HeadersInit {
+  const forwarded = new Headers();
+  for (const key of ["authorization", "cookie", "x-forwarded-for", "x-forwarded-proto", "cf-ray", "cf-connecting-ip"]) {
+    const value = headers.get(key);
+    if (value) forwarded.set(key, value);
   }
-
-  const absoluteUrl = stringifyForLog(url);
-  const trace = traceContainer?.menu ?? null;
-  const relativeUrl = `${url.pathname}${url.search}`;
-  if (trace) {
-    trace.url = relativeUrl;
-    trace.absoluteUrl = absoluteUrl;
-    trace.status = null;
-    trace.ok = null;
-    trace.bytes = null;
-    trace.snippet = null;
-    trace.cacheStatus = null;
-    trace.updatedAt = null;
-  }
-
-  if (enableDiagnostics) {
-    console.debug("items-expanded menu fetch", { requestId, absoluteUrl });
-  }
-
-  let response: Response;
-  try {
-    response = await fetcher(absoluteUrl);
-  } catch (err) {
-    if (trace) {
-      trace.status = null;
-      trace.ok = false;
-      trace.bytes = null;
-      const snippet = err instanceof Error ? err.message : String(err ?? "");
-      trace.snippet = snippet ? snippet.slice(0, 512) : null;
-    }
-    const error = new UpstreamUnavailableError("Failed to load menu document");
-    (error as any).cause = err;
-    (error as any).upstreamStatus = trace?.status ?? null;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    if (trace?.snippet) {
-      (error as any).bodySnippet = trace.snippet;
-    }
-    throw error;
-  }
-
-  if (trace) {
-    trace.status = response.status;
-    trace.ok = response.ok;
-    const lengthHeader = response.headers.get("content-length");
-    const parsedLength = lengthHeader ? Number(lengthHeader) : Number.NaN;
-    trace.bytes = Number.isFinite(parsedLength) ? parsedLength : null;
-    trace.snippet = null;
-  }
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const snippet = bodyText.slice(0, 512);
-    const measuredBytes = new TextEncoder().encode(bodyText).length;
-    if (trace) {
-      trace.bytes = trace.bytes ?? measuredBytes;
-      trace.snippet = snippet;
-    }
-    const error = new UpstreamUnavailableError("Failed to load menu document");
-    (error as any).bodySnippet = snippet;
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
-  }
-
-  let payload: MenusResponseBody;
-  try {
-    payload = (await response.json()) as MenusResponseBody;
-  } catch (err) {
-    const error = new UpstreamUnavailableError("Failed to parse menu document");
-    (error as any).cause = err;
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
-  }
-
-  if (!payload?.ok) {
-    const error = new UpstreamUnavailableError("Menu service unavailable");
-    (error as any).upstreamStatus = response.status;
-    (error as any).upstreamUrl = trace?.absoluteUrl ?? absoluteUrl;
-    throw error;
-  }
-
-  const updatedAt =
-    payload?.metadata && typeof payload.metadata?.lastUpdated === "string"
-      ? payload.metadata.lastUpdated
-      : null;
-
-  const cacheStatus = payload?.cacheHit ? "hit-fresh" : "miss-network";
-
-  if (trace) {
-    trace.cacheStatus = cacheStatus;
-    trace.updatedAt = updatedAt;
-  }
-
-  return {
-    document: payload?.menu ?? null,
-    cacheStatus,
-    updatedAt,
-  };
+  return forwarded;
 }
 
-function createMenuIndex(document: ToastMenusDocument | null) {
-  const itemsByGuid = new Map<string, ToastMenuItem>();
-  const itemsByMulti = new Map<string, ToastMenuItem>();
-  const itemsByReference = new Map<string | number, ToastMenuItem>();
-  const modifiersByGuid = new Map<string, ToastModifierOption>();
-  const modifiersByMulti = new Map<string, ToastModifierOption>();
-  const modifiersByReference = new Map<string | number, ToastModifierOption>();
-
-  if (document) {
-    for (const modifier of Object.values(document.modifierOptionReferences ?? {})) {
-      const modAny = modifier as any;
-      if (modAny?.guid) {
-        modifiersByGuid.set(modAny.guid, modifier as ToastModifierOption);
-      }
-      const multi = modAny?.multiLocationId;
-      if (multi) {
-        modifiersByMulti.set(String(multi), modifier as ToastModifierOption);
-      }
-      const referenceId = modAny?.referenceId;
-      if (referenceId !== undefined && referenceId !== null) {
-        modifiersByReference.set(referenceId, modifier as ToastModifierOption);
-      }
-    }
-
-    const stack: any[] = [];
-    for (const menu of document.menus ?? []) {
-      for (const group of menu.menuGroups ?? []) {
-        stack.push(group);
-      }
-    }
-
-    while (stack.length > 0) {
-      const group = stack.pop();
-      if (!group) {
-        continue;
-      }
-
-      for (const item of group.items ?? []) {
-        const itemAny = item as any;
-        if (itemAny?.guid) {
-          itemsByGuid.set(itemAny.guid, item as ToastMenuItem);
-        }
-        const multi = itemAny?.multiLocationId;
-        if (multi) {
-          itemsByMulti.set(String(multi), item as ToastMenuItem);
-        }
-        const referenceId = itemAny?.referenceId;
-        if (referenceId !== undefined && referenceId !== null) {
-          itemsByReference.set(referenceId, item as ToastMenuItem);
-        }
-      }
-
-      const childGroups = (group as any).menuGroups;
-      if (Array.isArray(childGroups)) {
-        for (const child of childGroups) {
-          stack.push(child);
-        }
-      }
-    }
-  }
-
-  return {
-    findItem(reference: ToastSelection["item"]): ToastMenuItem | undefined {
-      if (!reference) {
-        return undefined;
-      }
-
-      if (reference.guid && itemsByGuid.has(reference.guid)) {
-        return itemsByGuid.get(reference.guid);
-      }
-
-      const multi = (reference as any)?.multiLocationId;
-      if (multi && itemsByMulti.has(String(multi))) {
-        return itemsByMulti.get(String(multi));
-      }
-
-      const refId = (reference as any)?.referenceId;
-      if (refId !== undefined && refId !== null && itemsByReference.has(refId)) {
-        return itemsByReference.get(refId) as ToastMenuItem;
-      }
-
-      return undefined;
-    },
-    findModifier(reference: ToastSelection["item"]): ToastModifierOption | undefined {
-      if (!reference) {
-        return undefined;
-      }
-
-      if (reference.guid && modifiersByGuid.has(reference.guid)) {
-        return modifiersByGuid.get(reference.guid);
-      }
-
-      const multi = (reference as any)?.multiLocationId;
-      if (multi && modifiersByMulti.has(String(multi))) {
-        return modifiersByMulti.get(String(multi));
-      }
-
-      const refId = (reference as any)?.referenceId;
-      if (refId !== undefined && refId !== null && modifiersByReference.has(refId)) {
-        return modifiersByReference.get(refId) as ToastModifierOption;
-      }
-
-      return undefined;
-    },
-  };
-}
-
-function getOrCreateAccumulator(
-  aggregates: Map<string, OrderAccumulator>,
-  key: string,
-  seed: {
-    orderId: string;
-    orderNumber: string | null;
-    checkId: string | null;
-    status: string | null;
-    webhookFulfillmentStatus?: string | null;
-    selectionFulfillmentStatus?: ItemFulfillmentStatus | null;
-    currency: string | null;
-    customerName: string | null;
-    orderType: OrderType;
-    diningOptionGuid: string | null;
-    locationId: string | null;
-    orderTime: string;
-    orderTimeMs: number | null;
-    timeDue: string | null;
-    deliveryState?: string | null;
-    deliveryInfo?: Record<string, unknown> | null;
-    curbsidePickupInfo?: Record<string, unknown> | null;
-    dineInTable?: Record<string, unknown> | null;
-    dineInSeats?: number[];
-    dineInEmployee?: Record<string, unknown> | null;
-    takeoutPromisedDate?: string | null;
-    takeoutEstimatedFulfillmentDate?: string | null;
-  }
-): OrderAccumulator {
-  let existing = aggregates.get(key);
-  if (!existing) {
-    existing = {
-      key,
-      orderId: seed.orderId,
-      orderNumber: seed.orderNumber ?? null,
-      checkId: seed.checkId ?? null,
-      status: seed.status ?? null,
-      webhookFulfillmentStatus: seed.webhookFulfillmentStatus ?? null,
-      selectionFulfillmentStatus: seed.selectionFulfillmentStatus ?? null,
-      hasItemFulfillmentStatuses: false,
-      anyItemStatusNotReady: false,
-      allItemStatusesReady: true,
-      currency: seed.currency ?? null,
-      customerName: seed.customerName ?? null,
-      orderType: seed.orderType ?? "UNKNOWN",
-      diningOptionGuid: seed.diningOptionGuid ?? null,
-      locationId: seed.locationId ?? null,
-      orderTime: seed.orderTime,
-      orderTimeMs: seed.orderTimeMs ?? null,
-      timeDue: seed.timeDue ?? null,
-      deliveryState: seed.deliveryState ?? null,
-      deliveryInfo: seed.deliveryInfo ?? null,
-      curbsidePickupInfo: seed.curbsidePickupInfo ?? null,
-      dineInTable: seed.dineInTable ?? null,
-      dineInSeatNumbers: new Set(Array.isArray(seed.dineInSeats) ? seed.dineInSeats : []),
-      dineInEmployee: seed.dineInEmployee ?? null,
-      takeoutPromisedDate: seed.takeoutPromisedDate ?? null,
-      takeoutEstimatedFulfillmentDate: seed.takeoutEstimatedFulfillmentDate ?? null,
-      items: [],
+function buildExpandedOrders(args: {
+  ordersPayload: OrdersLatestResponse & { ok: true };
+  menuDocument: ToastMenusDocument | null;
+  limit: number;
+  startedAt: number;
+}): { orders: ExpandedOrder[]; diagnostics: DiagnosticsCounters; timedOut: boolean } {
+  const diagnostics: DiagnosticsCounters = {
+    ordersSeen: 0,
+    checksSeen: 0,
+    itemsIncluded: 0,
+    dropped: { ordersVoided: 0, ordersTimeParse: 0, selectionsVoided: 0, selectionsFiltered: 0 },
+    totals: {
       baseItemsSubtotalCents: 0,
       modifiersSubtotalCents: 0,
       discountTotalCents: 0,
       serviceChargeCents: 0,
       tipCents: 0,
-      checkTotalsHydrated: false,
-    };
-    aggregates.set(key, existing);
-  } else {
-    if (Array.isArray(seed.dineInSeats) && seed.dineInSeats.length > 0) {
-      for (const seat of seed.dineInSeats) {
-        if (typeof seat === "number" && Number.isFinite(seat)) {
-          existing.dineInSeatNumbers.add(seat);
-        }
-      }
-    }
-  }
-  return existing;
-}
-
-function updateAccumulatorMeta(
-  accumulator: OrderAccumulator,
-  meta: {
-    orderNumber: string | null;
-    status: string | null;
-    webhookFulfillmentStatus?: string | null;
-    selectionFulfillmentStatus?: ItemFulfillmentStatus | null;
-    currency: string | null;
-    customerName: string | null;
-    orderType: OrderType;
-    diningOptionGuid: string | null;
-    locationId: string | null;
-    orderTime: string;
-    orderTimeMs: number | null;
-    timeDue: string | null;
-    deliveryState?: string | null;
-    deliveryInfo?: Record<string, unknown> | null;
-    curbsidePickupInfo?: Record<string, unknown> | null;
-    dineInTable?: Record<string, unknown> | null;
-    dineInSeats?: number[];
-    dineInEmployee?: Record<string, unknown> | null;
-    takeoutPromisedDate?: string | null;
-    takeoutEstimatedFulfillmentDate?: string | null;
-  }
-): void {
-  if (meta.orderNumber && !accumulator.orderNumber) {
-    accumulator.orderNumber = meta.orderNumber;
-  }
-  if (meta.status && !accumulator.status) {
-    accumulator.status = meta.status;
-  }
-  if (meta.webhookFulfillmentStatus && !accumulator.webhookFulfillmentStatus) {
-    accumulator.webhookFulfillmentStatus = meta.webhookFulfillmentStatus;
-  }
-  if (meta.selectionFulfillmentStatus) {
-    accumulator.selectionFulfillmentStatus = mergeFulfillmentStatuses(
-      accumulator.selectionFulfillmentStatus,
-      meta.selectionFulfillmentStatus
-    );
-  }
-  if (meta.currency && !accumulator.currency) {
-    accumulator.currency = meta.currency;
-  }
-  if (meta.customerName && !accumulator.customerName) {
-    accumulator.customerName = meta.customerName;
-  }
-  if (meta.orderType && (accumulator.orderType === "UNKNOWN" || !accumulator.orderType)) {
-    accumulator.orderType = meta.orderType;
-  }
-  if (meta.diningOptionGuid && !accumulator.diningOptionGuid) {
-    accumulator.diningOptionGuid = meta.diningOptionGuid;
-  }
-  if (meta.locationId && !accumulator.locationId) {
-    accumulator.locationId = meta.locationId;
-  }
-  if (meta.timeDue && !accumulator.timeDue) {
-    accumulator.timeDue = meta.timeDue;
-  }
-  if (meta.deliveryState && !accumulator.deliveryState) {
-    accumulator.deliveryState = meta.deliveryState;
-  }
-  if (meta.deliveryInfo && !accumulator.deliveryInfo) {
-    accumulator.deliveryInfo = meta.deliveryInfo;
-  }
-  if (meta.curbsidePickupInfo && !accumulator.curbsidePickupInfo) {
-    accumulator.curbsidePickupInfo = meta.curbsidePickupInfo;
-  }
-  if (meta.dineInTable && !accumulator.dineInTable) {
-    accumulator.dineInTable = meta.dineInTable;
-  }
-  if (meta.dineInEmployee && !accumulator.dineInEmployee) {
-    accumulator.dineInEmployee = meta.dineInEmployee;
-  }
-  if (Array.isArray(meta.dineInSeats) && meta.dineInSeats.length > 0) {
-    for (const seat of meta.dineInSeats) {
-      if (typeof seat === "number" && Number.isFinite(seat)) {
-        accumulator.dineInSeatNumbers.add(seat);
-      }
-    }
-  }
-  if (meta.takeoutPromisedDate && !accumulator.takeoutPromisedDate) {
-    accumulator.takeoutPromisedDate = meta.takeoutPromisedDate;
-  }
-  if (meta.takeoutEstimatedFulfillmentDate && !accumulator.takeoutEstimatedFulfillmentDate) {
-    accumulator.takeoutEstimatedFulfillmentDate = meta.takeoutEstimatedFulfillmentDate;
-  }
-  if (meta.orderTime) {
-    accumulator.orderTime = meta.orderTime;
-  }
-  if (meta.orderTimeMs !== null) {
-    accumulator.orderTimeMs = meta.orderTimeMs;
-  }
-}
-
-function hasNonZeroTotals(entry: OrderAccumulator): boolean {
-  return (
-    entry.baseItemsSubtotalCents > 0 ||
-    entry.modifiersSubtotalCents > 0 ||
-    entry.discountTotalCents > 0 ||
-    entry.serviceChargeCents > 0 ||
-    entry.tipCents > 0
-  );
-}
-
-function compareAggregatedOrdersByOrderTime(a: OrderAccumulator, b: OrderAccumulator): number {
-  const aTime = a.orderTimeMs;
-  const bTime = b.orderTimeMs;
-
-  if (aTime !== null && bTime !== null && aTime !== bTime) {
-    return bTime - aTime;
-  }
-
-  if (aTime !== null && bTime === null) {
-    return -1;
-  }
-
-  if (aTime === null && bTime !== null) {
-    return 1;
-  }
-
-  if (a.orderId !== b.orderId) {
-    return a.orderId.localeCompare(b.orderId);
-  }
-
-  const aCheck = a.checkId ?? "";
-  const bCheck = b.checkId ?? "";
-  if (aCheck !== bCheck) {
-    return aCheck.localeCompare(bCheck);
-  }
-
-  return 0;
-}
-
-function toExpandedOrder(
-  entry: OrderAccumulator,
-  itemSortMetadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
-): ExpandedOrder {
-  const base = entry.baseItemsSubtotalCents;
-  const modifiers = entry.modifiersSubtotalCents;
-  const discount = entry.discountTotalCents;
-  const service = entry.serviceChargeCents;
-  const tip = entry.tipCents;
-  const subtotal = base + modifiers;
-  const grand = Math.max(subtotal - discount + service + tip, 0);
-  const orderDataLocation: { locationId?: string | null } = {};
-  if (entry.locationId) {
-    orderDataLocation.locationId = entry.locationId;
-  }
-
-  const orderData: OrderDataBlock = {
-    orderId: entry.orderId,
-    location: orderDataLocation,
-    orderTime: entry.orderTime,
-    timeDue: entry.timeDue ?? null,
-    orderNumber: entry.orderNumber ?? null,
-    checkId: entry.checkId ?? null,
-    status: entry.status ?? null,
-    fulfillmentStatus: deriveOrderFulfillmentStatus(entry),
-    customerName: entry.customerName ?? null,
-    orderType: entry.orderType ?? "UNKNOWN",
-    diningOptionGuid: entry.diningOptionGuid ?? null,
-  };
-
-  if (entry.deliveryState) {
-    orderData.deliveryState = entry.deliveryState;
-  }
-  if (entry.deliveryInfo) {
-    orderData.deliveryInfo = entry.deliveryInfo;
-  }
-  if (entry.curbsidePickupInfo) {
-    orderData.curbsidePickupInfo = entry.curbsidePickupInfo;
-  }
-  if (entry.dineInTable) {
-    orderData.table = entry.dineInTable;
-  }
-  const dineInSeats = Array.from(entry.dineInSeatNumbers)
-    .filter((seat): seat is number => typeof seat === "number" && Number.isFinite(seat))
-    .sort((a, b) => a - b);
-  if (dineInSeats.length > 0) {
-    orderData.seats = dineInSeats;
-  }
-  if (entry.dineInEmployee) {
-    orderData.employee = entry.dineInEmployee;
-  }
-  if (entry.takeoutPromisedDate) {
-    orderData.promisedDate = entry.takeoutPromisedDate;
-  }
-  if (entry.takeoutEstimatedFulfillmentDate) {
-    orderData.estimatedFulfillmentDate = entry.takeoutEstimatedFulfillmentDate;
-  }
-
-  const sortedItems = sortExpandedOrderItems(entry.items, itemSortMetadata);
-
-  const order: ExpandedOrder = {
-    orderData,
-    items: sortedItems,
-    totals: {
-      baseItemsSubtotalCents: base,
-      modifiersSubtotalCents: modifiers,
-      discountTotalCents: discount,
-      serviceChargeCents: service,
-      tipCents: tip,
-      grandTotalCents: grand,
+      grandTotalCents: 0,
     },
   };
 
-  if (entry.currency) {
-    order.currency = entry.currency;
-  }
+  const menuIndex = createMenuIndex(args.menuDocument);
+  const deadline = args.startedAt + HANDLER_TIME_BUDGET_MS;
+  const orders = extractOrders(args.ordersPayload);
+  const collected: { order: ExpandedOrder; timeMs: number | null }[] = [];
+  let timedOut = false;
 
-  return order;
-}
-
-function sortExpandedOrderItems(
-  items: ExpandedOrderItem[],
-  metadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
-): ExpandedOrderItem[] {
-  if (!Array.isArray(items) || items.length === 0) {
-    return [];
-  }
-
-  const sorted = [...items];
-  sorted.sort((a, b) => compareExpandedOrderItems(a, b, metadata));
-
-  return sorted.map((item) => ({
-    ...item,
-    modifiers: sortOrderItemModifiers(item.modifiers),
-  }));
-}
-
-function compareExpandedOrderItems(
-  a: ExpandedOrderItem,
-  b: ExpandedOrderItem,
-  metadata: WeakMap<ExpandedOrderItem, ItemSortMetadata>
-): number {
-  const metaA = metadata.get(a) ?? fallbackItemSortMetadata(a);
-  const metaB = metadata.get(b) ?? fallbackItemSortMetadata(b);
-
-  if (metaA.displayOrder !== null || metaB.displayOrder !== null) {
-    if (metaA.displayOrder !== null && metaB.displayOrder !== null && metaA.displayOrder !== metaB.displayOrder) {
-      return metaA.displayOrder - metaB.displayOrder;
+  outer: for (const order of orders) {
+    if (Date.now() > deadline) {
+      timedOut = true;
+      break;
     }
-    if (metaA.displayOrder !== null && metaB.displayOrder === null) {
-      return -1;
+    if (!order || typeof (order as any).guid !== "string") continue;
+    diagnostics.ordersSeen += 1;
+    if (isVoided(order)) {
+      diagnostics.dropped.ordersVoided += 1;
+      continue;
     }
-    if (metaA.displayOrder === null && metaB.displayOrder !== null) {
-      return 1;
+
+    const orderTime = extractTimestamp(order, ORDER_TIME_FIELDS);
+    if (!orderTime) {
+      diagnostics.dropped.ordersTimeParse += 1;
+      continue;
     }
-  }
 
-  if (metaA.createdTimeMs !== null || metaB.createdTimeMs !== null) {
-    if (metaA.createdTimeMs !== null && metaB.createdTimeMs !== null && metaA.createdTimeMs !== metaB.createdTimeMs) {
-      return metaA.createdTimeMs - metaB.createdTimeMs;
-    }
-    if (metaA.createdTimeMs !== null && metaB.createdTimeMs === null) {
-      return -1;
-    }
-    if (metaA.createdTimeMs === null && metaB.createdTimeMs !== null) {
-      return 1;
-    }
-  }
-
-  if (metaA.receiptLinePosition !== null || metaB.receiptLinePosition !== null) {
-    if (
-      metaA.receiptLinePosition !== null &&
-      metaB.receiptLinePosition !== null &&
-      metaA.receiptLinePosition !== metaB.receiptLinePosition
-    ) {
-      return metaA.receiptLinePosition - metaB.receiptLinePosition;
-    }
-    if (metaA.receiptLinePosition !== null && metaB.receiptLinePosition === null) {
-      return -1;
-    }
-    if (metaA.receiptLinePosition === null && metaB.receiptLinePosition !== null) {
-      return 1;
-    }
-  }
-
-  if (metaA.selectionIndex !== null || metaB.selectionIndex !== null) {
-    if (metaA.selectionIndex !== null && metaB.selectionIndex !== null && metaA.selectionIndex !== metaB.selectionIndex) {
-      return metaA.selectionIndex - metaB.selectionIndex;
-    }
-    if (metaA.selectionIndex !== null && metaB.selectionIndex === null) {
-      return -1;
-    }
-    if (metaA.selectionIndex === null && metaB.selectionIndex !== null) {
-      return 1;
-    }
-  }
-
-  if (metaA.seatNumber !== null || metaB.seatNumber !== null) {
-    if (metaA.seatNumber !== null && metaB.seatNumber !== null && metaA.seatNumber !== metaB.seatNumber) {
-      return metaA.seatNumber - metaB.seatNumber;
-    }
-    if (metaA.seatNumber !== null && metaB.seatNumber === null) {
-      return -1;
-    }
-    if (metaA.seatNumber === null && metaB.seatNumber !== null) {
-      return 1;
-    }
-  }
-
-  if (metaA.itemNameLower !== metaB.itemNameLower) {
-    return metaA.itemNameLower < metaB.itemNameLower ? -1 : 1;
-  }
-
-  const menuItemA = (a.menuItemId ?? "").toString();
-  const menuItemB = (b.menuItemId ?? "").toString();
-  if (menuItemA !== menuItemB) {
-    return menuItemA.localeCompare(menuItemB, undefined, { sensitivity: "base" });
-  }
-
-  if (a.lineItemId !== b.lineItemId) {
-    return a.lineItemId < b.lineItemId ? -1 : 1;
-  }
-
-  return 0;
-}
-
-function fallbackItemSortMetadata(item: ExpandedOrderItem): ItemSortMetadata {
-  return {
-    displayOrder: null,
-    createdTimeMs: null,
-    receiptLinePosition: null,
-    selectionIndex: null,
-    seatNumber: null,
-    itemNameLower: item.itemName.toLowerCase(),
-  };
-}
-
-function buildItemSortMetadata(
-  selection: ToastSelection,
-  itemName: string,
-  fallbackSelectionIndex: number | null
-): ItemSortMetadata {
-  return {
-    displayOrder: extractSelectionDisplayOrder(selection),
-    createdTimeMs: extractSelectionCreatedTime(selection),
-    receiptLinePosition: extractSelectionReceiptLinePosition(selection),
-    selectionIndex: extractSelectionIndex(selection, fallbackSelectionIndex),
-    seatNumber: extractSelectionSeatNumber(selection),
-    itemNameLower: itemName.toLowerCase(),
-  };
-}
-
-function resolveSelectionLineItemId(
-  orderId: string,
-  checkId: string | null,
-  selection: ToastSelection,
-  selectionIndex: number
-): string | null {
-  if (typeof selection.guid === "string" && selection.guid.trim() !== "") {
-    return selection.guid;
-  }
-
-  const itemGuid = (selection as any)?.item?.guid;
-  if (typeof itemGuid === "string" && itemGuid.trim() !== "") {
-    return `${orderId}:${checkId ?? ""}:item:${itemGuid}:${selectionIndex}`;
-  }
-
-  const displayName = getSelectionDisplayName(selection);
-  if (displayName) {
-    const normalized = displayName.trim().toLowerCase().replace(/\s+/g, "-");
-    const receiptPosition = extractSelectionReceiptLinePosition(selection);
-    const suffix = receiptPosition !== null ? `${receiptPosition}` : `${selectionIndex}`;
-    return `${orderId}:${checkId ?? ""}:name:${normalized}:${suffix}`;
-  }
-
-  const receiptPrice = extractReceiptLinePrice(selection);
-  if (receiptPrice !== null) {
-    return `${orderId}:${checkId ?? ""}:open:${selectionIndex}`;
-  }
-
-  return null;
-}
-
-function extractSelectionDisplayOrder(selection: ToastSelection): number | null {
-  const candidates: unknown[] = [
-    (selection as any)?.displaySequence,
-    (selection as any)?.displayOrder,
-    (selection as any)?.displayIndex,
-    (selection as any)?.displayPosition,
-    (selection as any)?.sequence,
-    (selection as any)?.sequenceNumber,
-    (selection as any)?.position,
-    (selection as any)?.order,
-    (selection as any)?.kitchenDisplaySequence,
-    (selection as any)?.posDisplaySequence,
-    (selection as any)?.context?.displayOrder,
-    (selection as any)?.context?.displaySequence,
-    (selection as any)?.receiptLinePosition,
-    (selection as any)?.selectionIndex,
-  ];
-
-  for (const candidate of candidates) {
-    const value = normalizeMaybeNumber(candidate);
-    if (value !== null) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function extractSelectionCreatedTime(selection: ToastSelection): number | null {
-  const stringCandidates: unknown[] = [
-    (selection as any)?.createdDate,
-    (selection as any)?.createdAt,
-    (selection as any)?.creationDate,
-    (selection as any)?.createdTime,
-    (selection as any)?.fireTime,
-    (selection as any)?.timestamp,
-    (selection as any)?.time,
-  ];
-
-  for (const candidate of stringCandidates) {
-    if (typeof candidate === "string" && candidate) {
-      const parsed = parseToastTimestamp(candidate);
-      if (parsed !== null) {
-        return parsed;
+    const checks = Array.isArray(order.checks) ? order.checks : [];
+    for (const check of checks) {
+      if (Date.now() > deadline) {
+        timedOut = true;
+        break outer;
       }
-    }
-  }
-
-  const numericCandidates: unknown[] = [
-    (selection as any)?.createdTimestamp,
-    (selection as any)?.timestamp,
-    (selection as any)?.createdTime,
-    (selection as any)?.time,
-  ];
-
-  for (const candidate of numericCandidates) {
-    const normalized = normalizeMaybeNumber(candidate);
-    if (normalized !== null) {
-      return normalizeEpochTimestamp(normalized);
-    }
-  }
-
-  return null;
-}
-
-function extractSelectionSeatNumber(selection: ToastSelection): number | null {
-  const candidates: unknown[] = [
-    (selection as any)?.seatNumber,
-    (selection as any)?.seat,
-    (selection as any)?.seatPosition,
-    (selection as any)?.seatNum,
-    (selection as any)?.context?.seatNumber,
-    (selection as any)?.diningContext?.seatNumber,
-  ];
-
-  for (const candidate of candidates) {
-    const value = normalizeMaybeInteger(candidate);
-    if (value !== null) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function extractSelectionReceiptLinePosition(selection: ToastSelection): number | null {
-  const candidates: unknown[] = [
-    (selection as any)?.receiptLinePosition,
-    (selection as any)?.receiptLineIndex,
-    (selection as any)?.receiptPosition,
-    (selection as any)?.receiptIndex,
-  ];
-
-  for (const candidate of candidates) {
-    const value = normalizeMaybeInteger(candidate);
-    if (value !== null) {
-      return value;
-    }
-  }
-
-  return null;
-}
-
-function extractSelectionIndex(selection: ToastSelection, fallback: number | null): number | null {
-  const explicit = normalizeMaybeInteger((selection as any)?.selectionIndex);
-  if (explicit !== null) {
-    return explicit;
-  }
-  if (fallback === null || fallback === undefined) {
-    return null;
-  }
-  return fallback;
-}
-
-function normalizeMaybeNumber(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  if (typeof value === "string" && value.trim() !== "") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-
-  return null;
-}
-
-function normalizeMaybeInteger(value: unknown): number | null {
-  const numeric = normalizeMaybeNumber(value);
-  if (numeric === null) {
-    return null;
-  }
-
-  const rounded = Math.round(numeric);
-  if (!Number.isFinite(rounded)) {
-    return null;
-  }
-
-  return rounded;
-}
-
-function normalizeEpochTimestamp(value: number): number {
-  if (value > 1_000_000_000_000) {
-    return value;
-  }
-
-  if (value > 0) {
-    return value * 1000;
-  }
-
-  return value;
-}
-
-function deriveOrderFulfillmentStatus(entry: OrderAccumulator): string | null {
-  if (entry.webhookFulfillmentStatus) {
-    const normalized = normalizeGuestFulfillmentStatus(entry.webhookFulfillmentStatus);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  if (entry.hasItemFulfillmentStatuses) {
-    if (entry.anyItemStatusNotReady) {
-      return "IN_PREPARATION";
-    }
-    if (entry.allItemStatusesReady) {
-      return "READY_FOR_PICKUP";
-    }
-  }
-
-  return null;
-}
-
-function normalizeGuestFulfillmentStatus(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed ? trimmed : null;
-  }
-
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-
-  const candidates = [
-    (value as any)?.status,
-    (value as any)?.currentStatus,
-    (value as any)?.value,
-    (value as any)?.state,
-    (value as any)?.fulfillmentStatus,
-    (value as any)?.newStatus,
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "string") {
-      const trimmed = candidate.trim();
-      if (trimmed) {
-        return trimmed;
+      if (!check || typeof (check as any).guid !== "string") continue;
+      diagnostics.checksSeen += 1;
+      if (isVoided(check)) {
+        diagnostics.dropped.ordersVoided += 1;
+        continue;
       }
+
+      const built = buildOrderFromCheck(order, check, orderTime, menuIndex, diagnostics);
+      if (!built) continue;
+      collected.push(built);
+      if (collected.length >= args.limit) continue outer;
     }
   }
 
-  return null;
+  const sorted = collected
+    .sort((a, b) => compareOrders(a.timeMs, b.timeMs, a.order.orderData.orderId, b.order.orderData.orderId, a.order.orderData.checkId, b.order.orderData.checkId))
+    .slice(0, args.limit)
+    .map((entry) => {
+      diagnostics.itemsIncluded += entry.order.items.length;
+      diagnostics.totals.baseItemsSubtotalCents += entry.order.totals.baseItemsSubtotalCents;
+      diagnostics.totals.modifiersSubtotalCents += entry.order.totals.modifiersSubtotalCents;
+      diagnostics.totals.discountTotalCents += entry.order.totals.discountTotalCents;
+      diagnostics.totals.serviceChargeCents += entry.order.totals.serviceChargeCents;
+      diagnostics.totals.tipCents += entry.order.totals.tipCents;
+      diagnostics.totals.grandTotalCents += entry.order.totals.grandTotalCents;
+      return entry.order;
+    });
+
+  return { orders: sorted, diagnostics, timedOut };
 }
 
-function collectModifierDetails(
-  selection: ToastSelection,
+function extractOrders(payload: OrdersLatestResponse & { ok: true }): ToastOrder[] {
+  if (Array.isArray(payload.data)) return payload.data;
+  if (Array.isArray((payload as any).orders)) return (payload as any).orders as ToastOrder[];
+  return [];
+}
+
+function buildOrderFromCheck(
+  order: ToastOrder,
+  check: ToastCheck,
+  orderTime: { iso: string; ms: number | null },
   menuIndex: ReturnType<typeof createMenuIndex>,
-  parentQuantity = 1
-): { modifiers: OrderItemModifier[]; totalCents: number } {
-  const rawModifiers = collectModifierDetailsInternal(selection, menuIndex, parentQuantity);
-  const collapsed = collapseOrderItemModifiers(rawModifiers);
-  const sorted = sortOrderItemModifiers(collapsed);
-  const totalCents = sorted.reduce((sum, mod) => sum + mod.priceCents, 0);
+  diagnostics: DiagnosticsCounters
+): { order: ExpandedOrder; timeMs: number | null } | null {
+  const orderId = pickStringPaths(order, check, ["order.guid", "order.id"]);
+  if (!orderId) return null;
 
-  return { modifiers: sorted, totalCents };
+  const meta = extractOrderMeta(order, check);
+  const checkId = meta.checkId;
+
+  const selections = Array.isArray((check as any).selections) ? ((check as any).selections as ToastSelection[]) : [];
+  const items: ExpandedOrderItem[] = [];
+  const metas: ItemSortMeta[] = [];
+  let baseSubtotal = 0;
+  let modifierSubtotal = 0;
+  let discountTotal = 0;
+  const serviceChargeCents = sumAmounts((check as any)?.appliedServiceCharges, ["chargeAmount", "amount"]);
+  const tipCents = sumAmounts((check as any)?.payments, ["tipAmount", "tip", "gratuity"]);
+
+  let hasItemStatus = false;
+  let anyNotReady = false;
+  let allReady = true;
+
+  for (let index = 0; index < selections.length; index += 1) {
+    const selection = selections[index];
+    if (!selection || typeof selection !== "object") continue;
+    if (isVoided(selection)) {
+      diagnostics.dropped.selectionsVoided += 1;
+      continue;
+    }
+    if (!isLineItem(selection)) {
+      diagnostics.dropped.selectionsFiltered += 1;
+      continue;
+    }
+
+    const lineItemId = resolveLineItemId(orderId, checkId, selection, index);
+    if (!lineItemId) {
+      diagnostics.dropped.selectionsFiltered += 1;
+      continue;
+    }
+
+    const menuItem = menuIndex.findItem(selection.item);
+    const itemName = pickString([
+      (menuItem as any)?.kitchenName,
+      (menuItem as any)?.name,
+      (selection as any)?.displayName,
+      (selection as any)?.name,
+      (selection as any)?.item?.name,
+      (selection as any)?.item?.kitchenName,
+      (selection as any)?.item?.guid,
+    ]) ?? "Unknown item";
+    const menuItemId = pickString([(selection as any)?.item?.guid]);
+    const quantity = normalizeQuantity((selection as any)?.quantity);
+
+    const modifierDetails = collectModifierDetails(selection, menuIndex, quantity);
+    modifierSubtotal += modifierDetails.totalCents;
+
+    const unitPrice = extractNumber(selection as any, ["receiptLinePrice", "price"]);
+    const baseEachCents = unitPrice !== null ? toCents(unitPrice) : null;
+    const baseTotalCents = baseEachCents !== null ? baseEachCents * quantity : null;
+    if (baseTotalCents !== null) baseSubtotal += baseTotalCents;
+
+    const explicitTotal = toCents((selection as any)?.price);
+    const totalCents = resolveItemTotal(baseTotalCents, modifierDetails.totalCents, explicitTotal);
+    if (totalCents !== null && baseTotalCents === null) baseSubtotal += Math.max(totalCents - modifierDetails.totalCents, 0);
+
+    const selectionDiscount = sumAmounts((selection as any)?.appliedDiscounts, ["discountAmount", "amount", "value"]);
+    if (selectionDiscount > 0) discountTotal += selectionDiscount;
+
+    const fulfillment = normalizeItemFulfillmentStatus((selection as any)?.fulfillmentStatus);
+    if (fulfillment) {
+      hasItemStatus = true;
+      if (fulfillment === "READY") {
+        if (!anyNotReady) allReady = allReady && true;
+      } else {
+        anyNotReady = true;
+        allReady = false;
+      }
+    }
+
+    const item: ExpandedOrderItem = {
+      lineItemId,
+      menuItemId,
+      itemName,
+      quantity,
+      modifiers: modifierDetails.modifiers,
+    };
+    if (fulfillment) item.fulfillmentStatus = fulfillment;
+
+    const specialInstructions = pickString([(selection as any)?.specialInstructions, getSpecialRequest(selection, itemName)]);
+    if (specialInstructions) item.specialInstructions = specialInstructions;
+
+    const money: ExpandedOrderItemMoney = {};
+    if (baseTotalCents !== null) money.baseItemPriceCents = baseTotalCents;
+    else if (baseEachCents !== null) money.baseItemPriceCents = baseEachCents * quantity;
+    if (modifierDetails.totalCents > 0) money.modifierTotalCents = modifierDetails.totalCents;
+    if (totalCents !== null) money.totalItemPriceCents = totalCents;
+    if (Object.keys(money).length > 0) item.money = money;
+
+    items.push(item);
+    metas.push(buildItemSortMeta(selection, itemName, menuItemId, lineItemId, index));
+  }
+
+  if (items.length === 0 && baseSubtotal === 0 && modifierSubtotal === 0 && discountTotal === 0) return null;
+
+  const checkDiscount = sumAmounts((check as any)?.appliedDiscounts, ["discountAmount", "amount", "value"]);
+  if (checkDiscount > 0) discountTotal += checkDiscount;
+
+  const subtotal = baseSubtotal + modifierSubtotal;
+  const grandTotal = Math.max(subtotal - discountTotal + serviceChargeCents + tipCents, 0);
+  const fulfillmentStatus = resolveFulfillmentStatus(order, check, hasItemStatus, anyNotReady, allReady);
+  const sortedItems = sortItems(items, metas);
+
+  const location: { locationId?: string | null } = {};
+  if (meta.locationId) location.locationId = meta.locationId;
+
+  const orderData: ExpandedOrder["orderData"] = {
+    orderId,
+    location,
+    orderTime: orderTime.iso,
+    timeDue: meta.timeDue ?? null,
+    orderNumber: meta.orderNumber ?? null,
+    checkId: checkId ?? null,
+    status: meta.status ?? null,
+    fulfillmentStatus,
+    customerName: meta.customerName ?? null,
+    orderType: meta.orderType,
+    diningOptionGuid: meta.diningOptionGuid ?? null,
+  };
+
+  if (meta.deliveryState) orderData.deliveryState = meta.deliveryState;
+  if (meta.deliveryInfo) orderData.deliveryInfo = meta.deliveryInfo;
+  if (meta.curbsidePickupInfo) orderData.curbsidePickupInfo = meta.curbsidePickupInfo;
+  if (meta.table) orderData.table = meta.table;
+  if (meta.seats.length > 0) orderData.seats = meta.seats;
+  if (meta.employee) orderData.employee = meta.employee;
+  if (meta.promisedDate) orderData.promisedDate = meta.promisedDate;
+  if (meta.estimatedFulfillmentDate) orderData.estimatedFulfillmentDate = meta.estimatedFulfillmentDate;
+
+  return {
+    order: {
+      orderData,
+      currency: meta.currency ?? null,
+      items: sortedItems,
+      totals: {
+        baseItemsSubtotalCents: baseSubtotal,
+        modifiersSubtotalCents: modifierSubtotal,
+        discountTotalCents: discountTotal,
+        serviceChargeCents,
+        tipCents,
+        grandTotalCents: grandTotal,
+      },
+    },
+    timeMs: orderTime.ms,
+  };
 }
 
-interface RawOrderItemModifier {
+const ORDER_TIME_FIELDS = ["createdDate", "openedDate", "promisedDate", "estimatedFulfillmentDate", "readyDate"];
+const ORDER_LOCATION_FIELDS = [
+  "order.restaurantLocationGuid",
+  "order.restaurantGuid",
+  "order.locationGuid",
+  "order.locationId",
+  "order.context.restaurantLocationGuid",
+  "order.context.locationGuid",
+  "order.context.locationId",
+  "order.revenueCenter.guid",
+];
+
+const ORDER_META_STRINGS: Record<string, string[]> = {
+  orderNumber: ["order.displayNumber", "order.orderNumber"],
+  timeDue: ["order.promisedDate", "order.estimatedFulfillmentDate"],
+  locationId: ORDER_LOCATION_FIELDS,
+  status: ["order.status", "order.orderStatus", "order.approvalStatus"],
+  currency: ["order.currency", "order.currencyCode"],
+  customerName: ["check.customerName", "check.customer.name", "order.customerName", "order.customer.name", "order.customers.0.name"],
+  diningOptionGuid: ["check.diningOptionGuid", "check.diningOption.guid", "order.diningOptionGuid", "order.diningOption.guid", "order.context.diningOption.guid"],
+  deliveryState: ["check.deliveryInfo.state", "order.deliveryInfo.state", "order.context.deliveryInfo.state"],
+  promisedDate: ["order.promisedDate"],
+  estimatedFulfillmentDate: ["order.estimatedFulfillmentDate"],
+};
+
+const ORDER_META_OBJECTS: Record<string, string[]> = {
+  deliveryInfo: ["check.deliveryInfo", "order.deliveryInfo", "order.context.deliveryInfo"],
+  curbsidePickupInfo: ["check.curbsidePickupInfo", "order.curbsidePickupInfo", "order.context.curbsidePickupInfo"],
+  table: ["check.table", "order.table", "order.context.table"],
+  employee: ["check.employee", "order.employee", "order.context.employee"],
+};
+
+const ORDER_SEAT_FIELDS = ["check.seatNumbers", "check.seats", "check.diningContext.seats", "order.context.diningContext.seats"];
+
+const ORDER_TYPE_FIELDS = [
+  "check.orderType",
+  "check.serviceType",
+  "check.orderMode",
+  "check.channelType",
+  "check.fulfillmentMode",
+  "order.orderType",
+  "order.serviceType",
+  "order.orderMode",
+  "order.channelType",
+  "order.mode",
+  "order.fulfillmentType",
+  "order.fulfillmentMode",
+  "order.source.orderType",
+  "order.source.serviceType",
+  "order.source.mode",
+  "order.context.orderType",
+  "order.context.serviceType",
+  "order.context.orderMode",
+  "order.context.channelType",
+  "order.context.fulfillmentType",
+  "order.context.fulfillmentMode",
+  "order.context.diningOption",
+  "order.context.diningOptionType",
+];
+
+const GUEST_FULFILLMENT_FIELDS = [
+  "check.guestOrderFulfillmentStatus",
+  "check.guestOrderFulfillmentStatus.status",
+  "check.guestFulfillmentStatus",
+  "check.guestFulfillmentStatus.status",
+  "check.fulfillmentStatusWebhook",
+  "check.fulfillmentStatusWebhook.status",
+  "order.guestOrderFulfillmentStatus",
+  "order.guestOrderFulfillmentStatus.status",
+  "order.guestFulfillmentStatus",
+  "order.guestFulfillmentStatus.status",
+  "order.context.guestOrderFulfillmentStatus",
+  "order.context.guestOrderFulfillmentStatus.status",
+  "order.context.guestFulfillmentStatus",
+  "order.context.guestFulfillmentStatus.status",
+];
+
+function extractOrderMeta(order: ToastOrder, check: ToastCheck) {
+  const strings: Record<string, string | null> = {};
+  for (const [key, paths] of Object.entries(ORDER_META_STRINGS)) strings[key] = pickStringPaths(order, check, paths);
+  const objects: Record<string, Record<string, unknown> | null> = {};
+  for (const [key, paths] of Object.entries(ORDER_META_OBJECTS)) objects[key] = pickObjectPaths(order, check, paths);
+  return {
+    orderNumber: strings.orderNumber,
+    timeDue: strings.timeDue,
+    locationId: strings.locationId,
+    status: strings.status,
+    currency: strings.currency,
+    customerName: strings.customerName,
+    orderType: resolveOrderType(order, check),
+    diningOptionGuid: strings.diningOptionGuid,
+    deliveryState: strings.deliveryState,
+    deliveryInfo: objects.deliveryInfo,
+    curbsidePickupInfo: objects.curbsidePickupInfo,
+    table: objects.table,
+    employee: objects.employee,
+    seats: collectSeats(order, check),
+    promisedDate: strings.promisedDate,
+    estimatedFulfillmentDate: strings.estimatedFulfillmentDate,
+    checkId: pickStringPaths(order, check, ["check.guid", "check.id"]),
+  };
+}
+
+function collectSeats(order: ToastOrder, check: ToastCheck): number[] {
+  const seats = new Set<number>();
+  for (const path of ORDER_SEAT_FIELDS) {
+    const value = getValue(order, check, path);
+    if (!Array.isArray(value)) continue;
+    for (const seat of value) if (typeof seat === "number" && Number.isFinite(seat)) seats.add(seat);
+  }
+  return Array.from(seats).sort((a, b) => a - b);
+}
+
+interface RawModifier {
   id: string | null;
   name: string;
   groupName: string | null;
@@ -2038,1289 +661,224 @@ interface RawOrderItemModifier {
   unitPriceCents: number | null;
 }
 
-function collectModifierDetailsInternal(
+function collectModifierDetails(
   selection: ToastSelection,
   menuIndex: ReturnType<typeof createMenuIndex>,
-  parentQuantity = 1
-): RawOrderItemModifier[] {
-  const output: RawOrderItemModifier[] = [];
-  const modifiers = Array.isArray(selection.modifiers) ? selection.modifiers : [];
-
+  parentQuantity: number
+): { modifiers: ExpandedOrderItemModifier[]; totalCents: number } {
+  const raw: RawModifier[] = [];
+  const modifiers = Array.isArray((selection as any)?.modifiers) ? ((selection as any).modifiers as ToastSelection[]) : [];
   for (const modifier of modifiers) {
-    if (!modifier) {
-      continue;
-    }
-
-    const base = menuIndex.findModifier(modifier.item);
-    const name =
-      getKitchenTicketName(base) ?? getSelectionDisplayName(modifier) ?? modifier.item?.guid ?? "Unknown modifier";
-    const groupName = extractModifierGroupName(modifier, base);
-    const id =
-      typeof modifier.item?.guid === "string" && modifier.item.guid
-        ? modifier.item.guid
-        : typeof modifier.guid === "string" && modifier.guid
-        ? modifier.guid
-        : (base as any)?.guid ?? null;
-
-    const modifierQuantity = normalizeQuantity((modifier as ToastSelection).quantity);
-    const ownUnitPrice = resolveModifierUnitPriceCents(modifier as ToastSelection);
-    const ownTotalPrice = ownUnitPrice !== null ? ownUnitPrice * modifierQuantity : null;
-    const adjustedPrice = ownTotalPrice !== null ? ownTotalPrice * parentQuantity : null;
-
-    output.push({
-      id,
-      name,
-      groupName: groupName ?? null,
-      priceCents: adjustedPrice ?? 0,
-      quantity: modifierQuantity,
-      unitPriceCents: ownUnitPrice,
-    });
-
-    if (Array.isArray((modifier as any).modifiers) && (modifier as any).modifiers.length > 0) {
-      const nested = collectModifierDetailsInternal(
-        modifier as unknown as ToastSelection,
-        menuIndex,
-        parentQuantity * modifierQuantity
-      );
-      output.push(...nested);
+    if (!modifier) continue;
+    const base = menuIndex.findModifier((modifier as any)?.item);
+    const name = pickString([
+      (base as any)?.kitchenName,
+      (base as any)?.name,
+      (modifier as any)?.displayName,
+      (modifier as any)?.name,
+      (modifier as any)?.item?.name,
+      (modifier as any)?.item?.guid,
+    ]) ?? "Unknown modifier";
+    const groupName = pickString([
+      (modifier as any)?.optionGroup?.name,
+      (base as any)?.optionGroupName,
+      (base as any)?.groupName,
+      (base as any)?.menuOptionGroup?.name,
+    ]);
+    const id = pickString([(modifier as any)?.guid, (modifier as any)?.item?.guid, (base as any)?.guid]);
+    const quantity = normalizeQuantity((modifier as any)?.quantity);
+    const unitPrice = toCents(extractNumber(modifier as any, ["price", "receiptLinePrice"]));
+    const totalPrice = unitPrice !== null ? unitPrice * quantity * parentQuantity : 0;
+    raw.push({ id: id ?? null, name, groupName: groupName ?? null, priceCents: totalPrice, quantity, unitPriceCents: unitPrice });
+    if (Array.isArray((modifier as any)?.modifiers) && (modifier as any).modifiers.length > 0) {
+      const nested = collectModifierDetails(modifier as ToastSelection, menuIndex, parentQuantity * quantity);
+      for (const entry of nested.modifiers) raw.push({ id: entry.id, name: entry.name, groupName: entry.groupName ?? null, priceCents: entry.priceCents, quantity: entry.quantity, unitPriceCents: null });
     }
   }
-
-  return output;
+  const collapsed = collapseModifiers(raw).sort(compareModifiers);
+  return { modifiers: collapsed, totalCents: collapsed.reduce((sum, mod) => sum + mod.priceCents, 0) };
 }
 
-function collapseOrderItemModifiers(modifiers: RawOrderItemModifier[]): OrderItemModifier[] {
-  const aggregated = new Map<
-    string,
-    { id: string | null; name: string; groupName: string | null; priceCents: number; quantity: number }
-  >();
+function resolveItemTotal(baseTotal: number | null, modifiersTotal: number, explicitTotal: number | null): number | null {
+  if (explicitTotal !== null && baseTotal !== null) return Math.max(explicitTotal, baseTotal + modifiersTotal);
+  if (explicitTotal !== null) return explicitTotal;
+  if (baseTotal !== null) return baseTotal + modifiersTotal;
+  return modifiersTotal > 0 ? modifiersTotal : null;
+}
 
+function collapseModifiers(modifiers: RawModifier[]): ExpandedOrderItemModifier[] {
+  const aggregated = new Map<string, RawModifier>();
   for (const modifier of modifiers) {
-    const identifier = modifier.id
-      ? `id:${modifier.id}`
-      : `name:${modifier.name.toLowerCase()}`;
-    const groupKey = (modifier.groupName ?? "").toLowerCase();
-    const unitKey = modifier.unitPriceCents !== null ? modifier.unitPriceCents : "unknown";
-    const aggregateKey = `${identifier}|${groupKey}|${unitKey}`;
-
-    const existing = aggregated.get(aggregateKey);
-    if (!existing) {
-      aggregated.set(aggregateKey, {
-        id: modifier.id ?? null,
-        name: modifier.name,
-        groupName: modifier.groupName ?? null,
-        priceCents: modifier.priceCents,
-        quantity: modifier.quantity,
-      });
-      continue;
-    }
-
-    existing.quantity += modifier.quantity;
-    existing.priceCents += modifier.priceCents;
-
-    if ((existing.groupName === null || existing.groupName === undefined) && modifier.groupName) {
-      existing.groupName = modifier.groupName;
+    const identifier = modifier.id ? `id:${modifier.id}` : `name:${modifier.name.toLowerCase()}`;
+    const group = (modifier.groupName ?? "").toLowerCase();
+    const unit = modifier.unitPriceCents ?? -1;
+    const key = `${identifier}|${group}|${unit}`;
+    const existing = aggregated.get(key);
+    if (!existing) aggregated.set(key, { ...modifier });
+    else {
+      existing.quantity += modifier.quantity;
+      existing.priceCents += modifier.priceCents;
+      if ((!existing.groupName || existing.groupName.length === 0) && modifier.groupName) existing.groupName = modifier.groupName;
+      if (!existing.id && modifier.id) existing.id = modifier.id;
     }
   }
-
-  return Array.from(aggregated.values()).map((entry) => ({
-    id: entry.id,
-    name: entry.name,
-    groupName: entry.groupName,
-    priceCents: entry.priceCents,
-    quantity: entry.quantity,
-  }));
+  return Array.from(aggregated.values()).map((entry) => ({ id: entry.id ?? null, name: entry.name, groupName: entry.groupName, priceCents: entry.priceCents, quantity: entry.quantity }));
 }
 
-function sortOrderItemModifiers(modifiers: OrderItemModifier[]): OrderItemModifier[] {
-  if (!Array.isArray(modifiers) || modifiers.length === 0) {
-    return [];
-  }
-
-  return [...modifiers].sort(compareOrderItemModifiers);
-}
-
-function compareOrderItemModifiers(a: OrderItemModifier, b: OrderItemModifier): number {
+function compareModifiers(a: ExpandedOrderItemModifier, b: ExpandedOrderItemModifier): number {
   const groupA = (a.groupName ?? "").toLowerCase();
   const groupB = (b.groupName ?? "").toLowerCase();
-  if (groupA !== groupB) {
-    return groupA < groupB ? -1 : 1;
-  }
-
+  if (groupA !== groupB) return groupA < groupB ? -1 : 1;
   const nameA = a.name.toLowerCase();
   const nameB = b.name.toLowerCase();
-  if (nameA !== nameB) {
-    return nameA < nameB ? -1 : 1;
-  }
-
-  const idA = a.id ?? "";
-  const idB = b.id ?? "";
-  if (idA !== idB) {
-    return idA < idB ? -1 : 1;
-  }
-
-  return 0;
+  if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+  return (a.id ?? "").localeCompare(b.id ?? "");
 }
 
-function sumDiscountAmounts(discounts: unknown): number {
-  if (!Array.isArray(discounts)) {
-    return 0;
-  }
-
-  let total = 0;
-  for (const discount of discounts) {
-    if (!discount) {
-      continue;
-    }
-
-    const amount =
-      toCents((discount as any)?.discountAmount) ??
-      toCents((discount as any)?.amount) ??
-      toCents((discount as any)?.value);
-
-    if (amount !== null) {
-      total += Math.max(amount, 0);
-    }
-  }
-
-  return total;
+interface ItemSortMeta {
+  displayOrder: number | null;
+  createdTime: number | null;
+  receiptPosition: number | null;
+  selectionIndex: number | null;
+  iteration: number;
+  seatNumber: number | null;
+  itemNameLower: string;
+  menuItemId: string | null | undefined;
+  lineItemId: string;
 }
 
-function sumServiceCharges(charges: unknown): number {
-  if (!Array.isArray(charges)) {
-    return 0;
-  }
-
-  let total = 0;
-  for (const charge of charges) {
-    if (!charge) {
-      continue;
-    }
-
-    const amount = toCents((charge as any)?.chargeAmount) ?? toCents((charge as any)?.amount);
-    if (amount !== null) {
-      total += amount;
-    }
-  }
-
-  return total;
+function buildItemSortMeta(
+  selection: ToastSelection,
+  itemName: string,
+  menuItemId: string | null | undefined,
+  lineItemId: string,
+  iteration: number
+): ItemSortMeta {
+  return {
+    displayOrder: extractNumber(selection as any, ["displaySequence", "displayOrder", "displayIndex", "displayPosition", "sequence", "sequenceNumber", "position", "context.displayOrder", "context.displaySequence"]),
+    createdTime: extractTimestamp(selection as any, ["createdDate", "createdAt", "creationDate", "createdTime", "fireTime", "timestamp", "time"])?.ms ?? null,
+    receiptPosition: extractNumber(selection as any, ["receiptLinePosition", "receiptLineIndex", "receiptPosition", "receiptIndex"]),
+    selectionIndex: extractNumber(selection as any, ["selectionIndex"]),
+    iteration,
+    seatNumber: extractNumber(selection as any, ["seatNumber", "seat", "seatPosition", "seatNum", "context.seatNumber"]),
+    itemNameLower: itemName.toLowerCase(),
+    menuItemId,
+    lineItemId,
+  };
 }
 
-function sumTipAmounts(payments: unknown): number {
-  if (!Array.isArray(payments)) {
-    return 0;
-  }
-
-  let total = 0;
-  for (const payment of payments) {
-    if (!payment) {
-      continue;
-    }
-
-    const tip = toCents((payment as any)?.tipAmount);
-    if (tip !== null) {
-      total += tip;
-    }
-  }
-
-  return total;
+function sortItems(items: ExpandedOrderItem[], metas: ItemSortMeta[]): ExpandedOrderItem[] {
+  return items
+    .map((item, index) => ({ item, meta: metas[index] }))
+    .sort((a, b) => compareItemMeta(a.meta, b.meta))
+    .map((entry) => entry.item);
 }
 
-function isSelectionVoided(selection: ToastSelection): boolean {
-  return Boolean((selection as any)?.voided);
-}
-
-function toCents(value: unknown): number | null {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    return null;
+function compareItemMeta(a: ItemSortMeta, b: ItemSortMeta): number {
+  for (const key of ["displayOrder", "createdTime", "receiptPosition", "selectionIndex"] as const) {
+    const aVal = a[key];
+    const bVal = b[key];
+    if (aVal !== null && bVal !== null && aVal !== bVal) return aVal - bVal;
+    if (aVal !== null && bVal === null) return -1;
+    if (aVal === null && bVal !== null) return 1;
   }
-  return Math.round(value * 100);
+  if (a.iteration !== b.iteration) return a.iteration - b.iteration;
+  if (a.seatNumber !== null || b.seatNumber !== null) {
+    if (a.seatNumber !== null && b.seatNumber !== null && a.seatNumber !== b.seatNumber) return a.seatNumber - b.seatNumber;
+    if (a.seatNumber !== null) return -1;
+    if (b.seatNumber !== null) return 1;
+  }
+  if (a.itemNameLower !== b.itemNameLower) return a.itemNameLower < b.itemNameLower ? -1 : 1;
+  const menuA = a.menuItemId ?? "";
+  const menuB = b.menuItemId ?? "";
+  if (menuA !== menuB) return menuA.localeCompare(menuB);
+  return a.lineItemId.localeCompare(b.lineItemId);
 }
 
-function extractModifierGroupName(
-  modifier: any,
-  base: ToastModifierOption | undefined
+function resolveFulfillmentStatus(
+  order: ToastOrder,
+  check: ToastCheck,
+  hasItemStatus: boolean,
+  anyNotReady: boolean,
+  allReady: boolean
 ): string | null {
-  const candidates = [
-    typeof modifier?.optionGroup?.name === "string" ? modifier.optionGroup.name : null,
-    typeof (base as any)?.optionGroupName === "string" ? (base as any).optionGroupName : null,
-    typeof (base as any)?.groupName === "string" ? (base as any).groupName : null,
-    typeof (base as any)?.menuOptionGroup?.name === "string" ? (base as any).menuOptionGroup.name : null,
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate) {
-      return candidate;
-    }
-  }
-
+  const guest = pickStringPaths(order, check, GUEST_FULFILLMENT_FIELDS);
+  if (guest) return guest;
+  if (!hasItemStatus) return null;
+  if (anyNotReady) return "IN_PREPARATION";
+  if (allReady) return "READY_FOR_PICKUP";
   return null;
 }
 
-function resolveModifierUnitPriceCents(modifier: ToastSelection): number | null {
-  const price = typeof (modifier as any)?.price === "number" ? toCents((modifier as any).price) : null;
-  if (price !== null) {
-    return price;
-  }
+const DISALLOWED_SELECTION_TYPES = new Set(["SPECIAL_REQUEST", "NOTE", "TEXT", "FEE", "SURCHARGE", "SERVICE_CHARGE", "TIP", "TAX", "PAYMENT", "DEPOSIT"]);
+const ALLOWED_SELECTION_TYPES = new Set(["MENU_ITEM", "ITEM", "STANDARD", "OPEN_ITEM", "CUSTOM_ITEM", "RETAIL_ITEM"]);
+const DISALLOWED_ITEM_TYPES = new Set(["SPECIAL_REQUEST", "NOTE", "TEXT", "FEE", "SURCHARGE", "SERVICE_CHARGE", "TIP", "TAX"]);
+const ALLOWED_ITEM_TYPES = new Set(["MENU_ITEM", "ITEM", "ENTREE", "PRODUCT", "OPEN_ITEM", "RETAIL", "RETAIL_ITEM", "BEVERAGE"]);
 
-  const receiptPrice = extractReceiptLinePrice(modifier);
-  if (receiptPrice === null) {
-    return null;
-  }
-
-  return toCents(receiptPrice);
+function isLineItem(selection: ToastSelection): boolean {
+  const type = getSelectionType(selection);
+  if (type && DISALLOWED_SELECTION_TYPES.has(type)) return false;
+  const item = (selection as any)?.item;
+  if (!item || typeof item !== "object") return false;
+  const itemType = getItemType(selection);
+  if (itemType && DISALLOWED_ITEM_TYPES.has(itemType)) return false;
+  if (type && ALLOWED_SELECTION_TYPES.has(type)) return true;
+  if (itemType && ALLOWED_ITEM_TYPES.has(itemType)) return true;
+  const hasReference =
+    (typeof item.guid === "string" && item.guid.trim()) ||
+    (typeof item.guid === "number" && Number.isFinite(item.guid)) ||
+    item.multiLocationId !== undefined ||
+    item.referenceId !== undefined;
+  if (hasReference) return true;
+  return extractNumber(selection as any, ["receiptLinePrice", "price"]) !== null;
 }
 
-function orderMatches(
-  order: ToastOrder,
-  locationId: string | null,
-  status: string | null,
-  diagnostics?: DiagnosticsCounters
-): boolean {
-  if (isVoidedOrder(order)) {
-    if (diagnostics) {
-      diagnostics.dropped_voided += 1;
-    }
-    return false;
-  }
-
-  if (locationId) {
-    const value = extractOrderLocation(order);
-    if (!value || value !== locationId) {
-      if (diagnostics) {
-        diagnostics.dropped_location_status += 1;
-      }
-      return false;
-    }
-  }
-
-  if (status) {
-    const orderStatus = extractOrderStatus(order);
-    if (!orderStatus || orderStatus.toLowerCase() !== status.toLowerCase()) {
-      if (diagnostics) {
-        diagnostics.dropped_location_status += 1;
-      }
-      return false;
-    }
-  }
-
-  return true;
+function getSelectionType(selection: ToastSelection): string {
+  const raw = (selection as any)?.selectionType ?? selection.selectionType;
+  return typeof raw === "string" ? raw.trim().toUpperCase().replace(/\s+/g, "_") : "";
 }
 
-function isVoidedOrder(order: ToastOrder): boolean {
-  return Boolean((order as any)?.voided);
+function getItemType(selection: ToastSelection): string {
+  const raw = (selection as any)?.item?.itemType ?? (selection as any)?.item?.type;
+  return typeof raw === "string" ? raw.trim().toUpperCase().replace(/\s+/g, "_") : "";
 }
 
-interface ResolvedOrderTime {
-  iso: string;
-  ms: number;
+function getSpecialRequest(selection: ToastSelection, itemName: string): string | null {
+  if (getSelectionType(selection) !== "SPECIAL_REQUEST") return null;
+  const display = pickString([(selection as any)?.displayName]);
+  return display && display !== itemName ? display : null;
 }
 
-function extractOrderTime(order: ToastOrder, diagnostics?: DiagnosticsCounters): ResolvedOrderTime | null {
-  const primaryCandidates = [order.createdDate, order.openedDate];
-  for (const candidate of primaryCandidates) {
-    if (typeof candidate === "string" && candidate) {
-      const parsed = parseToastTimestamp(candidate);
-      if (parsed !== null) {
-        return { iso: candidate, ms: parsed };
-      }
-    }
-  }
-
-  const fallbackCandidates = [order.promisedDate, (order as any)?.readyDate];
-  for (const candidate of fallbackCandidates) {
-    if (typeof candidate === "string" && candidate) {
-      const parsed = parseToastTimestamp(candidate);
-      if (parsed !== null) {
-        return { iso: candidate, ms: parsed };
-      }
-    }
-  }
-
-  if (diagnostics) {
-    diagnostics.dropped_time_parse += 1;
-  }
-
-  return null;
-}
-
-function parseToastTimestamp(value: string | null | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const normalized = value.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
-  const parsed = Date.parse(normalized);
-
-  if (Number.isNaN(parsed)) {
-    return null;
-  }
-
-  return parsed;
-}
-
-function extractOrderDueTime(order: ToastOrder): string | null {
-  const candidates = [order.promisedDate, order.estimatedFulfillmentDate];
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function extractOrderNumber(order: ToastOrder): string | null {
-  if (typeof (order as any)?.displayNumber === "string") {
-    return (order as any).displayNumber;
-  }
-  return null;
-}
-
-function extractOrderLocation(order: ToastOrder): string | null {
-  const maybe = [
-    (order as any)?.restaurantLocationGuid,
-    (order as any)?.restaurantGuid,
-    (order as any)?.locationGuid,
-    (order as any)?.locationId,
-    (order as any)?.context?.restaurantLocationGuid,
-    (order as any)?.context?.locationGuid,
-    (order as any)?.context?.locationId,
-    order.revenueCenter?.guid,
-  ];
-
-  for (const candidate of maybe) {
-    if (typeof candidate === "string" && candidate) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function extractOrderStatus(order: ToastOrder): string | null {
-  const maybe = [(order as any)?.status, (order as any)?.orderStatus, (order as any)?.approvalStatus];
-  for (const candidate of maybe) {
-    if (typeof candidate === "string" && candidate) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function extractOrderFulfillmentStatus(order: ToastOrder, check: ToastCheck): ItemFulfillmentStatus | null {
-  const candidates: unknown[] = [
-    (check as any)?.fulfillmentStatus,
-    (check as any)?.fulfillment?.status,
-    (order as any)?.fulfillmentStatus,
-    (order as any)?.fulfillment?.status,
-    (order as any)?.context?.fulfillmentStatus,
-    (order as any)?.context?.fulfillment?.status,
-  ];
-
-  for (const candidate of candidates) {
-    const normalized = normalizeItemFulfillmentStatus(candidate);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  return null;
-}
-
-function extractGuestOrderFulfillmentStatus(order: ToastOrder, check: ToastCheck): string | null {
-  const directCandidates: unknown[] = [];
-  const push = (value: unknown) => {
-    if (value !== undefined && value !== null) {
-      directCandidates.push(value);
-    }
-  };
-
-  push((check as any)?.guestOrderFulfillmentStatus);
-  push((check as any)?.guestOrderFulfillmentStatus?.status);
-  push((check as any)?.guestFulfillmentStatus);
-  push((check as any)?.guestFulfillmentStatus?.status);
-  push((check as any)?.fulfillmentStatusWebhook);
-  push((check as any)?.fulfillmentStatusWebhook?.status);
-  push((order as any)?.guestOrderFulfillmentStatus);
-  push((order as any)?.guestOrderFulfillmentStatus?.status);
-  push((order as any)?.guestFulfillmentStatus);
-  push((order as any)?.guestFulfillmentStatus?.status);
-  push((order as any)?.context?.guestOrderFulfillmentStatus);
-  push((order as any)?.context?.guestOrderFulfillmentStatus?.status);
-  push((order as any)?.context?.guestFulfillmentStatus);
-  push((order as any)?.context?.guestFulfillmentStatus?.status);
-
-  for (const candidate of directCandidates) {
-    const normalized = normalizeGuestFulfillmentStatus(candidate);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  const historySources: unknown[] = [
-    (check as any)?.guestOrderFulfillmentStatusHistory,
-    (check as any)?.guestFulfillmentStatusHistory,
-    (check as any)?.fulfillmentStatusHistory,
-    (order as any)?.guestOrderFulfillmentStatusHistory,
-    (order as any)?.guestFulfillmentStatusHistory,
-    (order as any)?.fulfillmentStatusHistory,
-    (order as any)?.context?.guestOrderFulfillmentStatusHistory,
-    (order as any)?.context?.guestFulfillmentStatusHistory,
-    (order as any)?.context?.fulfillmentStatusHistory,
-  ];
-
-  for (const source of historySources) {
-    if (!Array.isArray(source)) {
-      continue;
-    }
-
-    for (let i = source.length - 1; i >= 0; i -= 1) {
-      const entry = source[i];
-      const normalized = normalizeGuestFulfillmentStatus(entry);
-      if (normalized) {
-        return normalized;
-      }
-
-      if (entry && typeof entry === "object") {
-        const nested = normalizeGuestFulfillmentStatus((entry as any)?.payload);
-        if (nested) {
-          return nested;
-        }
-      }
-    }
-  }
-
-  return null;
-}
-
-function extractOrderCurrency(order: ToastOrder): string | null {
-  const maybe = [(order as any)?.currency, (order as any)?.currencyCode];
-  for (const candidate of maybe) {
-    if (typeof candidate === "string" && candidate) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function extractCustomerName(order: ToastOrder, check: ToastCheck): string | null {
-  const fromCheck = buildCustomerName(check.customer);
-  if (fromCheck) {
-    return fromCheck;
-  }
-
-  for (const customer of Array.isArray(order.customers) ? order.customers : []) {
-    const name = buildCustomerName(customer);
-    if (name) {
-      return name;
-    }
-  }
-
-  const fallbackCandidates = [
-    normalizeName((check as any)?.tabName),
-    normalizeName((check as any)?.curbsidePickupInfo?.name),
-    normalizeName((order as any)?.context?.deliveryInfo?.recipientName),
-    extractFirstGuestName(check),
-  ];
-
-  for (const candidate of fallbackCandidates) {
-    if (candidate) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function buildCustomerName(customer: unknown): string | null {
-  if (!customer) {
-    return null;
-  }
-
-  if (typeof customer === "string") {
-    return normalizeName(customer);
-  }
-
-  const first = normalizeName((customer as any)?.firstName);
-  const last = normalizeName((customer as any)?.lastName);
-  const combined = [first, last].filter(Boolean).join(" ").trim();
-
-  if (combined) {
-    return combined;
-  }
-
-  const name = normalizeName((customer as any)?.name);
-  if (name) {
-    return name;
-  }
-
-  return null;
-}
-
-function extractFirstGuestName(check: ToastCheck): string | null {
-  const guests = Array.isArray((check as any)?.guests) ? (check as any).guests : [];
-  for (const guest of guests) {
-    const name = buildCustomerName(guest);
-    if (name) {
-      return name;
-    }
-  }
-  return null;
-}
-
-function normalizeName(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function createDiningOptionResolver(fetcher: ItemsExpandedDeps["getDiningOptions"]) {
-  const cache = new Map<string, DiningOptionRecord>();
-  let inFlight: Promise<void> | null = null;
-
-  const prime = (value: unknown) => {
-    const normalized = normalizeDiningOptionRecord(value);
-    if (normalized) {
-      cache.set(normalized.guid, normalized);
-    }
-    if (value && typeof value === "object") {
-      const nested = (value as any)?.diningOption;
-      if (nested && nested !== value) {
-        prime(nested);
-      }
-    }
-  };
-
-  const load = async (env: AppEnv) => {
-    if (!fetcher) {
-      return;
-    }
-    if (!inFlight) {
-      inFlight = (async () => {
-        try {
-          const options = await fetcher(env);
-          if (Array.isArray(options)) {
-            for (const option of options) {
-              prime(option);
-            }
-          }
-        } catch {
-          // Swallow errors so order processing can continue with fallbacks.
-        } finally {
-          inFlight = null;
-        }
-      })();
-    }
-
-    if (inFlight) {
-      try {
-        await inFlight;
-      } catch {
-        // ignore fetch failures, fallback logic will handle UNKNOWN behavior.
-      }
-    }
-  };
-
-  return {
-    prime,
-    async resolve(env: AppEnv, guid: string | null): Promise<DiningOptionRecord | null> {
-      if (!guid) {
-        return null;
-      }
-      let record = cache.get(guid) ?? null;
-      if (!record || !record.behavior) {
-        await load(env);
-        record = cache.get(guid) ?? record;
-      }
-      return record ?? null;
-    },
-  };
-}
-
-async function resolveOrderBehavior(
-  env: AppEnv,
-  order: ToastOrder,
-  check: ToastCheck,
-  resolver: ReturnType<typeof createDiningOptionResolver>
-): Promise<OrderBehaviorMetadata> {
-  const candidates = gatherDiningOptionCandidates(order, check);
-  let diningOptionGuid: string | null = null;
-  let behavior: string | null = null;
-
-  for (const candidate of candidates) {
-    resolver.prime(candidate);
-    if (!behavior) {
-      const candidateBehavior = extractBehaviorString(candidate);
-      if (candidateBehavior) {
-        behavior = candidateBehavior;
-      }
-    }
-    if (!diningOptionGuid) {
-      const normalized = normalizeDiningOptionRecord(candidate);
-      if (normalized?.guid) {
-        diningOptionGuid = normalized.guid;
-        if (!behavior && normalized.behavior) {
-          behavior = normalized.behavior;
-        }
-      }
-    }
-  }
-
-  let resolvedRecord: DiningOptionRecord | null = null;
-  if (diningOptionGuid) {
-    resolvedRecord = await resolver.resolve(env, diningOptionGuid);
-    if (resolvedRecord) {
-      if (!behavior && resolvedRecord.behavior) {
-        behavior = resolvedRecord.behavior;
-      }
-      if (!diningOptionGuid && resolvedRecord.guid) {
-        diningOptionGuid = resolvedRecord.guid;
-      }
-    }
-  }
-
-  const normalizedBehavior = mapBehaviorToOrderType(behavior);
-  const fallbackType = inferOrderTypeFromContext(order, check);
-  const orderType = normalizedBehavior ?? fallbackType ?? "UNKNOWN";
-
-  const enrichment = collectBehaviorEnrichments(order, check, orderType);
-
-  return {
-    orderType,
-    diningOptionGuid: diningOptionGuid ?? resolvedRecord?.guid ?? null,
-    ...enrichment,
-  };
-}
-
-function collectBehaviorEnrichments(
-  order: ToastOrder,
-  check: ToastCheck,
-  orderType: OrderType
-): Partial<Omit<OrderBehaviorMetadata, "orderType" | "diningOptionGuid">> {
-  const enrichment: Partial<Omit<OrderBehaviorMetadata, "orderType" | "diningOptionGuid">> = {};
-
-  if (orderType === "DELIVERY") {
-    const delivery = extractDeliveryInfo(order, check);
-    if (delivery) {
-      enrichment.deliveryInfo = delivery;
-    }
-    const deliveryState = extractDeliveryState(order, check);
-    if (deliveryState) {
-      enrichment.deliveryState = deliveryState;
-    }
-  }
-
-  if (orderType === "CURBSIDE") {
-    const curbside = extractCurbsidePickupInfo(order, check);
-    if (curbside) {
-      enrichment.curbsidePickupInfo = curbside;
-    }
-  }
-
-  if (orderType === "DINE_IN") {
-    const dineIn = extractDineInDetails(order, check);
-    if (dineIn.table) {
-      enrichment.dineInTable = dineIn.table;
-    }
-    if (dineIn.seats && dineIn.seats.length > 0) {
-      enrichment.dineInSeats = dineIn.seats;
-    }
-    if (dineIn.employee) {
-      enrichment.dineInEmployee = dineIn.employee;
-    }
-  }
-
-  if (orderType === "TAKEOUT") {
-    const takeout = extractTakeoutTiming(order, check);
-    if (takeout?.promisedDate) {
-      enrichment.takeoutPromisedDate = takeout.promisedDate;
-    }
-    if (takeout?.estimatedFulfillmentDate) {
-      enrichment.takeoutEstimatedFulfillmentDate = takeout.estimatedFulfillmentDate;
-    }
-  }
-
-  return enrichment;
-}
-
-function extractDeliveryInfo(order: ToastOrder, check: ToastCheck): Record<string, unknown> | null {
-  const info: Record<string, unknown> = {};
-  let hasInfo = false;
-
-  const assignString = (key: string, value: unknown) => {
-    if (typeof value !== "string") {
-      return;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
-    }
-    if (info[key] === undefined) {
-      info[key] = trimmed;
-      hasInfo = true;
-    }
-  };
-
-  const assignNumber = (key: string, value: unknown) => {
-    if (typeof value === "number" && Number.isFinite(value) && info[key] === undefined) {
-      info[key] = value;
-      hasInfo = true;
-    }
-  };
-
-  const addAddress = (source: any) => {
-    if (!source || typeof source !== "object") {
-      return;
-    }
-    assignString("address1", source.address1 ?? source.line1 ?? source.street1);
-    assignString("address2", source.address2 ?? source.line2 ?? source.street2);
-    assignString("city", source.city ?? source.town);
-    assignString("state", source.state ?? source.region ?? source.province);
-    assignString("zipCode", source.zipCode ?? source.postalCode ?? source.zip ?? source.postcode);
-    assignString("country", source.country ?? source.countryCode);
-    assignString("administrativeArea", source.administrativeArea ?? source.county);
-    assignNumber("latitude", source.latitude);
-    assignNumber("longitude", source.longitude);
-  };
-
-  const sources: any[] = [];
-  const push = (value: any) => {
-    if (value && typeof value === "object") {
-      sources.push(value);
-    }
-  };
-
-  push((order as any)?.context?.deliveryInfo);
-  push((order as any)?.deliveryInfo);
-  push((order as any)?.destination);
-  push((order as any)?.shippingAddress);
-  push((order as any)?.deliveryDestination);
-  push((check as any)?.deliveryInfo);
-  push((check as any)?.destination);
-
-  for (const source of sources) {
-    assignString("recipientName", source.recipientName ?? source.name ?? source.customerName);
-    assignString("instructions", source.instructions ?? source.deliveryInstructions ?? source.dropoffInstructions);
-    assignString("notes", source.notes ?? source.deliveryNotes ?? source.customerNotes);
-    assignString("status", source.status ?? source.deliveryStatus ?? source.fulfillmentStatus);
-    assignString("quotedDeliveryDate", source.quotedDeliveryDate ?? source.quotedDate ?? source.quotedAt);
-    assignString("estimatedDeliveryDate", source.estimatedDeliveryDate ?? source.estimatedDate ?? source.estimatedArrivalDate);
-    assignString("promisedDate", source.promisedDate ?? source.promisedDeliveryDate);
-    assignString("readyDate", source.readyDate ?? source.readyTime);
-    assignString("contactPhone", source.contactPhone ?? source.phoneNumber ?? source.customerPhone);
-    assignString("contactEmail", source.contactEmail ?? source.email);
-    addAddress(source);
-    addAddress(source.address);
-    addAddress(source.deliveryAddress);
-  }
-
-  const timeSources = [order as any, (order as any)?.context, check as any];
-  for (const source of timeSources) {
-    if (!source) {
-      continue;
-    }
-    assignString("promisedDate", source.promisedDate);
-    assignString("estimatedFulfillmentDate", source.estimatedFulfillmentDate);
-    assignString("quotedDeliveryDate", source.quotedDeliveryDate);
-    assignString("estimatedDeliveryDate", source.estimatedDeliveryDate);
-    assignString("readyDate", source.readyDate);
-  }
-
-  return hasInfo ? info : null;
-}
-
-function extractDeliveryState(order: ToastOrder, check: ToastCheck): string | null {
-  const sources = [
-    (order as any)?.deliveryInfo,
-    (order as any)?.context?.deliveryInfo,
-    (check as any)?.deliveryInfo,
-  ];
-
-  for (const source of sources) {
-    if (!source || typeof source !== "object") {
-      continue;
-    }
-
-    const state = (source as any)?.deliveryState ?? (source as any)?.state;
-    if (typeof state === "string") {
-      const trimmed = state.trim();
-      if (trimmed) {
-        return trimmed;
-      }
-    }
-  }
-
-  return null;
-}
-
-function extractCurbsidePickupInfo(order: ToastOrder, check: ToastCheck): Record<string, unknown> | null {
-  const sources = [
-    (check as any)?.curbsidePickupInfo,
-    (order as any)?.curbsidePickupInfo,
-    (order as any)?.context?.curbsidePickupInfo,
-  ];
-
-  const info: Record<string, unknown> = {};
-  let hasInfo = false;
-
-  const assign = (key: string, value: unknown) => {
-    if (typeof value !== "string") {
-      return;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
-    }
-    if (info[key] === undefined) {
-      info[key] = trimmed;
-      hasInfo = true;
-    }
-  };
-
-  for (const source of sources) {
-    if (!source || typeof source !== "object") {
-      continue;
-    }
-    assign("name", source.name);
-    assign("transportColor", source.transportColor);
-    assign("transportDescription", source.transportDescription ?? source.vehicleDescription);
-    assign("vehicleColor", source.vehicleColor ?? source.color);
-    assign("vehicleMake", source.vehicleMake ?? source.make);
-    assign("vehicleModel", source.vehicleModel ?? source.model);
-    assign(
-      "licensePlate",
-      source.licensePlate ?? source.plateNumber ?? source.vehicleLicensePlate ?? source.plate
-    );
-    assign("notes", source.notes ?? source.instructions ?? source.comments);
-    assign("parkingSpot", source.parkingSpot ?? source.pickupSpot ?? source.spotNumber);
-    assign("contactPhone", source.contactPhone ?? source.phoneNumber ?? source.customerPhone);
-    const vehicle = (source as any)?.vehicle;
-    if (vehicle && typeof vehicle === "object") {
-      assign("vehicleColor", vehicle.color ?? vehicle.vehicleColor ?? vehicle.paint);
-      assign("vehicleMake", vehicle.make ?? vehicle.brand);
-      assign("vehicleModel", vehicle.model ?? vehicle.description);
-      assign("licensePlate", vehicle.licensePlate ?? vehicle.plate);
-    }
-  }
-
-  return hasInfo ? info : null;
-}
-
-function extractDineInDetails(
-  order: ToastOrder,
-  check: ToastCheck
-): { table?: Record<string, unknown>; seats?: number[]; employee?: Record<string, unknown> } {
-  const result: { table?: Record<string, unknown>; seats?: number[]; employee?: Record<string, unknown> } = {};
-
-  const tableCandidates = [
-    (check as any)?.table,
-    (order as any)?.table,
-    (order as any)?.context?.table,
-    (check as any)?.tableAssignment,
-  ];
-  for (const candidate of tableCandidates) {
-    const sanitized = sanitizeReference(candidate);
-    if (sanitized) {
-      result.table = sanitized;
-      break;
-    }
-  }
-
-  const seatNumbers = new Set<number>();
-  const addSeat = (value: unknown) => {
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      seatNumbers.add(value);
-    }
-  };
-  const selections = Array.isArray(check.selections) ? check.selections : [];
-  for (const selection of selections) {
-    addSeat((selection as any)?.seatNumber);
-  }
-  const explicitSeats = Array.isArray((check as any)?.seatNumbers) ? (check as any).seatNumbers : [];
-  for (const seat of explicitSeats) {
-    addSeat(seat);
-  }
-  if (seatNumbers.size > 0) {
-    result.seats = Array.from(seatNumbers).sort((a, b) => a - b);
-  }
-
-  const employeeCandidates: unknown[] = [
-    (check as any)?.openedBy,
-    (check as any)?.server,
-    (check as any)?.owner,
-    (order as any)?.openedBy,
-    (order as any)?.createdBy,
-    (order as any)?.server,
-  ];
-  const employeeArrays = [
-    (check as any)?.servers,
-    (check as any)?.employees,
-    (order as any)?.servers,
-    (order as any)?.employees,
-  ];
-  for (const collection of employeeArrays) {
-    if (Array.isArray(collection)) {
-      for (const candidate of collection) {
-        employeeCandidates.push(candidate);
-      }
-    }
-  }
-
-  for (const candidate of employeeCandidates) {
-    const sanitized = sanitizeReference(candidate, [
-      "employeeNumber",
-      "employeeId",
-      "displayName",
-      "id",
-      "externalEmployeeId",
-    ]);
-    if (sanitized) {
-      result.employee = sanitized;
-      break;
-    }
-  }
-
-  return result;
-}
-
-function extractTakeoutTiming(
-  order: ToastOrder,
-  check: ToastCheck
-): { promisedDate?: string; estimatedFulfillmentDate?: string } | null {
-  const data: { promisedDate?: string; estimatedFulfillmentDate?: string } = {};
-  const assign = (key: "promisedDate" | "estimatedFulfillmentDate", value: unknown) => {
-    if (typeof value !== "string") {
-      return;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return;
-    }
-    if (data[key] === undefined) {
-      data[key] = trimmed;
-    }
-  };
-
-  assign("promisedDate", (check as any)?.promisedDate);
-  assign("promisedDate", (order as any)?.promisedDate);
-  assign("promisedDate", (order as any)?.context?.promisedDate);
-  assign("promisedDate", (order as any)?.expectedReadyDate);
-
-  assign("estimatedFulfillmentDate", (check as any)?.estimatedFulfillmentDate);
-  assign("estimatedFulfillmentDate", (order as any)?.estimatedFulfillmentDate);
-  assign("estimatedFulfillmentDate", (order as any)?.context?.estimatedFulfillmentDate);
-  assign("estimatedFulfillmentDate", (order as any)?.readyDate);
-
-  return Object.keys(data).length > 0 ? data : null;
-}
-
-function gatherDiningOptionCandidates(order: ToastOrder, check: ToastCheck): unknown[] {
-  const values: unknown[] = [];
-  const push = (...items: unknown[]) => {
-    for (const item of items) {
-      if (item !== undefined && item !== null) {
-        values.push(item);
-      }
-    }
-  };
-
-  push(
-    (check as any)?.diningOption,
-    (check as any)?.diningOptionInfo,
-    (order as any)?.diningOption,
-    (order as any)?.context?.diningOption,
-    (order as any)?.context?.diningOptionInfo,
-    (order as any)?.source?.diningOption,
-    (order as any)?.fulfillment?.diningOption
-  );
-  push((check as any)?.diningOptionGuid, (order as any)?.diningOptionGuid, (order as any)?.context?.diningOptionGuid);
-
-  return values;
-}
-
-function normalizeDiningOptionRecord(value: unknown): DiningOptionRecord | null {
-  if (!value) {
-    return null;
-  }
-
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (looksLikeGuid(trimmed)) {
-      return { guid: trimmed, behavior: null, name: null };
-    }
-    return null;
-  }
-
-  if (typeof value !== "object") {
-    return null;
-  }
-
-  const obj = value as any;
-
-  if (obj?.diningOption && obj.diningOption !== value) {
-    const nested = normalizeDiningOptionRecord(obj.diningOption);
-    if (nested) {
-      return nested;
-    }
-  }
-
-  const guidCandidates = [obj.guid, obj.diningOptionGuid, obj.optionGuid, obj.id];
-  let guid: string | null = null;
-  for (const candidate of guidCandidates) {
-    if (typeof candidate === "string" && looksLikeGuid(candidate)) {
-      guid = candidate.trim();
-      break;
-    }
-  }
-
-  if (!guid) {
-    return null;
-  }
-
-  const behaviorCandidates = [
-    obj.behavior,
-    obj.diningOptionBehavior,
-    obj.optionBehavior,
-    obj.type,
-    obj.mode,
-    obj.behaviour,
-  ];
-  let behavior: string | null = null;
-  for (const candidate of behaviorCandidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      behavior = candidate.trim();
-      break;
-    }
-  }
-
-  const nameCandidates = [obj.name, obj.displayName, obj.label, obj.diningOptionName];
-  let name: string | null = null;
-  for (const candidate of nameCandidates) {
-    if (typeof candidate === "string" && candidate.trim()) {
-      name = candidate.trim();
-      break;
-    }
-  }
-
-  return { guid, behavior, name };
-}
-
-function looksLikeGuid(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (!/[0-9-]/.test(trimmed)) {
-    return false;
-  }
-  return /^[0-9a-zA-Z-]+$/.test(trimmed);
-}
-
-function extractBehaviorString(candidate: unknown): string | null {
-  if (!candidate) {
-    return null;
-  }
-  if (typeof candidate === "string") {
-    const trimmed = candidate.trim();
-    if (!trimmed) {
-      return null;
-    }
-    const normalized = normalizeOrderType(trimmed);
-    return normalized ? trimmed : null;
-  }
-  if (typeof candidate !== "object") {
-    return null;
-  }
-  const obj = candidate as any;
-  const behaviorCandidates = [
-    obj.behavior,
-    obj.diningOptionBehavior,
-    obj.optionBehavior,
-    obj.type,
-    obj.mode,
-    obj.behaviour,
-  ];
-  for (const value of behaviorCandidates) {
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        continue;
-      }
-      const normalized = normalizeOrderType(trimmed);
-      if (normalized) {
-        return trimmed;
-      }
-    }
-  }
-  return null;
-}
-
-function mapBehaviorToOrderType(behavior: string | null): OrderType | null {
-  if (!behavior) {
-    return null;
-  }
-  return normalizeOrderType(behavior);
-}
-
-function sanitizeReference(value: unknown, extraKeys: string[] = []): Record<string, unknown> | null {
-  if (!value) {
-    return null;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed ? { name: trimmed } : null;
-  }
-  if (typeof value !== "object") {
-    return null;
-  }
-
-  const baseKeys = new Set(["guid", "name", "externalId", "entityType", "displayName", "id"]);
-  for (const key of extraKeys) {
-    baseKeys.add(key);
-  }
-
-  const output: Record<string, unknown> = {};
-  for (const key of baseKeys) {
-    const candidate = (value as any)[key];
-    if (typeof candidate === "string") {
-      const trimmed = candidate.trim();
-      if (trimmed) {
-        output[key] = trimmed;
-      }
-    }
-  }
-
-  return Object.keys(output).length > 0 ? output : null;
-}
-
-function inferOrderTypeFromContext(order: ToastOrder, check: ToastCheck): OrderType {
-  if ((check as any)?.curbsidePickupInfo) {
-    return "CURBSIDE";
-  }
-
-  const candidates = new Set<OrderType>();
-
-  if ((order as any)?.context?.deliveryInfo || (order as any)?.isDelivery === true || (check as any)?.isDelivery === true) {
-    candidates.add("DELIVERY");
-  }
-
-  if ((order as any)?.isDriveThru === true || (check as any)?.isDriveThru === true) {
-    candidates.add("DRIVE_THRU");
-  }
-
-  if ((order as any)?.isCatering === true || (check as any)?.isCatering === true) {
-    candidates.add("CATERING");
-  }
-
-  for (const value of gatherOrderTypeCandidates(order, check)) {
+function resolveOrderType(order: ToastOrder, check: ToastCheck): OrderType {
+  if ((order as any)?.context?.curbsidePickupInfo || (check as any)?.curbsidePickupInfo) return "CURBSIDE";
+  if ((order as any)?.isDriveThru === true || (check as any)?.isDriveThru === true) return "DRIVE_THRU";
+  if ((order as any)?.isDelivery === true || (check as any)?.isDelivery === true) return "DELIVERY";
+  if ((order as any)?.isCatering === true || (check as any)?.isCatering === true) return "CATERING";
+  for (const path of ORDER_TYPE_FIELDS) {
+    const value = getValue(order, check, path);
     const normalized = normalizeOrderType(value);
-    if (normalized) {
-      candidates.add(normalized);
-    }
+    if (normalized) return normalized;
   }
-
-  if (candidates.has("CURBSIDE")) {
-    return "CURBSIDE";
-  }
-  if (candidates.has("DRIVE_THRU")) {
-    return "DRIVE_THRU";
-  }
-  if (candidates.has("CATERING")) {
-    return "CATERING";
-  }
-  if (candidates.has("DELIVERY")) {
-    return "DELIVERY";
-  }
-  if (candidates.has("DINE_IN")) {
-    return "DINE_IN";
-  }
-  if (candidates.has("TAKEOUT")) {
-    return "TAKEOUT";
-  }
-
   return "UNKNOWN";
 }
 
-function gatherOrderTypeCandidates(order: ToastOrder, check: ToastCheck): unknown[] {
-  const values: unknown[] = [];
-  const push = (...items: unknown[]) => {
-    for (const item of items) {
-      if (item !== undefined && item !== null) {
-        values.push(item);
-      }
-    }
-  };
-
-  push(
-    (check as any)?.orderType,
-    (check as any)?.serviceType,
-    (check as any)?.orderMode,
-    (check as any)?.channelType,
-    (check as any)?.fulfillmentMode,
-    (order as any)?.orderType,
-    (order as any)?.serviceType,
-    (order as any)?.orderMode,
-    (order as any)?.channelType,
-    (order as any)?.mode,
-    (order as any)?.fulfillmentType,
-    (order as any)?.fulfillmentMode,
-    (order as any)?.fulfillment,
-    (order as any)?.source?.orderType,
-    (order as any)?.source?.serviceType,
-    (order as any)?.source?.mode,
-    (order as any)?.context?.orderType,
-    (order as any)?.context?.serviceType,
-    (order as any)?.context?.orderMode,
-    (order as any)?.context?.channelType,
-    (order as any)?.context?.fulfillmentType,
-    (order as any)?.context?.fulfillmentMode,
-    (order as any)?.context?.diningOption,
-    (order as any)?.context?.diningOptionType
-  );
-
-  return values;
-}
-
 function normalizeOrderType(value: unknown): OrderType | null {
-  if (!value) {
-    return null;
-  }
-
+  if (!value) return null;
   if (typeof value === "object") {
-    const candidate =
-      typeof (value as any)?.type === "string"
-        ? (value as any).type
-        : typeof (value as any)?.name === "string"
-        ? (value as any).name
-        : null;
-    if (candidate) {
-      return normalizeOrderType(candidate);
-    }
-    return null;
+    const candidate = (value as any)?.type ?? (value as any)?.name;
+    return typeof candidate === "string" ? normalizeOrderType(candidate) : null;
   }
-
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const normalized = trimmed.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-
-  const directMap: Record<string, OrderType> = {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  const map: Record<string, OrderType> = {
     TAKEOUT: "TAKEOUT",
     TAKE_OUT: "TAKEOUT",
     TAKEAWAY: "TAKEOUT",
     TAKE_AWAY: "TAKEOUT",
     PICKUP: "TAKEOUT",
     PICK_UP: "TAKEOUT",
-    PICK_UP_ORDER: "TAKEOUT",
     PICKUP_ORDER: "TAKEOUT",
+    PICK_UP_ORDER: "TAKEOUT",
     TOGO: "TAKEOUT",
     TO_GO: "TAKEOUT",
     DINE_IN: "DINE_IN",
@@ -3332,201 +890,214 @@ function normalizeOrderType(value: unknown): OrderType | null {
     CURB_SIDE: "CURBSIDE",
     CURBSIDE_PICKUP: "CURBSIDE",
     DRIVE_THRU: "DRIVE_THRU",
-    DRIVE_THRUGH: "DRIVE_THRU",
     DRIVETHRU: "DRIVE_THRU",
     DRIVE_THROUGH: "DRIVE_THRU",
     CATERING: "CATERING",
     DELIVERY: "DELIVERY",
     DELIVER: "DELIVERY",
   };
-
-  if (directMap[normalized]) {
-    return directMap[normalized];
-  }
-
-  if (normalized.includes("CURBSIDE")) {
-    return "CURBSIDE";
-  }
-  if (normalized.includes("DRIVE")) {
-    return "DRIVE_THRU";
-  }
-  if (normalized.includes("CATER")) {
-    return "CATERING";
-  }
-  if (normalized.includes("DELIVER")) {
-    return "DELIVERY";
-  }
-  if (normalized.includes("DINE") || normalized.includes("EAT_IN") || normalized.includes("EATIN") || normalized.includes("ON_PREMISE")) {
-    return "DINE_IN";
-  }
-  if (
-    normalized.includes("TAKE") ||
-    normalized.includes("PICKUP") ||
-    normalized.includes("PICK_UP") ||
-    normalized.includes("PICK-UP") ||
-    normalized.includes("TOGO") ||
-    normalized.includes("TO_GO")
-  ) {
-    return "TAKEOUT";
-  }
-
+  if (map[normalized]) return map[normalized];
+  if (normalized.includes("CURBSIDE")) return "CURBSIDE";
+  if (normalized.includes("DRIVE")) return "DRIVE_THRU";
+  if (normalized.includes("CATER")) return "CATERING";
+  if (normalized.includes("DELIVER")) return "DELIVERY";
+  if (normalized.includes("DINE") || normalized.includes("EAT_IN") || normalized.includes("EATIN") || normalized.includes("ON_PREMISE")) return "DINE_IN";
+  if (normalized.includes("TAKE") || normalized.includes("PICKUP") || normalized.includes("TOGO") || normalized.includes("TO_GO")) return "TAKEOUT";
   return null;
 }
 
-function isLineItem(selection: ToastSelection): boolean {
-  const selectionType = getSelectionType(selection);
-  if (selectionType && DISALLOWED_SELECTION_TYPES.has(selectionType)) {
-    return false;
-  }
-
-  const item = (selection as any)?.item;
-  if (!item || typeof item !== "object") {
-    return false;
-  }
-
-  const itemType = getItemType(selection);
-  if (itemType && DISALLOWED_ITEM_TYPES.has(itemType)) {
-    return false;
-  }
-
-  if (selectionType && ALLOWED_SELECTION_TYPES.has(selectionType)) {
-    return true;
-  }
-
-  if (itemType && ALLOWED_ITEM_TYPES.has(itemType)) {
-    return true;
-  }
-
-  const hasGuid =
-    (typeof item.guid === "string" && item.guid.trim() !== "") ||
-    (typeof item.guid === "number" && Number.isFinite(item.guid));
-  const hasReference =
-    hasGuid ||
-    item.multiLocationId !== undefined && item.multiLocationId !== null ||
-    item.referenceId !== undefined && item.referenceId !== null;
-
-  if (hasReference) {
-    return true;
-  }
-
-  const price = extractReceiptLinePrice(selection);
-  return price !== null;
+function compareOrders(a: number | null, b: number | null, orderA: string, orderB: string, checkA: string | null, checkB: string | null): number {
+  if (a !== null && b !== null && a !== b) return b - a;
+  if (a !== null && b === null) return -1;
+  if (a === null && b !== null) return 1;
+  if (orderA !== orderB) return orderA.localeCompare(orderB);
+  return (checkA ?? "").localeCompare(checkB ?? "");
 }
 
-const DISALLOWED_SELECTION_TYPES = new Set([
-  "SPECIAL_REQUEST",
-  "NOTE",
-  "TEXT",
-  "FEE",
-  "SURCHARGE",
-  "SERVICE_CHARGE",
-  "TIP",
-  "TAX",
-  "PAYMENT",
-  "DEPOSIT",
-]);
-
-const ALLOWED_SELECTION_TYPES = new Set(["MENU_ITEM", "ITEM", "STANDARD", "OPEN_ITEM", "CUSTOM_ITEM", "RETAIL_ITEM"]);
-
-const DISALLOWED_ITEM_TYPES = new Set([
-  "SPECIAL_REQUEST",
-  "NOTE",
-  "TEXT",
-  "FEE",
-  "SURCHARGE",
-  "SERVICE_CHARGE",
-  "TIP",
-  "TAX",
-]);
-
-const ALLOWED_ITEM_TYPES = new Set([
-  "MENU_ITEM",
-  "ITEM",
-  "ENTREE",
-  "PRODUCT",
-  "OPEN_ITEM",
-  "RETAIL",
-  "RETAIL_ITEM",
-  "BEVERAGE",
-]);
-
-function getSelectionType(selection: ToastSelection): string {
-  const raw = (selection as any)?.selectionType ?? selection.selectionType;
-  if (typeof raw !== "string") {
-    return "";
-  }
-  return raw.trim().toUpperCase().replace(/\s+/g, "_");
+function resolveLineItemId(orderId: string, checkId: string | null, selection: ToastSelection, index: number): string | null {
+  if (typeof selection.guid === "string" && selection.guid.trim()) return selection.guid;
+  const itemGuid = pickString([(selection as any)?.item?.guid]);
+  if (itemGuid) return `${orderId}:${checkId ?? ""}:item:${itemGuid}:${index}`;
+  const receipt = extractNumber(selection as any, ["receiptLinePosition"]);
+  if (receipt !== null) return `${orderId}:${checkId ?? ""}:receipt:${receipt}`;
+  return `${orderId}:${checkId ?? ""}:open:${index}`;
 }
 
-function getItemType(selection: ToastSelection): string {
-  const raw = (selection as any)?.item?.itemType ?? (selection as any)?.item?.type;
-  if (typeof raw !== "string") {
-    return "";
-  }
-  return raw.trim().toUpperCase().replace(/\s+/g, "_");
-}
+function createMenuIndex(document: ToastMenusDocument | null) {
+  const itemsByGuid = new Map<string, ToastMenuItem>();
+  const itemsByMulti = new Map<string, ToastMenuItem>();
+  const itemsByRef = new Map<string | number, ToastMenuItem>();
+  const modifiersByGuid = new Map<string, ToastModifierOption>();
+  const modifiersByMulti = new Map<string, ToastModifierOption>();
+  const modifiersByRef = new Map<string | number, ToastModifierOption>();
 
-function getKitchenTicketName(entity: unknown): string | undefined {
-  if (!entity || typeof entity !== "object") {
-    return undefined;
-  }
+  if (document) {
+    for (const modifier of Object.values(document.modifierOptionReferences ?? {})) {
+      const any = modifier as any;
+      if (typeof any?.guid === "string") modifiersByGuid.set(any.guid, modifier as ToastModifierOption);
+      if (any?.multiLocationId !== undefined) modifiersByMulti.set(String(any.multiLocationId), modifier as ToastModifierOption);
+      if (any?.referenceId !== undefined && any.referenceId !== null) modifiersByRef.set(any.referenceId, modifier as ToastModifierOption);
+    }
 
-  const kitchenName = typeof (entity as any).kitchenName === "string" ? (entity as any).kitchenName.trim() : "";
-  if (kitchenName) {
-    return kitchenName;
-  }
-
-  const displayName = typeof (entity as any).name === "string" ? (entity as any).name.trim() : "";
-  if (displayName) {
-    return displayName;
-  }
-
-  return undefined;
-}
-
-function getSelectionDisplayName(selection: ToastSelection): string | undefined {
-  const displayName = typeof (selection as any)?.displayName === "string" ? (selection as any).displayName.trim() : "";
-  if (displayName) {
-    return displayName;
-  }
-  return undefined;
-}
-
-function normalizeQuantity(quantity: number | undefined): number {
-  if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) {
-    return 1;
-  }
-  return Math.max(1, Math.round(quantity));
-}
-
-function extractSpecialInstructions(selection: ToastSelection, itemName: string): string | null {
-  const explicit = typeof (selection as any)?.specialInstructions === "string" ? (selection as any).specialInstructions : null;
-  if (explicit) {
-    return explicit;
-  }
-
-  const selectionType = getSelectionType(selection);
-  if (selectionType === "SPECIAL_REQUEST") {
-    const display = getSelectionDisplayName(selection);
-    if (display && display !== itemName) {
-      return display;
+    const stack: any[] = [];
+    for (const menu of document.menus ?? []) for (const group of menu.menuGroups ?? []) stack.push(group);
+    while (stack.length > 0) {
+      const group = stack.pop();
+      if (!group) continue;
+      for (const item of group.items ?? []) {
+        const any = item as any;
+        if (typeof any?.guid === "string") itemsByGuid.set(any.guid, item as ToastMenuItem);
+        if (any?.multiLocationId !== undefined) itemsByMulti.set(String(any.multiLocationId), item as ToastMenuItem);
+        if (any?.referenceId !== undefined && any.referenceId !== null) itemsByRef.set(any.referenceId, item as ToastMenuItem);
+      }
+      for (const child of group.menuGroups ?? []) stack.push(child);
     }
   }
 
+  return {
+    findItem(reference: ToastSelection["item"]): ToastMenuItem | undefined {
+      if (!reference) return undefined;
+      if (reference.guid && itemsByGuid.has(reference.guid)) return itemsByGuid.get(reference.guid);
+      const multi = (reference as any)?.multiLocationId;
+      if (multi !== undefined && itemsByMulti.has(String(multi))) return itemsByMulti.get(String(multi));
+      const refId = (reference as any)?.referenceId;
+      if (refId !== undefined && refId !== null && itemsByRef.has(refId)) return itemsByRef.get(refId);
+      return undefined;
+    },
+    findModifier(reference: ToastSelection["item"]): ToastModifierOption | undefined {
+      if (!reference) return undefined;
+      if (reference.guid && modifiersByGuid.has(reference.guid)) return modifiersByGuid.get(reference.guid);
+      const multi = (reference as any)?.multiLocationId;
+      if (multi !== undefined && modifiersByMulti.has(String(multi))) return modifiersByMulti.get(String(multi));
+      const refId = (reference as any)?.referenceId;
+      if (refId !== undefined && refId !== null && modifiersByRef.has(refId)) return modifiersByRef.get(refId);
+      return undefined;
+    },
+  };
+}
+
+function pickString(values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  }
   return null;
 }
 
-function extractReceiptLinePrice(selection: ToastSelection): number | null {
-  const priceCandidate =
-    typeof selection.receiptLinePrice === "number"
-      ? selection.receiptLinePrice
-      : typeof (selection as any)?.price === "number"
-      ? (selection as any).price
-      : undefined;
-
-  if (priceCandidate === undefined || Number.isNaN(priceCandidate)) {
-    return null;
+function pickStringPaths(order: ToastOrder, check: ToastCheck, paths: string[]): string | null {
+  for (const path of paths) {
+    const value = getValue(order, check, path);
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
   }
+  return null;
+}
 
-  return priceCandidate;
+function pickObjectPaths(order: ToastOrder, check: ToastCheck, paths: string[]): Record<string, unknown> | null {
+  for (const path of paths) {
+    const value = getValue(order, check, path);
+    if (value && typeof value === "object") return value as Record<string, unknown>;
+  }
+  return null;
+}
+
+function getValue(order: ToastOrder, check: ToastCheck, path: string): any {
+  const [root, ...rest] = path.split(".");
+  const source = root === "order" ? (order as any) : root === "check" ? (check as any) : undefined;
+  if (!source) return undefined;
+  let current = source;
+  for (const part of rest) {
+    if (!current || typeof current !== "object") return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function sumAmounts(collection: unknown, fields: string[]): number {
+  if (!Array.isArray(collection)) return 0;
+  let total = 0;
+  for (const entry of collection) {
+    const cents = toCents(extractNumber(entry as any, fields));
+    if (cents !== null) total += Math.max(cents, 0);
+  }
+  return total;
+}
+
+function extractNumber(source: any, fields: string[]): number | null {
+  for (const field of fields) {
+    const value = getNestedValue(source, field);
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function extractTimestamp(source: any, fields: string[]): { iso: string; ms: number | null } | null {
+  for (const field of fields) {
+    const value = getNestedValue(source, field);
+    if (typeof value === "string" && value) {
+      const parsed = parseToastTimestamp(value);
+      if (parsed !== null) return { iso: value, ms: parsed };
+    }
+  }
+  return null;
+}
+
+function getNestedValue(source: any, path: string): unknown {
+  if (!source) return undefined;
+  if (!path.includes(".")) return source[path];
+  let current = source;
+  for (const part of path.split(".")) {
+    if (!current || typeof current !== "object") return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function normalizeQuantity(quantity: unknown): number {
+  if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) return 1;
+  return Math.max(1, Math.round(quantity));
+}
+
+function normalizeItemFulfillmentStatus(value: unknown): ItemFulfillmentStatus | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toUpperCase();
+  return normalized === "NEW" || normalized === "HOLD" || normalized === "SENT" || normalized === "READY"
+    ? (normalized as ItemFulfillmentStatus)
+    : null;
+}
+
+function parseToastTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const normalized = value.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function toCents(value: unknown): number | null {
+  if (typeof value !== "number" || Number.isNaN(value)) return null;
+  return Math.round(value * 100);
+}
+
+function isVoided(entity: unknown): boolean {
+  return Boolean((entity as any)?.voided || (entity as any)?.deleted);
+}
+
+function extractErrorMessage(response: OrdersLatestResponse | MenusResponse | null): string | null {
+  if (!response) return null;
+  if (typeof response === "string") return response;
+  const error = (response as any)?.error;
+  if (!error) return null;
+  if (typeof error === "string") return error;
+  if (typeof error?.message === "string") return error.message;
+  return null;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function parseNumber(value: string | null, fallback: number): number {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
