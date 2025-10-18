@@ -1,14 +1,22 @@
 import type { AppEnv } from "../config/env.js";
+import { getDiningOptions, type DiningOptionConfig } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
 import { fetchMenuFromWorker, fetchOrdersFromWorker } from "./items-expanded/fetchers.js";
 import { buildExpandedOrders, extractOrders } from "./items-expanded/compose.js";
+import {
+  extractCustomerName,
+  normalizeName,
+  normalizeOrderType,
+  pickStringPaths,
+} from "./items-expanded/extractors.js";
 import type {
   DiagnosticsCounters,
+  ExpandedOrder,
   MenusResponse,
   OrdersLatestResponse,
   UpstreamTrace,
 } from "./items-expanded/types-local.js";
-import type { ToastOrder } from "../types/toast-orders.js";
+import type { ToastCheck, ToastOrder } from "../types/toast-orders.js";
 
 const ORDERS_ENDPOINT = "/api/orders/latest";
 const MENUS_ENDPOINT = "/api/menus";
@@ -19,7 +27,101 @@ const ORDERS_UPSTREAM_MAX = 200;
 const HANDLER_TIME_BUDGET_MS = 10_000;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-export default async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
+interface ItemsExpandedDependencies {
+  getDiningOptions: (env: AppEnv) => Promise<DiningOptionConfig[]>;
+}
+
+interface ItemsExpandedFactoryOptions extends Partial<ItemsExpandedDependencies> {
+  fetch?: typeof fetch;
+}
+
+const DEFAULT_DEPS: ItemsExpandedDependencies = {
+  getDiningOptions,
+};
+
+function ensureCacheNamespace(env: AppEnv): AppEnv {
+  const candidate = (env as any)?.CACHE_KV;
+  if (candidate && typeof candidate.get === "function" && typeof candidate.put === "function") {
+    return env;
+  }
+
+  const store = new Map<string, string>();
+
+  const ensureDefaults = () => {
+    if (!store.has("menu:published:v1")) {
+      store.set("menu:published:v1", "null");
+    }
+    if (!store.has("menu:published:meta:v1")) {
+      const now = Date.now();
+      const meta = {
+        updatedAt: new Date(now).toISOString(),
+        staleAt: new Date(now + 30 * 60 * 1000).toISOString(),
+        expireAt: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+      };
+      store.set("menu:published:meta:v1", JSON.stringify(meta));
+    }
+  };
+
+  const fallback = {
+    async get(key: string) {
+      ensureDefaults();
+      return store.has(key) ? store.get(key)! : null;
+    },
+    async put(key: string, value: string) {
+      store.set(key, value);
+      return undefined;
+    },
+    async delete(key: string) {
+      store.delete(key);
+      return undefined;
+    },
+    async list() {
+      ensureDefaults();
+      return {
+        keys: Array.from(store.keys()).map((name) => ({ name, expiration: null, metadata: null })),
+        list_complete: true,
+        cursor: null,
+        cacheStatus: null,
+      };
+    },
+  } as unknown as KVNamespace;
+
+  (env as any).CACHE_KV = fallback;
+  return env;
+}
+
+export function createItemsExpandedHandler(options: ItemsExpandedFactoryOptions = {}) {
+  const deps: ItemsExpandedDependencies = {
+    getDiningOptions: options.getDiningOptions ?? DEFAULT_DEPS.getDiningOptions,
+  };
+
+  const customFetch = options.fetch;
+
+  return async function handler(env: AppEnv, request: Request): Promise<Response> {
+    const previousFetch = globalThis.fetch;
+    const shouldOverrideFetch = typeof customFetch === "function";
+    if (shouldOverrideFetch) {
+      (globalThis as any).fetch = customFetch as typeof fetch;
+    }
+
+    try {
+      const runtimeEnv = ensureCacheNamespace(env);
+      return handleItemsExpanded(runtimeEnv, request, deps);
+    } finally {
+      if (shouldOverrideFetch) {
+        (globalThis as any).fetch = previousFetch;
+      }
+    }
+  };
+}
+
+export default createItemsExpandedHandler();
+
+async function handleItemsExpanded(
+  env: AppEnv,
+  request: Request,
+  deps: ItemsExpandedDependencies
+): Promise<Response> {
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 10);
   const url = new URL(request.url);
@@ -130,6 +232,7 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   }
 
   const aggregatedOrders = Array.from(uniqueOrders.values());
+  const checkLookup = buildCheckLookup(aggregatedOrders);
   ordersFetched = aggregatedOrders.length;
   ordersBody = { ...ordersBody, data: aggregatedOrders, orders: aggregatedOrders };
 
@@ -144,6 +247,8 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
     startedAt,
     timeBudgetMs: HANDLER_TIME_BUDGET_MS,
   });
+
+  await enrichExpandedOrders(build.orders, checkLookup, env, deps);
 
   const response: any = {
     orders: build.orders,
@@ -174,6 +279,216 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   }
 
   return jsonResponse(response);
+}
+
+interface CheckLookupRecord {
+  order: ToastOrder;
+  check: ToastCheck;
+}
+
+interface NormalizedDiningOptionRecord {
+  guid: string;
+  behavior: string | null;
+  name: string | null;
+}
+
+interface DiningOptionsLookup {
+  byGuid: Map<string, NormalizedDiningOptionRecord>;
+}
+
+function buildCheckLookup(orders: ToastOrder[]): Map<string, CheckLookupRecord> {
+  const map = new Map<string, CheckLookupRecord>();
+  for (const order of orders) {
+    const checks = Array.isArray((order as any)?.checks) ? ((order as any).checks as ToastCheck[]) : [];
+    for (const check of checks) {
+      if (!check || typeof check !== "object") continue;
+      const orderId = pickStringPaths(order, check, ["order.guid", "order.id"]);
+      if (!orderId) continue;
+      const checkId = pickStringPaths(order, check, ["check.guid", "check.id"]);
+      const key = makeOrderCheckKey(orderId, checkId);
+      if (!map.has(key)) {
+        map.set(key, { order, check });
+      }
+    }
+  }
+  return map;
+}
+
+function makeOrderCheckKey(orderId: string, checkId: string | null): string {
+  return `${orderId}::${checkId ?? ""}`;
+}
+
+async function enrichExpandedOrders(
+  expandedOrders: ExpandedOrder[],
+  checkLookup: Map<string, CheckLookupRecord>,
+  env: AppEnv,
+  deps: ItemsExpandedDependencies
+): Promise<void> {
+  if (expandedOrders.length === 0) return;
+
+  let lookupPromise: Promise<DiningOptionsLookup> | null = null;
+  const ensureLookup = async () => {
+    if (!lookupPromise) {
+      lookupPromise = loadDiningOptionsLookup(env, deps);
+    }
+    return lookupPromise;
+  };
+
+  for (const entry of expandedOrders) {
+    const { orderData } = entry;
+    const key = makeOrderCheckKey(orderData.orderId, orderData.checkId);
+    const raw = checkLookup.get(key);
+    if (!raw) continue;
+
+    const resolvedName = extractCustomerName(raw.order, raw.check);
+    if (resolvedName) {
+      orderData.customerName = resolvedName;
+    }
+
+    const directMeta = collectDirectDiningOptionMeta(
+      raw.order,
+      raw.check,
+      orderData.diningOptionGuid ?? null
+    );
+
+    let guid = directMeta.guid ?? orderData.diningOptionGuid ?? null;
+    let behavior = directMeta.behavior ?? null;
+    let optionName = directMeta.name ?? null;
+    let normalizedOrderType = behavior ? normalizeOrderType(behavior) : null;
+
+    if (guid) {
+      const normalizedGuid = guid.toLowerCase();
+      if (!behavior || !optionName || !normalizedOrderType) {
+        const lookup = await ensureLookup();
+        const config = lookup.byGuid.get(normalizedGuid) ?? null;
+        if (config) {
+          if (!guid) guid = config.guid;
+          if (!behavior && config.behavior) {
+            behavior = config.behavior;
+            normalizedOrderType = normalizeOrderType(config.behavior);
+          } else if (!normalizedOrderType && config.behavior) {
+            const mapped = normalizeOrderType(config.behavior);
+            if (mapped) {
+              behavior = config.behavior;
+              normalizedOrderType = mapped;
+            }
+          }
+          if (!optionName && config.name) {
+            optionName = config.name;
+          }
+        }
+      }
+    }
+
+    if (guid && !orderData.diningOptionGuid) {
+      orderData.diningOptionGuid = guid;
+    }
+
+    if (optionName) {
+      (orderData as any).diningOptionName = optionName;
+    }
+
+    if (behavior) {
+      (orderData as any).diningOptionBehavior = behavior;
+    }
+
+    if ((orderData.orderType === "UNKNOWN" || !orderData.orderType) && normalizedOrderType) {
+      orderData.orderType = normalizedOrderType;
+    }
+  }
+}
+
+function collectDirectDiningOptionMeta(
+  order: ToastOrder,
+  check: ToastCheck,
+  existingGuid: string | null
+): { guid: string | null; behavior: string | null; name: string | null } {
+  const guid = firstString([
+    existingGuid,
+    (check as any)?.diningOptionGuid,
+    (check as any)?.diningOption?.guid,
+    (check as any)?.diningOption?.id,
+    (order as any)?.diningOptionGuid,
+    (order as any)?.diningOption?.guid,
+    (order as any)?.diningOption?.id,
+    (order as any)?.context?.diningOption?.guid,
+    (order as any)?.context?.diningOption?.id,
+  ]);
+
+  const behavior = firstString([
+    (check as any)?.diningOption?.behavior,
+    (check as any)?.diningOption?.type,
+    (check as any)?.diningOption?.mode,
+    (check as any)?.diningOptionType,
+    (order as any)?.diningOption?.behavior,
+    (order as any)?.diningOption?.type,
+    (order as any)?.diningOption?.mode,
+    (order as any)?.diningOptionType,
+    (order as any)?.context?.diningOption?.behavior,
+    (order as any)?.context?.diningOption?.type,
+    (order as any)?.context?.diningOption?.mode,
+    (order as any)?.context?.diningOptionType,
+  ]);
+
+  const name = firstString([
+    (check as any)?.diningOption?.name,
+    (check as any)?.diningOption?.displayName,
+    (order as any)?.diningOption?.name,
+    (order as any)?.diningOption?.displayName,
+    (order as any)?.context?.diningOption?.name,
+    (order as any)?.context?.diningOption?.displayName,
+  ]);
+
+  return { guid, behavior, name };
+}
+
+async function loadDiningOptionsLookup(
+  env: AppEnv,
+  deps: ItemsExpandedDependencies
+): Promise<DiningOptionsLookup> {
+  try {
+    const options = await deps.getDiningOptions(env);
+    return createDiningOptionsLookup(Array.isArray(options) ? options : []);
+  } catch (err) {
+    console.warn("failed to load dining options", { err });
+    return createDiningOptionsLookup([]);
+  }
+}
+
+function createDiningOptionsLookup(options: DiningOptionConfig[]): DiningOptionsLookup {
+  const byGuid = new Map<string, NormalizedDiningOptionRecord>();
+  for (const option of options) {
+    const guid = normalizeGuid(option.guid);
+    if (!guid) continue;
+
+    const behavior = firstString([option.behavior, (option as any)?.type, (option as any)?.mode]);
+    const name = firstString([option.name, (option as any)?.displayName]);
+
+    if (!byGuid.has(guid.toLowerCase())) {
+      byGuid.set(guid.toLowerCase(), {
+        guid,
+        behavior: behavior ?? null,
+        name: name ?? null,
+      });
+    }
+  }
+
+  return { byGuid };
+}
+
+function firstString(values: Array<unknown>): string | null {
+  for (const value of values) {
+    const normalized = normalizeName(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function normalizeGuid(value: unknown): string | null {
+  const normalized = firstString([value]);
+  return normalized ?? null;
 }
 
 function buildDebugPayload(args: {

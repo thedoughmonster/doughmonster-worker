@@ -137,6 +137,12 @@ export function firstNonEmpty(...values: Array<unknown>): string | null {
   return null;
 }
 
+export function normalizeName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export function extractCustomerName(order: ToastOrder, check: ToastCheck): string | null {
   const fromCheck = buildCustomerName((check as any)?.customer);
   if (fromCheck) return fromCheck;
@@ -146,13 +152,21 @@ export function extractCustomerName(order: ToastOrder, check: ToastCheck): strin
     if (name) return name;
   }
 
-  const fromDirectFields = firstNonEmpty(
-    (check as any)?.tabName,
-    (check as any)?.guestName,
-    (order as any)?.guestName,
-    (order as any)?.tabName,
-    (order as any)?.context?.customerName
+  const fallbackCandidates: Array<string | null> = [
+    normalizeName((check as any)?.tabName),
+    normalizeName((check as any)?.guestName),
+    normalizeName((order as any)?.guestName),
+    normalizeName((order as any)?.tabName),
+  ];
+
+  fallbackCandidates.push(
+    normalizeName((order as any)?.context?.customerName),
+    normalizeName((order as any)?.customerName),
+    normalizeName((order as any)?.source?.customerName),
+    normalizeName((order as any)?.context?.curbsidePickupInfo?.name)
   );
+
+  const fromDirectFields = fallbackCandidates.find((value) => typeof value === "string" && value) ?? null;
   if (fromDirectFields) return fromDirectFields;
 
   const deliveryBlocks: any[] = [
@@ -182,6 +196,18 @@ export function extractCustomerName(order: ToastOrder, check: ToastCheck): strin
     (order as any)?.source?.customerName
   );
   if (fromLastResort) return fromLastResort;
+
+  const firstSelection = Array.isArray((check as any)?.selections)
+    ? (check as any).selections.find((selection: unknown) => selection && typeof selection === "object")
+    : undefined;
+  const specialInstructions = normalizeName((firstSelection as any)?.specialInstructions);
+  if (specialInstructions) {
+    const match = specialInstructions.match(/\b(?:for|pickup|name)\b[: ]+([^\.\n\r]+)/i);
+    if (match) {
+      const extracted = normalizeName(match[1]);
+      if (extracted) return extracted;
+    }
+  }
 
   return null;
 }
