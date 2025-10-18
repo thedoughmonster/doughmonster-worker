@@ -170,10 +170,10 @@ wrangler deploy
 Configure secrets/KV bindings via `wrangler.toml`, `.dev.vars`, or the Cloudflare dashboard before running locally or deploying.
 
 ## Self-Fetching & Origins
-- `/api/items-expanded` now builds absolute self-URLs using the incoming request origin by default.
-- Provide `?selfOrigin=https://<your-host>` when debugging mismatched hosts; the override is used for worker self-fetches only.
-- When `?debug=1` is present, the handler logs the absolute self-fetch URLs alongside detailed upstream diagnostics.
-- On a 404 from `/api/orders/latest`, the handler falls back to dispatching the internal handler directly to avoid routing gaps.
+- `/api/items-expanded` and `/api/orders-merged` now call their sibling handlers (`/api/orders/latest` and `/api/menus`) directly inside the worker instead of issuing HTTP self-requests. This avoids the Cloudflare 404 (`error code: 1042`) caused by workers.dev vs. custom domain routing mismatches.
+- If a direct invocation throws or returns an unexpected payload, the composite route falls back to the legacy network fetch for safety. The debug traces expose this via `internalFallbackUsed: true` and `path: "network"` along with the original status/snippet details.
+- Successful direct calls surface `path: "direct"` (plus `cacheHit` for menu lookups) in the debug payloads so you can confirm the fast path is being used.
+- The optional network fallback keeps the previous header forwarding and snippet capture so existing diagnostics remain intact while we evaluate a future service binding for self-calls.
 
 ## `/api/items-expanded`
 

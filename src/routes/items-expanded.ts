@@ -1,5 +1,7 @@
 import type { AppEnv } from "../config/env.js";
 import { jsonResponse } from "../lib/http.js";
+import menusHandler from "./api/menus.js";
+import ordersLatestHandler from "./api/orders/latest.js";
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../types/toast-menus.js";
 import type { ToastCheck, ToastOrder, ToastSelection } from "../types/toast-orders.js";
 
@@ -12,6 +14,8 @@ const SNIPPET_LENGTH = 256;
 const TEXT_ENCODER = new TextEncoder();
 
 interface UpstreamTrace {
+  path: "direct" | "network";
+  internalFallbackUsed: boolean;
   url: string;
   absoluteUrl: string;
   status: number | null;
@@ -19,6 +23,7 @@ interface UpstreamTrace {
   bytes: number | null;
   snippet: string | null;
   cacheStatus?: string | null;
+  cacheHit?: boolean | null;
   updatedAt?: string | null;
 }
 
@@ -108,6 +113,17 @@ interface DiagnosticsCounters {
   };
 }
 
+type FetchResult<T> =
+  | { ok: true; data: T; trace: UpstreamTrace }
+  | { ok: false; error: Error; trace: UpstreamTrace };
+
+interface MenuFetchData {
+  payload: MenusResponse;
+  document: ToastMenusDocument | null;
+  cacheStatus: string | null;
+  updatedAt: string | null;
+}
+
 export default async function handleItemsExpanded(env: AppEnv, request: Request): Promise<Response> {
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 10);
@@ -136,8 +152,8 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   if (refreshRequested) menuUrl.searchParams.set("refresh", "1");
 
   const [ordersResult, menuResult] = await Promise.all([
-    fetchJsonWithTrace<OrdersLatestResponse>(ordersUrl, request),
-    fetchJsonWithTrace<MenusResponse>(menuUrl, request),
+    fetchOrdersFromWorker(env, request, ordersUrl),
+    fetchMenuFromWorker(env, request, menuUrl),
   ]);
 
   const timingMs = Date.now() - startedAt;
@@ -145,7 +161,7 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
   const menuTrace = menuResult.trace;
 
   const ordersPayload = ordersResult.ok ? ordersResult.data : null;
-  const menuPayload = menuResult.ok ? menuResult.data : null;
+  const menuPayload = menuResult.ok ? menuResult.data.payload : null;
   const ordersOk = Boolean(ordersPayload && (ordersPayload as OrdersLatestResponse).ok);
   const menuOk = Boolean(menuPayload && (menuPayload as MenusResponse).ok);
 
@@ -188,6 +204,7 @@ export default async function handleItemsExpanded(env: AppEnv, request: Request)
 
   menuTrace.cacheStatus = menuBody.cacheHit ? "hit-fresh" : "miss-network";
   menuTrace.updatedAt = menuBody.metadata?.lastUpdated ?? null;
+  menuTrace.cacheHit = Boolean(menuBody.cacheHit);
 
   const build = buildExpandedOrders({
     ordersPayload: ordersBody,
@@ -240,23 +257,148 @@ function buildDebugPayload(args: {
   return { ...args, ordersUpstream: args.ordersTrace, menuUpstream: args.menuTrace };
 }
 
-async function fetchJsonWithTrace<T>(url: URL, originalRequest: Request): Promise<
-  | { ok: true; data: T; trace: UpstreamTrace }
-  | { ok: false; error: Error; trace: UpstreamTrace }
-> {
-  const trace: UpstreamTrace = {
-    url: `${url.pathname}${url.search}`,
-    absoluteUrl: url.toString(),
-    status: null,
-    ok: null,
-    bytes: null,
-    snippet: null,
-  };
+async function fetchOrdersFromWorker(
+  env: AppEnv,
+  originalRequest: Request,
+  url: URL
+): Promise<FetchResult<OrdersLatestResponse>> {
+  const trace = createTrace(url, "direct");
 
   try {
-    const response = await fetch(url.toString(), { method: "GET", headers: pickForwardHeaders(originalRequest.headers) });
+    const payload = await callOrdersLatestDirect(env, url);
+    trace.status = 200;
+    trace.ok = Boolean(payload?.ok);
+    if (payload && payload.ok) {
+      return { ok: true, data: payload, trace };
+    }
+
+    throw new Error("Direct orders handler returned non-ok payload");
+  } catch (err) {
+    const fallback = await fetchJsonFromNetwork<OrdersLatestResponse>(url, originalRequest);
+    fallback.trace.internalFallbackUsed = true;
+    return fallback;
+  }
+}
+
+async function fetchMenuFromWorker(
+  env: AppEnv,
+  originalRequest: Request,
+  url: URL
+): Promise<FetchResult<MenuFetchData>> {
+  const trace = createTrace(url, "direct");
+
+  try {
+    const payload = await callMenusDirect(env, url);
+    trace.status = 200;
+    trace.ok = Boolean(payload?.ok);
+
+    if (payload && payload.ok) {
+      const cacheStatus = payload.cacheHit ? "hit-fresh" : "miss-network";
+      const updatedAt = payload.metadata?.lastUpdated ?? null;
+      trace.cacheStatus = cacheStatus;
+      trace.updatedAt = updatedAt;
+      trace.cacheHit = Boolean(payload.cacheHit);
+
+      return {
+        ok: true,
+        data: {
+          payload,
+          document: payload.menu ?? null,
+          cacheStatus,
+          updatedAt,
+        },
+        trace,
+      };
+    }
+
+    throw new Error("Direct menu handler returned non-ok payload");
+  } catch (err) {
+    const fallback = await fetchJsonFromNetwork<MenusResponse>(url, originalRequest);
+    fallback.trace.internalFallbackUsed = true;
+
+    if (!fallback.ok) {
+      return fallback;
+    }
+
+    const payload = fallback.data;
+    if (payload && payload.ok) {
+      const successPayload = payload as MenusResponse & { ok: true };
+      const cacheStatus = successPayload.cacheHit ? "hit-fresh" : "miss-network";
+      const updatedAt = successPayload.metadata?.lastUpdated ?? null;
+      fallback.trace.cacheStatus = cacheStatus;
+      fallback.trace.updatedAt = updatedAt;
+      fallback.trace.cacheHit = Boolean(successPayload.cacheHit);
+
+      return {
+        ok: true,
+        data: {
+          payload,
+          document: successPayload.menu ?? null,
+          cacheStatus,
+          updatedAt,
+        },
+        trace: fallback.trace,
+      };
+    }
+
+    fallback.trace.cacheStatus = null;
+    fallback.trace.updatedAt = null;
+    fallback.trace.cacheHit = null;
+
+    return {
+      ok: true,
+      data: {
+        payload,
+        document: null,
+        cacheStatus: null,
+        updatedAt: null,
+      },
+      trace: fallback.trace,
+    };
+  }
+}
+
+async function callOrdersLatestDirect(env: AppEnv, url: URL): Promise<OrdersLatestResponse> {
+  const internalUrl = toInternalUrl(url);
+  const response = await ordersLatestHandler(env, new Request(internalUrl.toString(), { method: "GET" }));
+
+  if (!response.ok) {
+    const snippet = await response.text().catch(() => "");
+    const error = new Error(`Direct call to ${url.pathname} failed with status ${response.status}`);
+    (error as any).status = response.status;
+    (error as any).body = snippet.slice(0, SNIPPET_LENGTH);
+    throw error;
+  }
+
+  return (await response.json()) as OrdersLatestResponse;
+}
+
+async function callMenusDirect(env: AppEnv, url: URL): Promise<MenusResponse> {
+  const internalUrl = toInternalUrl(url);
+  const response = await menusHandler(env, new Request(internalUrl.toString(), { method: "GET" }));
+
+  if (!response.ok) {
+    const snippet = await response.text().catch(() => "");
+    const error = new Error(`Direct call to ${url.pathname} failed with status ${response.status}`);
+    (error as any).status = response.status;
+    (error as any).body = snippet.slice(0, SNIPPET_LENGTH);
+    throw error;
+  }
+
+  return (await response.json()) as MenusResponse;
+}
+
+async function fetchJsonFromNetwork<T>(url: URL, originalRequest: Request): Promise<FetchResult<T>> {
+  const trace = createTrace(url, "network");
+
+  try {
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: pickForwardHeaders(originalRequest.headers),
+    });
     trace.status = response.status;
     trace.ok = response.ok;
+
     const bodyText = await response.text().catch(() => "");
     trace.bytes = TEXT_ENCODER.encode(bodyText).length;
     trace.snippet = bodyText.slice(0, SNIPPET_LENGTH);
@@ -268,8 +410,12 @@ async function fetchJsonWithTrace<T>(url: URL, originalRequest: Request): Promis
       return { ok: false, error, trace };
     }
 
+    if (!bodyText) {
+      return { ok: true, data: {} as T, trace };
+    }
+
     try {
-      const parsed = bodyText ? (JSON.parse(bodyText) as T) : ({} as T);
+      const parsed = JSON.parse(bodyText) as T;
       return { ok: true, data: parsed, trace };
     } catch (err) {
       const error = new Error("Failed to parse upstream response");
@@ -280,6 +426,26 @@ async function fetchJsonWithTrace<T>(url: URL, originalRequest: Request): Promis
     const error = err instanceof Error ? err : new Error(String(err));
     return { ok: false, error, trace };
   }
+}
+
+function createTrace(url: URL, path: "direct" | "network"): UpstreamTrace {
+  return {
+    path,
+    internalFallbackUsed: false,
+    url: `${url.pathname}${url.search}`,
+    absoluteUrl: url.toString(),
+    status: null,
+    ok: null,
+    bytes: null,
+    snippet: null,
+    cacheStatus: null,
+    cacheHit: null,
+    updatedAt: null,
+  };
+}
+
+function toInternalUrl(url: URL): URL {
+  return new URL(`${url.pathname}${url.search}`, "http://internal.worker");
 }
 
 function pickForwardHeaders(headers: Headers): HeadersInit {
