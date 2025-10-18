@@ -1196,6 +1196,105 @@ function createMenuIndex(document: ToastMenusDocument | null) {
   };
 }
 
+function buildCustomerName(customer: unknown): string | null {
+  if (!customer) return null;
+  if (typeof customer === "string") {
+    const trimmed = customer.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof customer !== "object") return null;
+
+  const direct = firstNonEmpty(
+    (customer as any)?.displayName,
+    (customer as any)?.name,
+    (customer as any)?.fullName,
+    (customer as any)?.customerName,
+    (customer as any)?.guestName,
+    (customer as any)?.nickname,
+    (customer as any)?.alias
+  );
+  if (direct) return direct;
+
+  const first = typeof (customer as any)?.firstName === "string" ? (customer as any).firstName.trim() : "";
+  const last = typeof (customer as any)?.lastName === "string" ? (customer as any).lastName.trim() : "";
+  const combined = `${first} ${last}`.trim();
+  if (combined) return combined;
+
+  const alt = firstNonEmpty((customer as any)?.givenName, (customer as any)?.familyName);
+  if (alt) return alt;
+
+  return null;
+}
+
+function firstNonEmpty(...values: Array<unknown>): string | null {
+  for (const v of values) {
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
+function extractCustomerName(order: ToastOrder, check: ToastCheck): string | null {
+  // 1) Strong signal: explicit "customer" objects
+  const fromCheck = buildCustomerName((check as any)?.customer);
+  if (fromCheck) return fromCheck;
+
+  for (const customer of Array.isArray((order as any)?.customers) ? (order as any).customers : []) {
+    const name = buildCustomerName(customer);
+    if (name) return name;
+  }
+
+  // 2) Typical online flows + dine-in aliases
+  // Prefer human-friendly fields commonly seen across providers
+  const fromDirectFields = firstNonEmpty(
+    (check as any)?.tabName,                               // e.g. "Jacob Demler"
+    (check as any)?.guestName,
+    (order as any)?.guestName,
+    (order as any)?.tabName,
+    (order as any)?.context?.customerName
+  );
+  if (fromDirectFields) return fromDirectFields;
+
+  // 3) Delivery / curbside payloads frequently carry recipient names
+  const deliveryBlocks: any[] = [
+    (order as any)?.context?.deliveryInfo,
+    (order as any)?.deliveryInfo,
+    (check as any)?.deliveryInfo,
+    (order as any)?.destination,
+    (order as any)?.shippingAddress,
+    (order as any)?.deliveryDestination
+  ].filter(Boolean);
+
+  for (const block of deliveryBlocks) {
+    const recipient = firstNonEmpty(
+      block?.recipientName,
+      block?.name,
+      block?.customerName
+    );
+    if (recipient) return recipient;
+  }
+
+  // 4) Guests array (common for dine-in / party seating)
+  const guests = Array.isArray((check as any)?.guests) ? (check as any).guests : [];
+  for (const g of guests) {
+    const name = buildCustomerName(g);
+    if (name) return name;
+  }
+
+  // 5) Last resorts: human-looking strings in a few more places
+  const fromLastResort = firstNonEmpty(
+    (check as any)?.curbsidePickupInfo?.name,
+    (order as any)?.context?.curbsidePickupInfo?.name,
+    (order as any)?.context?.pickupName,
+    (order as any)?.source?.customerName
+  );
+  if (fromLastResort) return fromLastResort;
+
+  return null;
+}
+
 function pickString(values: unknown[]): string | null {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
