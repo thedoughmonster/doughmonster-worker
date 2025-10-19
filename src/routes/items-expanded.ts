@@ -135,7 +135,12 @@ async function handleItemsExpanded(
   const statusParam = url.searchParams.get("status");
   const locationParam = url.searchParams.get("locationId");
   const detailParam = url.searchParams.get("detail");
-  const upstreamLimit = clamp(parseNumber(url.searchParams.get("limit"), ORDERS_UPSTREAM_DEFAULT), 1, ORDERS_UPSTREAM_MAX);
+  const requestedLimit = parseNumber(url.searchParams.get("limit"), ORDERS_UPSTREAM_DEFAULT);
+  const upstreamLimit = clamp(
+    Math.max(finalLimit * 3, requestedLimit ?? ORDERS_UPSTREAM_DEFAULT),
+    1,
+    ORDERS_UPSTREAM_MAX
+  );
   const rangeMode = Boolean(startParam || endParam);
   const lookbackWindowsTried: number[] = [];
   let ordersFetched = 0;

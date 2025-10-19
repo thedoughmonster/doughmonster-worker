@@ -60,7 +60,14 @@ export function buildExpandedOrders(args: BuildArgs): {
   const menuIndex = createMenuIndex(args.menuDocument ?? null);
   const deadline = args.startedAt + args.timeBudgetMs;
   const orders = extractOrders(args.ordersPayload);
-  const collected: { order: ExpandedOrder; timeMs: number | null }[] = [];
+  const candidates: Array<{
+    order: ToastOrder;
+    check: ToastCheck;
+    orderTime: { iso: string; ms: number | null };
+    orderId: string;
+    checkId: string | null;
+    hasRenderableSelections: boolean;
+  }> = [];
   let timedOut = false;
 
   outer: for (const order of orders) {
@@ -94,28 +101,96 @@ export function buildExpandedOrders(args: BuildArgs): {
         continue;
       }
 
-      const built = buildOrderFromCheck(order, check, orderTime, menuIndex, diagnostics);
-      if (!built) continue;
-      collected.push(built);
-      if (collected.length >= args.limit) continue outer;
+      const orderId = pickStringPaths(order, check, ["order.guid", "order.id"]);
+      if (!orderId) continue;
+
+      const checkId = pickStringPaths(order, check, ["check.guid", "check.id"]);
+
+      const selections = Array.isArray((check as any)?.selections) ? ((check as any).selections as ToastSelection[]) : [];
+      let hasRenderableSelections = false;
+      for (let index = 0; index < selections.length; index += 1) {
+        const selection = selections[index];
+        if (!selection || typeof selection !== "object") continue;
+        if (isVoided(selection)) continue;
+        if (!isLineItem(selection)) continue;
+        const lineItemId = resolveLineItemId(orderId, checkId ?? null, selection, index);
+        if (!lineItemId) continue;
+        hasRenderableSelections = true;
+        break;
+      }
+
+      candidates.push({
+        order,
+        check,
+        orderTime,
+        orderId,
+        checkId: checkId ?? null,
+        hasRenderableSelections,
+      });
     }
   }
 
-  const sorted = collected
-    .sort((a, b) => compareOrders(a.timeMs, b.timeMs, a.order.orderData.orderId, b.order.orderData.orderId, a.order.orderData.checkId, b.order.orderData.checkId))
-    .slice(0, args.limit)
-    .map((entry) => {
-      diagnostics.itemsIncluded += entry.order.items.length;
-      diagnostics.totals.baseItemsSubtotalCents += entry.order.totals.baseItemsSubtotalCents;
-      diagnostics.totals.modifiersSubtotalCents += entry.order.totals.modifiersSubtotalCents;
-      diagnostics.totals.discountTotalCents += entry.order.totals.discountTotalCents;
-      diagnostics.totals.serviceChargeCents += entry.order.totals.serviceChargeCents;
-      diagnostics.totals.tipCents += entry.order.totals.tipCents;
-      diagnostics.totals.grandTotalCents += entry.order.totals.grandTotalCents;
-      return entry.order;
-    });
+  const sortedCandidates = candidates.sort((a, b) =>
+    compareOrders(
+      a.orderTime.ms,
+      b.orderTime.ms,
+      a.orderId,
+      b.orderId,
+      a.checkId,
+      b.checkId
+    )
+  );
 
-  return { orders: sorted, diagnostics, timedOut };
+  const prioritizedCandidates: typeof candidates = [];
+  const fallbackCandidates: typeof candidates = [];
+
+  for (const candidate of sortedCandidates) {
+    if (candidate.hasRenderableSelections && prioritizedCandidates.length < args.limit) {
+      prioritizedCandidates.push(candidate);
+      continue;
+    }
+    fallbackCandidates.push(candidate);
+  }
+
+  const candidateQueue = prioritizedCandidates.slice(0, args.limit);
+  let fallbackIndex = 0;
+
+  while (candidateQueue.length < args.limit && fallbackIndex < fallbackCandidates.length) {
+    candidateQueue.push(fallbackCandidates[fallbackIndex]);
+    fallbackIndex += 1;
+  }
+
+  const builtOrders: ExpandedOrder[] = [];
+
+  for (let queueIndex = 0; queueIndex < candidateQueue.length; queueIndex += 1) {
+    const candidate = candidateQueue[queueIndex];
+    if (builtOrders.length >= args.limit) break;
+    if (Date.now() > deadline) {
+      timedOut = true;
+      break;
+    }
+
+    const built = buildOrderFromCheck(candidate.order, candidate.check, candidate.orderTime, menuIndex, diagnostics);
+    if (!built) {
+      if (fallbackIndex < fallbackCandidates.length) {
+        candidateQueue.push(fallbackCandidates[fallbackIndex]);
+        fallbackIndex += 1;
+      }
+      continue;
+    }
+
+    diagnostics.itemsIncluded += built.order.items.length;
+    diagnostics.totals.baseItemsSubtotalCents += built.order.totals.baseItemsSubtotalCents;
+    diagnostics.totals.modifiersSubtotalCents += built.order.totals.modifiersSubtotalCents;
+    diagnostics.totals.discountTotalCents += built.order.totals.discountTotalCents;
+    diagnostics.totals.serviceChargeCents += built.order.totals.serviceChargeCents;
+    diagnostics.totals.tipCents += built.order.totals.tipCents;
+    diagnostics.totals.grandTotalCents += built.order.totals.grandTotalCents;
+
+    builtOrders.push(built.order);
+  }
+
+  return { orders: builtOrders, diagnostics, timedOut };
 }
 
 export function extractOrders(payload: OrdersLatestResponse & { ok: true }): ToastOrder[] {

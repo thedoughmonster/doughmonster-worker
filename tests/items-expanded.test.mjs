@@ -45,6 +45,35 @@ function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
   const defaultFetch = async (input, init) => {
     const url = resolveUrl(input);
 
+    if (url.origin === 'https://toast.example' && url.pathname === '/orders/v2/ordersBulk') {
+      const raw = resolveOrdersData(url);
+      const data = Array.isArray(raw) ? raw : [];
+      const responseBody = {
+        orders: JSON.parse(JSON.stringify(data)),
+        totalCount: data.length,
+        page: Number(url.searchParams.get('page') ?? '1'),
+        pageSize: Number(url.searchParams.get('pageSize') ?? String(data.length || 100)),
+        nextPage: null,
+      };
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    if (url.origin === 'https://toast.example' && url.pathname === '/auth') {
+      return new Response(
+        JSON.stringify({
+          token: {
+            accessToken: 'test-token',
+            tokenType: 'Bearer',
+            expiresIn: 3600,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+
     if (url.pathname === '/api/orders/latest') {
       const raw = resolveOrdersData(url);
       const data = Array.isArray(raw) ? raw : [];
@@ -83,7 +112,7 @@ function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
       ? (input, init) => customFetch(input, init, defaultFetch)
       : defaultFetch;
 
-  return createItemsExpandedHandler({
+  const handler = createItemsExpandedHandler({
     fetch: fetchImpl,
     async getDiningOptions(env) {
       if (typeof getDiningOptions === 'function') {
@@ -92,6 +121,75 @@ function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
       return Array.isArray(diningOptions) ? diningOptions : [];
     },
   });
+
+  return async (env, request) => {
+    const runtimeEnv = { ...env };
+    const cacheStore = new Map();
+    const menuPayload = menuDoc ?? null;
+    const metadataObject =
+      menuMetadata && typeof menuMetadata === 'object'
+        ? menuMetadata
+        : { lastUpdated: '2024-01-01T00:00:00Z' };
+    const updatedAtRaw = typeof metadataObject.lastUpdated === 'string'
+      ? metadataObject.lastUpdated
+      : '2024-01-01T00:00:00Z';
+    const updatedAtMs = Date.parse(updatedAtRaw);
+    const baseMs = Number.isNaN(updatedAtMs) ? Date.now() : updatedAtMs;
+    const staleAt = new Date(baseMs + 30 * 60 * 1000).toISOString();
+    const expireAt = new Date(baseMs + 24 * 60 * 60 * 1000).toISOString();
+
+    cacheStore.set('menu:published:v1', JSON.stringify(menuPayload));
+    cacheStore.set(
+      'menu:published:meta:v1',
+      JSON.stringify({ updatedAt: updatedAtRaw, staleAt, expireAt })
+    );
+
+    runtimeEnv.CACHE_KV = {
+      async get(key) {
+        return cacheStore.has(key) ? cacheStore.get(key) : null;
+      },
+      async put(key, value) {
+        cacheStore.set(key, value);
+        return undefined;
+      },
+      async delete(key) {
+        cacheStore.delete(key);
+        return undefined;
+      },
+      async list() {
+        return {
+          keys: Array.from(cacheStore.keys()).map((name) => ({
+            name,
+            expiration: null,
+            metadata: null,
+          })),
+          list_complete: true,
+          cursor: null,
+          cacheStatus: null,
+        };
+      },
+    };
+    runtimeEnv.__TEST_GET_ORDERS_BULK = async (_env, params) => {
+      const fakeUrl = new URL('/api/orders/latest', 'https://worker.test');
+      if (params.startIso) fakeUrl.searchParams.set('start', params.startIso);
+      if (params.endIso) fakeUrl.searchParams.set('end', params.endIso);
+      const resolved = resolveOrdersData(fakeUrl);
+      const data = Array.isArray(resolved) ? resolved : [];
+      const cloned = JSON.parse(JSON.stringify(data));
+      const pageSizeInput = params.pageSize ?? (cloned.length || 100);
+      const pageSize = Number(pageSizeInput) || cloned.length || 100;
+      return {
+        orders: cloned,
+        totalCount: cloned.length,
+        page: params.page,
+        pageSize,
+        nextPage: null,
+        raw: { orders: cloned, totalCount: cloned.length, page: params.page, pageSize, nextPage: null },
+        responseHeaders: {},
+      };
+    };
+    return handler(runtimeEnv, request);
+  };
 }
 
 test('items-expanded calculates modifier totals with quantities and exposes modifier quantity', async () => {
@@ -1167,6 +1265,99 @@ test('items-expanded reports READY_FOR_PICKUP when all selections are ready', as
   const [order] = body.orders;
   assert.equal(order.orderData.fulfillmentStatus, 'READY_FOR_PICKUP');
   assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['READY', 'READY']);
+});
+
+test('items-expanded sorts candidates before building orders and reports diagnostics', async () => {
+  const orders = [
+    {
+      guid: 'order-low',
+      createdDate: '2024-01-01T09:00:00.000+0000',
+      checks: [
+        {
+          guid: 'check-low',
+          selections: [
+            {
+              guid: 'sel-low',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 3,
+              item: { guid: 'item-low' },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      guid: 'order-empty',
+      createdDate: '2024-01-01T14:00:00.000+0000',
+      checks: [
+        {
+          guid: 'check-empty',
+          selections: [
+            {
+              guid: 'sel-empty',
+              selectionType: 'FEE',
+              quantity: 1,
+              receiptLinePrice: 2,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      guid: 'order-high-a',
+      createdDate: '2024-01-01T16:00:00.000+0000',
+      checks: [
+        {
+          guid: 'check-high-a',
+          selections: [
+            {
+              guid: 'sel-high-a',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 5,
+              item: { guid: 'item-high-a' },
+            },
+          ],
+        },
+      ],
+    },
+    {
+      guid: 'order-high-b',
+      createdDate: '2024-01-01T13:00:00.000+0000',
+      checks: [
+        {
+          guid: 'check-high-b',
+          selections: [
+            {
+              guid: 'sel-high-b',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 4,
+              item: { guid: 'item-high-b' },
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+  const request = new Request('https://worker.test/api/items-expanded?limit=2&debug=1');
+  const response = await handler(createEnv(), request);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    body.orders.map((order) => order.orderData.orderId),
+    ['order-high-a', 'order-high-b']
+  );
+  assert.equal(body.orders.length, 2);
+  assert.equal(body.orders[0].items.length, 1);
+  assert.equal(body.orders[1].items.length, 1);
+  assert.equal(body.debug.diagnostics.ordersSeen, 4);
+  assert.equal(body.debug.diagnostics.checksSeen, 4);
+  assert.equal(body.debug.diagnostics.itemsIncluded, 2);
 });
 
 test('items-expanded prioritizes webhook-derived fulfillment status over selection states', async () => {

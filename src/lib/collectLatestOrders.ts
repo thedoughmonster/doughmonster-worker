@@ -145,6 +145,9 @@ export async function collectLatestOrders({
 }: CollectLatestOrdersOptions): Promise<CollectLatestOrdersResult> {
   const telemetry = createOrdersTelemetry(env, debug);
   const workingEnv = telemetry.env;
+  const getOrdersBulkImpl = typeof (env as any).__TEST_GET_ORDERS_BULK === "function"
+    ? ((env as any).__TEST_GET_ORDERS_BULK as CollectLatestOrdersDeps["getOrdersBulk"])
+    : deps.getOrdersBulk;
   const cursorBefore = await getCachedCursor(workingEnv);
   const { start, end } = resolveFetchWindow({ now, cursor: cursorBefore, since, windowOverride });
 
@@ -163,7 +166,7 @@ export async function collectLatestOrders({
   let page = 1;
   while (page <= MAX_PAGES) {
     const apiStart = telemetry.now();
-    const { orders, nextPage } = await deps.getOrdersBulk(workingEnv, {
+    const { orders, nextPage } = await getOrdersBulkImpl(workingEnv, {
       startIso,
       endIso,
       page,

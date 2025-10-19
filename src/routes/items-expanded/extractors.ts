@@ -21,16 +21,23 @@ const ORDER_META_STRINGS: Record<string, string[]> = {
   currency: ["order.currency", "order.currencyCode"],
   customerName: ["check.customerName", "check.customer.name", "order.customerName", "order.customer.name", "order.customers.0.name"],
   diningOptionGuid: ["check.diningOptionGuid", "check.diningOption.guid", "order.diningOptionGuid", "order.diningOption.guid", "order.context.diningOption.guid"],
-  deliveryState: ["check.deliveryInfo.state", "order.deliveryInfo.state", "order.context.deliveryInfo.state"],
+  deliveryState: [
+    "check.deliveryInfo.deliveryState",
+    "order.deliveryInfo.deliveryState",
+    "order.context.deliveryInfo.deliveryState",
+    "check.deliveryInfo.state",
+    "order.deliveryInfo.state",
+    "order.context.deliveryInfo.state",
+  ],
   promisedDate: ["order.promisedDate"],
   estimatedFulfillmentDate: ["order.estimatedFulfillmentDate"],
 };
 
 const ORDER_META_OBJECTS: Record<string, string[]> = {
-  deliveryInfo: ["check.deliveryInfo", "order.deliveryInfo", "order.context.deliveryInfo"],
+  deliveryInfo: ["order.context.deliveryInfo", "check.deliveryInfo", "order.deliveryInfo"],
   curbsidePickupInfo: ["check.curbsidePickupInfo", "order.curbsidePickupInfo", "order.context.curbsidePickupInfo"],
   table: ["check.table", "order.table", "order.context.table"],
-  employee: ["check.employee", "order.employee", "order.context.employee"],
+  employee: ["check.employee", "order.employee", "order.context.employee", "check.openedBy"],
 };
 
 const ORDER_SEAT_FIELDS = ["check.seatNumbers", "check.seats", "check.diningContext.seats", "order.context.diningContext.seats"];
@@ -93,6 +100,17 @@ export function collectSeats(order: ToastOrder, check: ToastCheck): number[] {
     const value = getValue(order, check, path);
     if (!Array.isArray(value)) continue;
     for (const seat of value) if (typeof seat === "number" && Number.isFinite(seat)) seats.add(seat);
+  }
+  const selections = Array.isArray((check as any)?.selections) ? ((check as any).selections as ToastSelection[]) : [];
+  for (const selection of selections) {
+    const seatNumber = extractNumber(selection as any, [
+      "seatNumber",
+      "seat",
+      "seatPosition",
+      "seatNum",
+      "context.seatNumber",
+    ]);
+    if (seatNumber !== null) seats.add(seatNumber);
   }
   return Array.from(seats).sort((a, b) => a - b);
 }
@@ -230,11 +248,28 @@ export function pickStringPaths(order: ToastOrder, check: ToastCheck, paths: str
 }
 
 export function pickObjectPaths(order: ToastOrder, check: ToastCheck, paths: string[]): Record<string, unknown> | null {
+  let best: Record<string, unknown> | null = null;
+  let bestScore = -1;
   for (const path of paths) {
     const value = getValue(order, check, path);
-    if (value && typeof value === "object") return value as Record<string, unknown>;
+    if (!value || typeof value !== "object") continue;
+    const candidate = value as Record<string, unknown>;
+    const score = scoreObject(candidate);
+    if (best === null || score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
   }
-  return null;
+  return best;
+}
+
+function scoreObject(value: Record<string, unknown>): number {
+  if (Array.isArray(value)) return value.length;
+  try {
+    return Object.keys(value).length;
+  } catch {
+    return 0;
+  }
 }
 
 export function getValue(order: ToastOrder, check: ToastCheck, path: string): any {
@@ -305,18 +340,28 @@ export function resolveOrderType(order: ToastOrder, check: ToastCheck): OrderTyp
   if ((order as any)?.isDriveThru === true || (check as any)?.isDriveThru === true) return "DRIVE_THRU";
   if ((order as any)?.isDelivery === true || (check as any)?.isDelivery === true) return "DELIVERY";
   if ((order as any)?.isCatering === true || (check as any)?.isCatering === true) return "CATERING";
+
   for (const path of ORDER_TYPE_FIELDS) {
     const value = getValue(order, check, path);
     const normalized = normalizeOrderType(value);
     if (normalized) return normalized;
   }
+
+  if (hasDeliveryMetadata(order, check)) return "DELIVERY";
+
   return "UNKNOWN";
 }
 
 export function normalizeOrderType(value: unknown): OrderType | null {
   if (!value) return null;
   if (typeof value === "object") {
-    const candidate = (value as any)?.type ?? (value as any)?.name;
+    const candidate =
+      (value as any)?.type ??
+      (value as any)?.name ??
+      (value as any)?.behavior ??
+      (value as any)?.mode ??
+      (value as any)?.fulfillmentMode ??
+      (value as any)?.fulfillmentType;
     return typeof candidate === "string" ? normalizeOrderType(candidate) : null;
   }
   if (typeof value !== "string") return null;
@@ -355,6 +400,22 @@ export function normalizeOrderType(value: unknown): OrderType | null {
   if (normalized.includes("DINE") || normalized.includes("EAT_IN") || normalized.includes("EATIN") || normalized.includes("ON_PREMISE")) return "DINE_IN";
   if (normalized.includes("TAKE") || normalized.includes("PICKUP") || normalized.includes("TOGO") || normalized.includes("TO_GO")) return "TAKEOUT";
   return null;
+}
+
+function hasDeliveryMetadata(order: ToastOrder, check: ToastCheck): boolean {
+  const blocks = [
+    (check as any)?.deliveryInfo,
+    (order as any)?.deliveryInfo,
+    (order as any)?.context?.deliveryInfo,
+    (order as any)?.context?.deliveryDestination,
+    (order as any)?.destination,
+    (order as any)?.shippingAddress,
+    (order as any)?.deliveryDestination,
+  ];
+  for (const block of blocks) {
+    if (block && typeof block === "object") return true;
+  }
+  return false;
 }
 
 export function getSpecialRequest(selection: ToastSelection, itemName: string): string | null {
