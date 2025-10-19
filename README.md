@@ -80,7 +80,7 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - Accepts optional ISO-8601 `start`/`end` query parameters; these are forwarded to `/api/orders/latest` when present. Otherwise the shared endpoint uses its adaptive window strategy and orders-detailed returns whatever qualifies before the requested limit is reached.
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
 - **Progressive lookback:** When not using an explicit `start`/`end` range, the handler may retry `/api/orders/latest` with minute windows `[60, 240, 480, 1440, 2880, 4320, 10080]` until it fills the requested limit or reaches the 7-day fallback window.
-- Loads the published menu document once per request to hydrate item and modifier names. The response includes a `cacheInfo` block:
+- Loads the published menu document once per request to hydrate item and modifier names. The derived menu index is cached in-memory by the menu metadata timestamp (with a fallback bucket when no timestamp is available) so identical payloads reuse the same lookup without re-indexing. Only the active timestamp entry plus the fallback bucket are retained, ensuring the cache holds at most two menu indexes at any time. The response includes a `cacheInfo` block:
   - `cacheInfo.menu` reports `hit-fresh` when the worker cache satisfied the menu request and `miss-network` when it pulled from the upstream API.
   - `cacheInfo.menuUpdatedAt` surfaces the ISO timestamp stored alongside the cached document (undefined until the first successful fetch populates KV).
 

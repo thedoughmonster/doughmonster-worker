@@ -1474,3 +1474,47 @@ test('orders-detailed surfaces menu cache info and upstream diagnostics', async 
   assert.ok(body.debug.menuUpstream.absoluteUrl.includes('/api/menus'));
   assert.equal(body.debug.menuUpstream.snippet, null);
 });
+
+test('menu index cache reuses indexes for matching metadata', async () => {
+  const menuIndexModule = await import('../dist/routes/orders-detailed/menu-index.js');
+  menuIndexModule.resetMenuIndexCacheForTests();
+
+  const buildDocument = () => ({
+    modifierOptionReferences: {},
+    menus: [
+      {
+        menuGroups: [
+          {
+            items: [
+              {
+                guid: 'item-1',
+                name: 'Latte',
+                multiLocationId: 101,
+                referenceId: 1001,
+              },
+            ],
+            menuGroups: [],
+          },
+        ],
+      },
+    ],
+  });
+
+  const firstDoc = buildDocument();
+  const firstIndex = menuIndexModule.getCachedMenuIndex(firstDoc, '2024-01-01T00:00:00Z');
+  const secondIndex = menuIndexModule.getCachedMenuIndex(buildDocument(), '2024-01-01T00:00:00Z');
+  assert.strictEqual(firstIndex, secondIndex);
+
+  const thirdIndex = menuIndexModule.getCachedMenuIndex(buildDocument(), '2024-01-02T00:00:00Z');
+  assert.notStrictEqual(secondIndex, thirdIndex);
+
+  const fallbackFirst = menuIndexModule.getCachedMenuIndex(buildDocument(), null);
+  const fallbackSecond = menuIndexModule.getCachedMenuIndex(buildDocument(), null);
+  assert.strictEqual(fallbackFirst, fallbackSecond);
+
+  menuIndexModule.getCachedMenuIndex(null, null);
+  const fallbackAfterReset = menuIndexModule.getCachedMenuIndex(buildDocument(), null);
+  assert.notStrictEqual(fallbackSecond, fallbackAfterReset);
+
+  menuIndexModule.resetMenuIndexCacheForTests();
+});
