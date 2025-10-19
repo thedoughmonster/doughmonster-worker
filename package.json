@@ -7,11 +7,23 @@
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "test": "rm -rf dist && npm run build --silent && node --test tests/*.mjs"
+    "test": "rm -rf dist && npm run build --silent && node --test tests/*.mjs",
+    "test:ui": "jest"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240919.0",
     "typescript": "^5.6.3",
-    "wrangler": "^4.42.2"
+    "wrangler": "^4.42.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "jest-environment-jsdom": "^29.7.0",
+    "@testing-library/react": "^14.0.0",
+    "@testing-library/jest-dom": "^6.4.2",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/jest": "^29.5.12",
+    "@types/react": "^18.3.9",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   }
 }
