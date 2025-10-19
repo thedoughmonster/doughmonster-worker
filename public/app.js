@@ -1,686 +1,716 @@
-const ENDPOINT = "/api/orders-detailed";
-const POLL_INTERVAL_MS = 10_000;
-const DUE_SOON_THRESHOLD_MS = 5 * 60 * 1000;
-const MAX_MODIFIERS_IN_RAIL = 50;
+// src/ui/index.tsx
+import React6 from "react";
+import { createRoot } from "react-dom/client";
 
-const FILTERS = [
+// src/ui/OrdersAllDayView.tsx
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+// src/ui/components/OrdersFilterBar.tsx
+import { memo } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
+var OrdersFilterBarComponent = ({
+  filters,
+  activeFilter,
+  onFilterChange,
+  statusMessage
+}) => {
+  return /* @__PURE__ */ jsxs("div", { className: "mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between", children: [
+    /* @__PURE__ */ jsx("div", { className: "flex items-center gap-2", children: filters.map((option) => /* @__PURE__ */ jsx(
+      "button",
+      {
+        type: "button",
+        onClick: () => onFilterChange(option.id),
+        className: classNames(
+          "rounded-full border px-4 py-1 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500",
+          activeFilter === option.id ? "border-emerald-500 bg-emerald-500/20 text-emerald-200" : "border-slate-700 bg-slate-900 text-slate-300 hover:border-emerald-500 hover:text-emerald-300"
+        ),
+        children: option.label
+      },
+      option.id
+    )) }),
+    /* @__PURE__ */ jsx("div", { className: "text-xs text-slate-500", children: statusMessage })
+  ] });
+};
+var OrdersFilterBar = memo(OrdersFilterBarComponent);
+OrdersFilterBar.displayName = "OrdersFilterBar";
+
+// src/ui/components/OrdersGrid.tsx
+import { memo as memo2 } from "react";
+import { Fragment, jsx as jsx2, jsxs as jsxs2 } from "react/jsx-runtime";
+var GridSkeleton = () => {
+  return /* @__PURE__ */ jsx2("div", { className: "grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3", children: Array.from({ length: 6 }).map((_, index) => /* @__PURE__ */ jsxs2(
+    "div",
+    {
+      className: "h-56 animate-pulse rounded-2xl border border-slate-800 bg-slate-900/60",
+      children: [
+        /* @__PURE__ */ jsx2("div", { className: "h-16 border-b border-slate-800 bg-slate-900/80" }),
+        /* @__PURE__ */ jsxs2("div", { className: "space-y-3 p-4", children: [
+          /* @__PURE__ */ jsx2("div", { className: "h-4 rounded bg-slate-800" }),
+          /* @__PURE__ */ jsx2("div", { className: "h-4 w-1/2 rounded bg-slate-800" }),
+          /* @__PURE__ */ jsx2("div", { className: "h-3 w-2/3 rounded bg-slate-800" })
+        ] })
+      ]
+    },
+    index
+  )) });
+};
+var OrderCard = ({ order, now }) => {
+  const { raw, placedAt, dueAt, combinedItems } = order;
+  const { orderData } = raw;
+  const customerName = orderData.customerName?.trim() || "Guest";
+  const orderNumber = orderData.orderNumber ? `#${orderData.orderNumber}` : "";
+  const elapsed = now.getTime() - placedAt.getTime();
+  const urgencyClasses = getUrgencyClasses(dueAt, now);
+  const diningLabel = formatDiningOption(orderData.orderType ?? orderData.orderTypeNormalized ?? "UNKNOWN");
+  return /* @__PURE__ */ jsxs2(
+    "article",
+    {
+      className: classNames(
+        "flex h-full flex-col overflow-hidden rounded-2xl border bg-slate-900/70 shadow-xl",
+        urgencyClasses,
+        "border"
+      ),
+      children: [
+        /* @__PURE__ */ jsx2("div", { className: "border-b border-slate-800 bg-slate-900/90 px-4 py-3", children: /* @__PURE__ */ jsx2("div", { className: "flex flex-wrap items-center justify-between gap-3", children: /* @__PURE__ */ jsxs2("div", { children: [
+          /* @__PURE__ */ jsxs2("div", { className: "flex flex-wrap items-center gap-2 text-sm text-slate-300", children: [
+            /* @__PURE__ */ jsx2("span", { className: "text-base font-semibold text-white", children: customerName }),
+            orderNumber && /* @__PURE__ */ jsx2("span", { className: "rounded-full bg-slate-800 px-2 py-0.5 text-xs font-semibold text-slate-200", children: orderNumber }),
+            /* @__PURE__ */ jsx2("span", { className: "rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-slate-200", children: diningLabel }),
+            orderData.fulfillmentStatus && /* @__PURE__ */ jsx2(
+              "span",
+              {
+                className: classNames(
+                  "rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide",
+                  getStatusChipClasses(orderData.fulfillmentStatus)
+                ),
+                children: orderData.fulfillmentStatus.replace(/_/g, " ")
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxs2("div", { className: "mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400", children: [
+            /* @__PURE__ */ jsxs2("span", { children: [
+              "Placed ",
+              formatLocalTime(placedAt)
+            ] }),
+            dueAt && /* @__PURE__ */ jsxs2("span", { children: [
+              "Due ",
+              formatLocalTime(dueAt)
+            ] }),
+            /* @__PURE__ */ jsxs2("span", { className: "font-mono text-emerald-300", children: [
+              "\u23F1 ",
+              formatDuration(elapsed),
+              " ago"
+            ] })
+          ] })
+        ] }) }) }),
+        /* @__PURE__ */ jsx2("div", { className: "flex-1 space-y-4 px-4 py-4", children: combinedItems.map((item) => /* @__PURE__ */ jsxs2(
+          "div",
+          {
+            className: "rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 shadow-sm",
+            children: [
+              /* @__PURE__ */ jsxs2("div", { className: "flex flex-wrap items-center justify-between gap-3", children: [
+                /* @__PURE__ */ jsx2("div", { className: "text-sm font-medium text-white", children: item.itemName }),
+                /* @__PURE__ */ jsxs2("div", { className: "flex items-center gap-2", children: [
+                  /* @__PURE__ */ jsxs2("span", { className: "rounded-full bg-emerald-400/20 px-2 py-0.5 text-xs font-semibold text-emerald-200", children: [
+                    "\xD7",
+                    item.totalQuantity
+                  ] }),
+                  /* @__PURE__ */ jsx2(
+                    "span",
+                    {
+                      className: classNames(
+                        "rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wide",
+                        getStatusChipClasses(item.statusSummary)
+                      ),
+                      children: item.statusSummary.replace(/_/g, " ")
+                    }
+                  )
+                ] })
+              ] }),
+              item.modifiers.length > 0 && /* @__PURE__ */ jsx2("ul", { className: "mt-3 space-y-2", children: item.modifiers.map((modifier) => /* @__PURE__ */ jsxs2(
+                "li",
+                {
+                  className: "flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2",
+                  children: [
+                    /* @__PURE__ */ jsxs2("div", { className: "text-xs font-medium text-slate-200", children: [
+                      modifier.name,
+                      modifier.groupName && /* @__PURE__ */ jsx2("span", { className: "ml-2 text-[10px] uppercase tracking-wide text-slate-500", children: modifier.groupName })
+                    ] }),
+                    /* @__PURE__ */ jsxs2("span", { className: "rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-900", children: [
+                      "\xD7",
+                      modifier.quantity
+                    ] })
+                  ]
+                },
+                modifier.key
+              )) })
+            ]
+          },
+          item.key
+        )) })
+      ]
+    }
+  );
+};
+var OrdersGridComponent = ({
+  showLoading,
+  showEmptyState,
+  error,
+  enrichedOrders,
+  now,
+  onRetry
+}) => {
+  return /* @__PURE__ */ jsxs2(Fragment, { children: [
+    error && /* @__PURE__ */ jsxs2("div", { className: "mb-4 flex items-center justify-between rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200", children: [
+      /* @__PURE__ */ jsx2("span", { children: error }),
+      /* @__PURE__ */ jsx2(
+        "button",
+        {
+          type: "button",
+          onClick: onRetry,
+          className: "rounded-full border border-red-400 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-red-100 transition hover:border-red-200 hover:text-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400",
+          children: "Retry"
+        }
+      )
+    ] }),
+    showLoading ? /* @__PURE__ */ jsx2(GridSkeleton, {}) : showEmptyState ? /* @__PURE__ */ jsxs2("div", { className: "mt-24 flex flex-col items-center justify-center gap-3 text-center", children: [
+      /* @__PURE__ */ jsx2("div", { className: "rounded-full border border-slate-800 bg-slate-900 p-6 text-4xl", children: "\u{1F369}" }),
+      /* @__PURE__ */ jsx2("h3", { className: "text-xl font-semibold text-white", children: "No orders to display" }),
+      /* @__PURE__ */ jsx2("p", { className: "max-w-sm text-sm text-slate-400", children: "Adjust the filters or check back shortly for new activity." })
+    ] }) : /* @__PURE__ */ jsx2("div", { className: "grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3", children: enrichedOrders.map((order) => /* @__PURE__ */ jsx2(OrderCard, { order, now }, order.raw.orderData.orderId)) })
+  ] });
+};
+var OrdersGrid = memo2(OrdersGridComponent);
+OrdersGrid.displayName = "OrdersGrid";
+
+// src/ui/components/OrdersHeader.tsx
+import { memo as memo3 } from "react";
+import { jsx as jsx3, jsxs as jsxs3 } from "react/jsx-runtime";
+var SettingsIcon = ({ className }) => /* @__PURE__ */ jsxs3(
+  "svg",
+  {
+    xmlns: "http://www.w3.org/2000/svg",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className,
+    children: [
+      /* @__PURE__ */ jsx3("path", { d: "M12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" }),
+      /* @__PURE__ */ jsx3("path", { d: "M19.5 12a7.5 7.5 0 0 0-.08-1.08l2.12-1.65-2-3.46-2.58 1a7.52 7.52 0 0 0-1.87-1.08l-.39-2.74h-4l-.39 2.74a7.52 7.52 0 0 0-1.87-1.08l-2.58-1-2 3.46 2.12 1.65A7.5 7.5 0 0 0 4.5 12c0 .36.03.72.08 1.08l-2.12 1.65 2 3.46 2.58-1a7.52 7.52 0 0 0 1.87-1.08l.39 2.74h4l.39-2.74a7.52 7.52 0 0 0 1.87-1.08l2.58 1 2-3.46-2.12-1.65c.05-.36.08-.72.08-1.08Z" })
+    ]
+  }
+);
+var RailToggleIcon = ({ open, className }) => /* @__PURE__ */ jsx3(
+  "svg",
+  {
+    xmlns: "http://www.w3.org/2000/svg",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    className,
+    children: open ? /* @__PURE__ */ jsx3("path", { d: "m6 18 6-6-6-6m12 12-6-6 6-6" }) : /* @__PURE__ */ jsx3("path", { d: "m9 6 6 6-6 6" })
+  }
+);
+var OrdersHeaderComponent = ({
+  currentTimeLabel,
+  openOrderCount,
+  lastUpdatedLabel,
+  error,
+  isRailOpen,
+  onToggleRail
+}) => {
+  return /* @__PURE__ */ jsx3("header", { className: "fixed inset-x-0 top-0 z-30 border-b border-slate-800 bg-slate-950/90 backdrop-blur", children: /* @__PURE__ */ jsxs3("div", { className: "mx-auto flex h-16 max-w-7xl items-center gap-4 px-4", children: [
+    /* @__PURE__ */ jsxs3("div", { className: "flex items-center gap-3", children: [
+      /* @__PURE__ */ jsx3(
+        "button",
+        {
+          type: "button",
+          className: "inline-flex items-center justify-center rounded-full border border-slate-700 bg-slate-900 p-2 text-slate-300 transition hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 md:hidden",
+          onClick: onToggleRail,
+          "aria-label": isRailOpen ? "Hide modifiers" : "Show modifiers",
+          children: /* @__PURE__ */ jsx3(RailToggleIcon, { open: isRailOpen, className: "h-5 w-5" })
+        }
+      ),
+      /* @__PURE__ */ jsx3("div", { className: "text-lg font-semibold text-white", children: "Orders \u2013 All Day View" })
+    ] }),
+    /* @__PURE__ */ jsxs3("div", { className: "flex flex-1 items-center gap-4 text-sm text-slate-300", children: [
+      /* @__PURE__ */ jsx3("span", { className: "hidden text-slate-400 sm:inline", children: "Local time" }),
+      /* @__PURE__ */ jsx3("span", { className: "font-mono text-white", children: currentTimeLabel }),
+      /* @__PURE__ */ jsx3("span", { className: "hidden text-slate-500 md:inline", children: "|" }),
+      /* @__PURE__ */ jsxs3("span", { className: "font-medium text-emerald-300", children: [
+        "Open Orders: ",
+        /* @__PURE__ */ jsx3("span", { className: "font-semibold text-white", children: openOrderCount })
+      ] }),
+      lastUpdatedLabel && /* @__PURE__ */ jsx3("span", { className: "hidden text-xs text-slate-400 sm:inline", children: lastUpdatedLabel }),
+      error && /* @__PURE__ */ jsx3("span", { className: "rounded-full bg-red-500/20 px-2 py-1 text-xs text-red-300", children: error })
+    ] }),
+    /* @__PURE__ */ jsx3(
+      "button",
+      {
+        type: "button",
+        className: "relative inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-slate-200 transition hover:border-emerald-500 hover:text-emerald-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500",
+        onClick: () => console.info("Settings clicked"),
+        "aria-label": "Settings",
+        children: /* @__PURE__ */ jsx3(SettingsIcon, { className: "h-5 w-5" })
+      }
+    )
+  ] }) });
+};
+var OrdersHeader = memo3(OrdersHeaderComponent);
+OrdersHeader.displayName = "OrdersHeader";
+
+// src/ui/components/ModifiersRail.tsx
+import { memo as memo4 } from "react";
+import { jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
+var RailSkeleton = () => {
+  return /* @__PURE__ */ jsx4("ul", { className: "space-y-3", children: Array.from({ length: 6 }).map((_, index) => /* @__PURE__ */ jsxs4(
+    "li",
+    {
+      className: "flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-3",
+      children: [
+        /* @__PURE__ */ jsx4("div", { className: "h-4 w-24 animate-pulse rounded bg-slate-800" }),
+        /* @__PURE__ */ jsx4("div", { className: "h-8 w-8 animate-pulse rounded-full bg-slate-800" })
+      ]
+    },
+    index
+  )) });
+};
+var ModifiersRailComponent = ({
+  modifierAggregations,
+  showLoading,
+  isOpen
+}) => {
+  return /* @__PURE__ */ jsx4(
+    "aside",
+    {
+      className: classNames(
+        "fixed bottom-0 left-0 top-16 z-20 w-72 border-r border-slate-800 bg-slate-950/95 backdrop-blur transition-transform duration-200 ease-out",
+        isOpen ? "translate-x-0" : "-translate-x-full",
+        "md:translate-x-0"
+      ),
+      children: /* @__PURE__ */ jsxs4("div", { className: "flex h-full flex-col", children: [
+        /* @__PURE__ */ jsxs4("div", { className: "border-b border-slate-800 px-4 py-3", children: [
+          /* @__PURE__ */ jsx4("h2", { className: "text-sm font-semibold uppercase tracking-wide text-slate-400", children: "Modifiers" }),
+          /* @__PURE__ */ jsx4("p", { className: "text-xs text-slate-500", children: "Aggregated across visible orders" })
+        ] }),
+        /* @__PURE__ */ jsx4("div", { className: "flex-1 overflow-y-auto px-3 py-4", children: showLoading ? /* @__PURE__ */ jsx4(RailSkeleton, {}) : modifierAggregations.length ? /* @__PURE__ */ jsx4("ul", { className: "space-y-2", children: modifierAggregations.map((modifier) => /* @__PURE__ */ jsxs4(
+          "li",
+          {
+            className: "flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 shadow-sm",
+            children: [
+              /* @__PURE__ */ jsxs4("div", { children: [
+                /* @__PURE__ */ jsx4("p", { className: "text-sm font-medium text-white", children: modifier.name }),
+                modifier.groupName && /* @__PURE__ */ jsx4("p", { className: "text-xs text-slate-500", children: modifier.groupName })
+              ] }),
+              /* @__PURE__ */ jsx4("span", { className: "flex h-8 w-8 items-center justify-center rounded-full bg-emerald-400 text-sm font-semibold text-slate-900 shadow", children: modifier.count })
+            ]
+          },
+          modifier.key
+        )) }) : /* @__PURE__ */ jsx4("div", { className: "rounded-lg border border-dashed border-slate-800 bg-slate-900/60 p-4 text-center text-xs text-slate-500", children: "No modifiers in view" }) })
+      ] })
+    }
+  );
+};
+var ModifiersRail = memo4(ModifiersRailComponent);
+ModifiersRail.displayName = "ModifiersRail";
+
+// src/ui/OrdersAllDayView.tsx
+import { jsx as jsx5, jsxs as jsxs5 } from "react/jsx-runtime";
+var ORDERS_ENDPOINT = "https://example.com/api/orders-detailed";
+var POLL_INTERVAL_MS = 1e4;
+var CLOSED_FULFILLMENT_STATUSES = /* @__PURE__ */ new Set([
+  "COMPLETED",
+  "DELIVERED",
+  "PICKED_UP",
+  "CANCELLED"
+]);
+var CLOSED_DELIVERY_STATES = /* @__PURE__ */ new Set(["DELIVERED"]);
+var FILTERS = [
   { id: "all", label: "All" },
   { id: "open", label: "Open" },
   { id: "ready", label: "Ready" },
-  { id: "delivery", label: "Delivery" },
+  { id: "delivery", label: "Delivery" }
 ];
-
-const elements = {
-  modifierRail: document.getElementById("modifier-rail"),
-  modifierRailList: document.getElementById("modifier-rail-list"),
-  openRailButton: document.getElementById("open-rail"),
-  closeRailButton: document.getElementById("close-rail"),
-  ordersContainer: document.getElementById("orders-container"),
-  currentTime: document.getElementById("current-time"),
-  openOrderCount: document.getElementById("open-order-count"),
-  filterChips: document.getElementById("filter-chips"),
-  lookbackButtons: document.querySelectorAll(".lookback-toggle .chip"),
-  lastUpdated: document.getElementById("last-updated"),
-  statusArea: document.getElementById("status-area"),
-};
-
-const state = {
-  filter: "open",
-  lookback: "default",
-  enrichedOrders: [],
-  loading: true,
-  error: null,
-  lastUpdatedAt: null,
-};
-
-let pollTimer = null;
-let animationFrame = null;
-let lastTimerUpdate = 0;
-
-function init() {
-  renderFilterChips();
-  bindEvents();
-  updateLookbackButtons();
-  if (elements.modifierRail) {
-    elements.modifierRail.setAttribute("aria-hidden", "false");
-  }
-  updateLiveClock();
-  setInterval(updateLiveClock, 1000);
-  scheduleTimerTick();
-  fetchOrders({ showLoading: true });
-  pollTimer = setInterval(() => fetchOrders({ showLoading: false }), POLL_INTERVAL_MS);
-}
-
-function bindEvents() {
-  elements.filterChips.addEventListener("click", (event) => {
-    const target = event.target.closest("button[data-filter]");
-    if (!target) return;
-    const filter = target.getAttribute("data-filter");
-    if (filter && filter !== state.filter) {
-      state.filter = filter;
-      render();
-    }
-  });
-
-  elements.lookbackButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const lookback = button.getAttribute("data-lookback");
-      if (!lookback || lookback === state.lookback) return;
-      state.lookback = lookback;
-      updateLookbackButtons();
-      fetchOrders({ showLoading: true });
-    });
-  });
-
-  if (elements.openRailButton) {
-    elements.openRailButton.addEventListener("click", () => {
-      elements.modifierRail.classList.add("modifier-rail--visible");
-      elements.modifierRail.setAttribute("aria-hidden", "false");
-    });
-  }
-
-  if (elements.closeRailButton) {
-    elements.closeRailButton.addEventListener("click", () => {
-      elements.modifierRail.classList.remove("modifier-rail--visible");
-      elements.modifierRail.setAttribute("aria-hidden", "true");
-    });
-  }
-}
-
-function updateLookbackButtons() {
-  elements.lookbackButtons.forEach((button) => {
-    const lookback = button.getAttribute("data-lookback");
-    const isActive = lookback === state.lookback;
-    button.classList.toggle("chip--active", isActive);
-    button.setAttribute("aria-pressed", String(isActive));
-  });
-}
-
-function renderFilterChips() {
-  const fragment = document.createDocumentFragment();
-  FILTERS.forEach(({ id, label }) => {
-    const button = document.createElement("button");
-    button.className = "chip";
-    button.setAttribute("data-filter", id);
-    button.setAttribute("role", "tab");
-    button.textContent = label;
-    fragment.appendChild(button);
-  });
-  elements.filterChips.innerHTML = "";
-  elements.filterChips.appendChild(fragment);
-  updateFilterChipSelection();
-}
-
-function updateFilterChipSelection() {
-  const buttons = elements.filterChips.querySelectorAll("button[data-filter]");
-  buttons.forEach((button) => {
-    const isActive = button.getAttribute("data-filter") === state.filter;
-    button.classList.toggle("chip--active", isActive);
-    button.setAttribute("aria-selected", String(isActive));
-    button.setAttribute("tabindex", isActive ? "0" : "-1");
-  });
-}
-
-async function fetchOrders({ showLoading }) {
-  if (showLoading) {
-    state.loading = true;
-    state.error = null;
-    render();
-  }
-
-  try {
-    const url = new URL(ENDPOINT, window.location.origin);
-    if (state.lookback === "full") {
-      const now = new Date();
-      const start = new Date(now);
-      start.setHours(0, 0, 0, 0);
-      url.searchParams.set("start", toToastTimestamp(start));
-      url.searchParams.set("end", toToastTimestamp(now));
-    }
-
-    const response = await fetch(url.toString());
-    if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
-    }
-    const payload = await response.json();
-    const orders = Array.isArray(payload?.orders) ? payload.orders : [];
-    state.enrichedOrders = processOrders(orders);
-    state.lastUpdatedAt = new Date();
-    state.error = null;
-  } catch (error) {
-    console.error("Failed to fetch orders", error);
-    state.error = error instanceof Error ? error.message : "Unknown error";
-  } finally {
-    state.loading = false;
-    render();
-  }
-}
-
-function processOrders(orders) {
-  return orders
-    .filter((order) => order && order.orderData && order.items)
-    .map((order) => {
-      const placedAt = parseToast(order.orderData.orderTime);
-      const dueAt = order.orderData.timeDue ? parseToast(order.orderData.timeDue) : null;
-      const combinedItems = combineItems(order.items ?? []);
-      return {
-        raw: order,
-        placedAt,
-        dueAt,
-        combinedItems,
-      };
-    });
-}
-
 function parseToast(timestamp) {
-  if (!timestamp || typeof timestamp !== "string") {
-    return new Date();
+  if (!timestamp) {
+    return /* @__PURE__ */ new Date();
   }
   const normalized = timestamp.replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
   return new Date(normalized);
 }
-
-function toToastTimestamp(date) {
-  const pad = (value, size = 2) => String(value).padStart(size, "0");
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hours = pad(date.getHours());
-  const minutes = pad(date.getMinutes());
-  const seconds = pad(date.getSeconds());
-  const millis = pad(date.getMilliseconds(), 3);
-  const offsetMinutes = -date.getTimezoneOffset();
-  const offsetSign = offsetMinutes >= 0 ? "+" : "-";
-  const offsetHours = pad(Math.floor(Math.abs(offsetMinutes) / 60));
-  const offsetMins = pad(Math.abs(offsetMinutes) % 60);
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${millis}${offsetSign}${offsetHours}${offsetMins}`;
+function formatLocalTime(date) {
+  return new Intl.DateTimeFormat(void 0, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
 }
-
-function combineItems(items) {
-  const map = new Map();
+function formatDuration(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1e3));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+function hashModifier(modifier) {
+  if (modifier.id) {
+    return modifier.id;
+  }
+  const name = modifier.name ?? "";
+  const group = modifier.groupName ?? "";
+  return `${name}|${group}`;
+}
+function hashItem(item) {
+  const modifiers = (item.modifiers ?? []).map((modifier) => `${hashModifier(modifier)}:${modifier.quantity ?? 1}`).sort().join(";");
+  return `${item.menuItemId}|${modifiers}`;
+}
+function isOpenOrder(order) {
+  const fulfillmentStatus = order.orderData.fulfillmentStatus;
+  const deliveryState = order.orderData.deliveryState;
+  if (deliveryState && CLOSED_DELIVERY_STATES.has(deliveryState)) {
+    return false;
+  }
+  if (!fulfillmentStatus) {
+    return true;
+  }
+  return !CLOSED_FULFILLMENT_STATUSES.has(fulfillmentStatus);
+}
+function matchesFilter(order, filter) {
+  switch (filter) {
+    case "all":
+      return true;
+    case "open":
+      return isOpenOrder(order);
+    case "ready":
+      return order.orderData.fulfillmentStatus === "READY_FOR_PICKUP";
+    case "delivery":
+      return (order.orderData.orderTypeNormalized ?? order.orderData.orderType) === "DELIVERY" || order.orderData.deliveryState === "IN_PROGRESS" || order.orderData.deliveryState === "PICKED_UP";
+    default:
+      return true;
+  }
+}
+function combineOrderItems(items) {
+  const map = /* @__PURE__ */ new Map();
   items.forEach((item) => {
-    if (!item) return;
-    const quantity = typeof item.quantity === "number" ? item.quantity : 1;
-    if (quantity <= 0) return;
-    const collapsedModifiers = collapseModifiers(item.modifiers ?? []);
-    const modifiersKey = collapsedModifiers
-      .map((mod) => `${mod.key}:${mod.quantity}`)
-      .sort()
-      .join("|");
-    const key = `${item.menuItemId || item.itemName || "unknown"}__${modifiersKey}`;
-    let entry = map.get(key);
-    if (!entry) {
-      entry = {
-        key,
-        itemName: item.itemName || "Item",
-        menuItemId: item.menuItemId || key,
-        totalQuantity: 0,
-        modifiers: new Map(),
-        statuses: new Map(),
-      };
-      map.set(key, entry);
-    }
-    entry.totalQuantity += quantity;
-    collapsedModifiers.forEach((modifier) => {
-      const existing = entry.modifiers.get(modifier.key);
-      if (existing) {
-        existing.quantity += modifier.quantity * quantity;
-        existing.priceCents += modifier.priceCents * quantity;
-      } else {
-        entry.modifiers.set(modifier.key, {
-          key: modifier.key,
-          name: modifier.name,
-          groupName: modifier.groupName,
-          quantity: modifier.quantity * quantity,
-          priceCents: modifier.priceCents * quantity,
-        });
-      }
-    });
-    const statusKey = item.fulfillmentStatus || "UNKNOWN";
-    entry.statuses.set(statusKey, (entry.statuses.get(statusKey) ?? 0) + quantity);
-  });
-
-  return Array.from(map.values()).map((entry) => ({
-    key: entry.key,
-    itemName: entry.itemName,
-    menuItemId: entry.menuItemId,
-    totalQuantity: entry.totalQuantity,
-    modifiers: Array.from(entry.modifiers.values()),
-    statusSummary: Array.from(entry.statuses.entries()),
-  }));
-}
-
-function collapseModifiers(modifiers) {
-  const map = new Map();
-  modifiers.forEach((modifier) => {
-    if (!modifier) return;
-    const key = modifier.id || `${modifier.name ?? ""}|${modifier.groupName ?? ""}`;
-    const quantity = typeof modifier.quantity === "number" ? modifier.quantity : 1;
-    const priceCents = typeof modifier.priceCents === "number" ? modifier.priceCents : 0;
-    const name = modifier.name || (modifier.groupName ? `${modifier.groupName} Option` : "Modifier");
-    const groupName = modifier.groupName ?? null;
+    const key = hashItem(item);
+    const itemQuantity = item.quantity ?? 1;
+    const modifiers = item.modifiers ?? [];
     const existing = map.get(key);
     if (existing) {
-      existing.quantity += quantity;
-      existing.priceCents += priceCents;
+      existing.totalQuantity += itemQuantity;
+      const modifierMap = new Map(existing.modifiers.map((m) => [m.key, m]));
+      modifiers.forEach((modifier) => {
+        const modifierKey = hashModifier(modifier);
+        const modifierQuantity = (modifier.quantity ?? 1) * itemQuantity;
+        const current = modifierMap.get(modifierKey);
+        if (current) {
+          current.quantity += modifierQuantity;
+        } else {
+          modifierMap.set(modifierKey, {
+            key: modifierKey,
+            name: modifier.name,
+            groupName: modifier.groupName,
+            quantity: modifierQuantity
+          });
+        }
+      });
+      existing.modifiers = Array.from(modifierMap.values()).sort(
+        (a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" })
+      );
+      existing.statusSummary = summarizeItemStatuses(existing.statusSummary, item.fulfillmentStatus);
     } else {
+      const modifierSummaries = [];
+      const modifierMap = /* @__PURE__ */ new Map();
+      modifiers.forEach((modifier) => {
+        const modifierKey = hashModifier(modifier);
+        const modifierQuantity = (modifier.quantity ?? 1) * itemQuantity;
+        modifierMap.set(modifierKey, {
+          key: modifierKey,
+          name: modifier.name,
+          groupName: modifier.groupName,
+          quantity: modifierQuantity
+        });
+      });
+      modifierMap.forEach((value) => modifierSummaries.push(value));
+      modifierSummaries.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base" }));
       map.set(key, {
         key,
-        name,
-        groupName,
-        quantity,
-        priceCents,
+        itemName: item.itemName,
+        menuItemId: item.menuItemId,
+        totalQuantity: itemQuantity,
+        modifiers: modifierSummaries,
+        statusSummary: summarizeItemStatuses(void 0, item.fulfillmentStatus)
       });
     }
   });
   return Array.from(map.values());
 }
-
-function render() {
-  updateFilterChipSelection();
-  renderStatus();
-  renderOrders();
-  renderModifierRail();
-  updateLastUpdated();
-}
-
-function renderStatus() {
-  elements.statusArea.innerHTML = "";
-  if (state.loading) {
-    const skeleton = document.createElement("div");
-    skeleton.className = "loading-banner";
-    skeleton.textContent = "Loading orders…";
-    elements.statusArea.appendChild(skeleton);
-    return;
+function summarizeItemStatuses(currentSummary, nextStatus) {
+  const normalizedStatus = nextStatus ?? "Unknown";
+  if (!currentSummary || currentSummary === normalizedStatus) {
+    return normalizedStatus;
   }
-  if (state.error) {
-    const errorBanner = document.createElement("div");
-    errorBanner.className = "error-banner";
-    const retryButton = document.createElement("button");
-    retryButton.className = "retry-button";
-    retryButton.textContent = "Retry";
-    retryButton.addEventListener("click", () => fetchOrders({ showLoading: true }));
-    errorBanner.textContent = state.error;
-    errorBanner.appendChild(retryButton);
-    elements.statusArea.appendChild(errorBanner);
-    return;
+  if (currentSummary.includes("Mixed")) {
+    return currentSummary;
   }
-}
-
-function renderOrders() {
-  elements.ordersContainer.innerHTML = "";
-  if (state.loading) {
-    elements.ordersContainer.appendChild(createSkeletonCards());
-    elements.openOrderCount.textContent = "Open Orders: --";
-    return;
+  if (currentSummary !== normalizedStatus) {
+    return "Mixed";
   }
-
-  const filteredOrders = getFilteredOrders();
-  elements.openOrderCount.textContent = `Open Orders: ${filteredOrders.length}`;
-
-  if (filteredOrders.length === 0) {
-    const emptyState = document.createElement("div");
-    emptyState.className = "empty-state";
-    emptyState.textContent = "No orders match the current filters.";
-    elements.ordersContainer.appendChild(emptyState);
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  filteredOrders.forEach((order) => {
-    fragment.appendChild(renderOrderCard(order));
-  });
-  elements.ordersContainer.appendChild(fragment);
+  return currentSummary;
 }
-
-function createSkeletonCards() {
-  const fragment = document.createDocumentFragment();
-  for (let i = 0; i < 4; i += 1) {
-    const card = document.createElement("article");
-    card.className = "order-card order-card--skeleton";
-    const header = document.createElement("div");
-    header.className = "order-card-header skeleton";
-    const body = document.createElement("div");
-    body.className = "order-card-body skeleton";
-    card.appendChild(header);
-    card.appendChild(body);
-    fragment.appendChild(card);
-  }
-  return fragment;
-}
-
-function getFilteredOrders() {
-  const sorted = [...state.enrichedOrders].sort(compareOrders);
-  return sorted.filter((order) => matchesFilter(order, state.filter));
-}
-
-function compareOrders(a, b) {
-  const dueA = a.dueAt ? a.dueAt.getTime() : null;
-  const dueB = b.dueAt ? b.dueAt.getTime() : null;
-  if (dueA !== null && dueB !== null && dueA !== dueB) {
-    return dueA - dueB;
-  }
-  if (dueA === null && dueB !== null) return 1;
-  if (dueA !== null && dueB === null) return -1;
-
-  const placedDiff = a.placedAt.getTime() - b.placedAt.getTime();
-  if (placedDiff !== 0) return placedDiff;
-
-  const numberA = a.raw.orderData?.orderNumber ?? "";
-  const numberB = b.raw.orderData?.orderNumber ?? "";
-  return String(numberA).localeCompare(String(numberB), undefined, { numeric: true });
-}
-
-function matchesFilter(order, filter) {
-  const raw = order.raw;
-  switch (filter) {
-    case "all":
-      return true;
-    case "open":
-      return isOpenOrder(raw);
-    case "ready":
-      return isReadyOrder(raw);
-    case "delivery":
-      return (
-        (raw?.orderData?.orderTypeNormalized ?? raw?.orderData?.orderType) === "DELIVERY"
-      );
-    default:
-      return true;
-  }
-}
-
-function isOpenOrder(order) {
-  if (!order || !order.orderData) return false;
-  if (order.orderData.deliveryState === "DELIVERED") {
-    return false;
-  }
-  return true;
-}
-
-function isReadyOrder(order) {
-  if (!order || !order.orderData) return false;
-  if (order.orderData.fulfillmentStatus === "READY_FOR_PICKUP") {
-    return true;
-  }
-  const items = Array.isArray(order.items) ? order.items : [];
-  return items.length > 0 && items.every((item) => item?.fulfillmentStatus === "READY");
-}
-
-function renderOrderCard(order) {
-  const { raw, placedAt, dueAt, combinedItems } = order;
-  const card = document.createElement("article");
-  card.className = "order-card";
-  card.dataset.placedAt = placedAt.getTime();
-  if (dueAt) {
-    card.dataset.dueAt = dueAt.getTime();
-  }
-
-  const header = document.createElement("div");
-  header.className = "order-card-header";
-
-  const titleGroup = document.createElement("div");
-  titleGroup.className = "order-card-title";
-
-  const customerName = document.createElement("h3");
-  customerName.textContent = raw.orderData?.customerName || "Guest";
-  titleGroup.appendChild(customerName);
-
-  const subtitle = document.createElement("div");
-  subtitle.className = "order-card-subtitle";
-  const orderNumber = raw.orderData?.orderNumber ? `#${raw.orderData.orderNumber}` : "No number";
-  const orderType =
-    raw.orderData?.orderType || raw.orderData?.orderTypeNormalized || "UNKNOWN";
-  const placedLabel = formatTime(placedAt);
-  const numberSpan = document.createElement("span");
-  numberSpan.textContent = orderNumber;
-  const typeBadge = document.createElement("span");
-  typeBadge.className = "badge badge--muted";
-  typeBadge.textContent = orderType;
-  const placedSpan = document.createElement("span");
-  placedSpan.textContent = `Placed ${placedLabel}`;
-  subtitle.appendChild(numberSpan);
-  subtitle.appendChild(document.createTextNode(" · "));
-  subtitle.appendChild(typeBadge);
-  subtitle.appendChild(document.createTextNode(" · "));
-  subtitle.appendChild(placedSpan);
-  titleGroup.appendChild(subtitle);
-
-  header.appendChild(titleGroup);
-
-  const statusGroup = document.createElement("div");
-  statusGroup.className = "order-card-status";
-
-  if (raw.orderData?.fulfillmentStatus) {
-    statusGroup.appendChild(createStatusChip(raw.orderData.fulfillmentStatus));
-  }
-
-  const since = document.createElement("span");
-  since.className = "since-placed";
-  since.dataset.placedAt = placedAt.getTime();
-  since.textContent = formatDuration(Date.now() - placedAt.getTime());
-  statusGroup.appendChild(since);
-
-  if (dueAt) {
-    const due = document.createElement("span");
-    due.className = "due-time";
-    due.textContent = `Due ${formatTime(dueAt)}`;
-    statusGroup.appendChild(due);
-  }
-
-  header.appendChild(statusGroup);
-
-  card.appendChild(header);
-
-  const body = document.createElement("div");
-  body.className = "order-card-body";
-
-  combinedItems.forEach((item) => {
-    body.appendChild(renderCombinedItem(item));
-  });
-
-  card.appendChild(body);
-
-  updateDueClasses(card);
-  return card;
-}
-
-function createStatusChip(status) {
-  const span = document.createElement("span");
-  span.className = `status-chip status-${status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-  span.textContent = status;
-  return span;
-}
-
-function renderCombinedItem(item) {
-  const row = document.createElement("div");
-  row.className = "order-item";
-
-  const header = document.createElement("div");
-  header.className = "order-item-header";
-
-  const name = document.createElement("span");
-  name.className = "order-item-name";
-  name.textContent = item.itemName;
-  header.appendChild(name);
-
-  const quantity = document.createElement("span");
-  quantity.className = "quantity-chip";
-  quantity.textContent = `×${item.totalQuantity}`;
-  header.appendChild(quantity);
-
-  header.appendChild(renderItemStatusSummary(item.statusSummary));
-
-  row.appendChild(header);
-
-  if (item.modifiers.length > 0) {
-    const modifierList = document.createElement("ul");
-    modifierList.className = "modifier-list";
-    item.modifiers.forEach((modifier) => {
-      const li = document.createElement("li");
-      li.className = "modifier-row";
-      const label = document.createElement("span");
-      label.className = "modifier-name";
-      label.textContent = modifier.name;
-      if (modifier.groupName) {
-        label.title = modifier.groupName;
-      }
-      const count = document.createElement("span");
-      count.className = "modifier-quantity";
-      count.textContent = `×${modifier.quantity}`;
-      li.appendChild(label);
-      li.appendChild(count);
-      modifierList.appendChild(li);
-    });
-    row.appendChild(modifierList);
-  }
-
-  return row;
-}
-
-function renderItemStatusSummary(statusEntries) {
-  const container = document.createElement("div");
-  container.className = "item-status-group";
-  statusEntries.forEach(([status, count]) => {
-    const chip = document.createElement("span");
-    chip.className = `status-chip status-${status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-    chip.textContent = count > 1 ? `${status} (${count})` : status;
-    container.appendChild(chip);
-  });
-  return container;
-}
-
-function formatTime(date) {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
-}
-
-function formatDuration(ms) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const parts = [];
-  if (hours > 0) parts.push(`${hours}h`);
-  parts.push(`${minutes}m`);
-  parts.push(`${seconds}s`);
-  return parts.join(" ");
-}
-
-function updateLiveClock() {
-  elements.currentTime.textContent = new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date());
-}
-
-function updateLastUpdated() {
-  if (!state.lastUpdatedAt) {
-    elements.lastUpdated.textContent = "Last updated --:--:--";
-    return;
-  }
-  elements.lastUpdated.textContent = `Last updated ${new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(state.lastUpdatedAt)}`;
-}
-
-function renderModifierRail() {
-  const orders = getFilteredOrders();
-  const aggregate = aggregateModifiers(orders);
-  elements.modifierRailList.innerHTML = "";
-  if (aggregate.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "modifier-empty";
-    empty.textContent = "No modifiers";
-    elements.modifierRailList.appendChild(empty);
-    return;
-  }
-  const fragment = document.createDocumentFragment();
-  aggregate.forEach((row) => {
-    const item = document.createElement("div");
-    item.className = "modifier-row";
-    const name = document.createElement("span");
-    name.className = "modifier-name";
-    name.textContent = row.name;
-    if (row.groupName) {
-      name.title = row.groupName;
-    }
-    const badge = document.createElement("span");
-    badge.className = "modifier-count";
-    badge.textContent = row.count;
-    item.appendChild(name);
-    item.appendChild(badge);
-    fragment.appendChild(item);
-  });
-  elements.modifierRailList.appendChild(fragment);
-}
-
 function aggregateModifiers(orders) {
-  const map = new Map();
+  const counts = /* @__PURE__ */ new Map();
   orders.forEach((order) => {
-    order.combinedItems.forEach((item) => {
-      item.modifiers.forEach((modifier) => {
-        const existing = map.get(modifier.key);
+    order.items.forEach((item) => {
+      (item.modifiers ?? []).forEach((modifier) => {
+        const key = hashModifier(modifier);
+        const quantity = (modifier.quantity ?? 1) * (item.quantity ?? 1);
+        const existing = counts.get(key);
         if (existing) {
-          existing.count += modifier.quantity;
+          existing.count += quantity;
         } else {
-          map.set(modifier.key, {
-            key: modifier.key,
+          counts.set(key, {
+            key,
             name: modifier.name,
             groupName: modifier.groupName,
-            count: modifier.quantity,
+            count: quantity
           });
         }
       });
     });
   });
-  return Array.from(map.values())
-    .sort((a, b) => {
-      if (b.count !== a.count) return b.count - a.count;
-      return a.name.localeCompare(b.name);
-    })
-    .slice(0, MAX_MODIFIERS_IN_RAIL);
-}
-
-function scheduleTimerTick() {
-  animationFrame = requestAnimationFrame((timestamp) => {
-    if (!lastTimerUpdate || timestamp - lastTimerUpdate >= 500) {
-      updateTimers();
-      lastTimerUpdate = timestamp;
+  return Array.from(counts.values()).sort((a, b) => {
+    if (b.count !== a.count) {
+      return b.count - a.count;
     }
-    scheduleTimerTick();
-  });
+    return a.name.localeCompare(b.name, void 0, { sensitivity: "base" });
+  }).slice(0, 50);
 }
-
-function updateTimers() {
-  const now = Date.now();
-  document.querySelectorAll(".since-placed").forEach((element) => {
-    const placedAt = Number(element.dataset.placedAt);
-    if (!Number.isFinite(placedAt)) return;
-    element.textContent = formatDuration(now - placedAt);
-  });
-  document.querySelectorAll(".order-card").forEach((card) => updateDueClasses(card));
+function classNames(...values) {
+  return values.filter(Boolean).join(" ");
 }
-
-function updateDueClasses(card) {
-  const dueAt = Number(card.dataset.dueAt);
-  card.classList.remove("order-card--overdue", "order-card--due-soon");
-  if (!Number.isFinite(dueAt) || dueAt <= 0) return;
-  const now = Date.now();
-  if (dueAt < now) {
-    card.classList.add("order-card--overdue");
-  } else if (dueAt - now <= DUE_SOON_THRESHOLD_MS) {
-    card.classList.add("order-card--due-soon");
+function getUrgencyClasses(dueAt, now) {
+  if (!dueAt) {
+    return "border-slate-800";
+  }
+  const diff = dueAt.getTime() - now.getTime();
+  if (diff < 0) {
+    return "border-red-500";
+  }
+  if (diff <= 5 * 60 * 1e3) {
+    return "border-amber-400";
+  }
+  return "border-slate-800";
+}
+function getStatusChipClasses(status) {
+  switch (status) {
+    case "READY":
+    case "READY_FOR_PICKUP":
+      return "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40";
+    case "IN_PREPARATION":
+    case "SENT":
+      return "bg-amber-500/20 text-amber-300 border border-amber-500/40";
+    case "HOLD":
+      return "bg-amber-700/30 text-amber-200 border border-amber-500/40";
+    case "NEW":
+      return "bg-slate-700 text-slate-200 border border-slate-500";
+    case "Mixed":
+      return "bg-fuchsia-700/30 text-fuchsia-200 border border-fuchsia-400/50";
+    default:
+      return "bg-slate-700 text-slate-200 border border-slate-600";
   }
 }
+var OrdersAllDayView = () => {
+  const [orders, setOrders] = useState([]);
+  const [isFetching, setIsFetching] = useState(false);
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [filter, setFilter] = useState("open");
+  const [now, setNow] = useState(() => /* @__PURE__ */ new Date());
+  const [isRailOpen, setIsRailOpen] = useState(false);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(/* @__PURE__ */ new Date());
+    }, 1e3);
+    return () => clearInterval(timer);
+  }, []);
+  const fetchOrders = useCallback(async () => {
+    setIsFetching(true);
+    try {
+      const response = await fetch(ORDERS_ENDPOINT, {
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      setOrders(Array.isArray(payload.orders) ? payload.orders : []);
+      setLastUpdated(/* @__PURE__ */ new Date());
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+    } finally {
+      setIsFetching(false);
+      setInitialLoadComplete(true);
+    }
+  }, []);
+  useEffect(() => {
+    fetchOrders();
+    const interval = setInterval(fetchOrders, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [fetchOrders]);
+  const sortedOrders = useMemo(() => {
+    return [...orders].sort((a, b) => {
+      const dueA = a.orderData.timeDue ? parseToast(a.orderData.timeDue) : null;
+      const dueB = b.orderData.timeDue ? parseToast(b.orderData.timeDue) : null;
+      if (dueA && dueB) {
+        const diff = dueA.getTime() - dueB.getTime();
+        if (diff !== 0) {
+          return diff;
+        }
+      } else if (dueA && !dueB) {
+        return -1;
+      } else if (!dueA && dueB) {
+        return 1;
+      }
+      const placedA = parseToast(a.orderData.orderTime).getTime();
+      const placedB = parseToast(b.orderData.orderTime).getTime();
+      if (placedA !== placedB) {
+        return placedA - placedB;
+      }
+      const orderNumberA = Number.parseInt(a.orderData.orderNumber, 10);
+      const orderNumberB = Number.parseInt(b.orderData.orderNumber, 10);
+      if (!Number.isNaN(orderNumberA) && !Number.isNaN(orderNumberB)) {
+        return orderNumberA - orderNumberB;
+      }
+      return a.orderData.orderNumber.localeCompare(b.orderData.orderNumber);
+    });
+  }, [orders]);
+  const visibleOrders = useMemo(
+    () => sortedOrders.filter((order) => matchesFilter(order, filter)),
+    [sortedOrders, filter]
+  );
+  const openOrderCount = useMemo(
+    () => sortedOrders.filter((order) => isOpenOrder(order)).length,
+    [sortedOrders]
+  );
+  const modifierAggregations = useMemo(
+    () => aggregateModifiers(visibleOrders),
+    [visibleOrders]
+  );
+  const enrichedOrders = useMemo(
+    () => visibleOrders.map((order) => ({
+      raw: order,
+      placedAt: parseToast(order.orderData.orderTime),
+      dueAt: order.orderData.timeDue ? parseToast(order.orderData.timeDue) : null,
+      combinedItems: combineOrderItems(order.items)
+    })),
+    [visibleOrders]
+  );
+  const showLoading = !initialLoadComplete;
+  const showEmptyState = initialLoadComplete && !visibleOrders.length && !isFetching && !error;
+  const handleToggleRail = useCallback(() => {
+    setIsRailOpen((prev) => !prev);
+  }, []);
+  const currentTimeLabel = useMemo(() => formatLocalTime(now), [now]);
+  const lastUpdatedLabel = useMemo(
+    () => lastUpdated ? formatLocalTime(lastUpdated) : null,
+    [lastUpdated]
+  );
+  const filterStatusMessage = useMemo(() => {
+    if (isFetching) {
+      return "Refreshing\u2026";
+    }
+    if (lastUpdated) {
+      return `Last updated ${formatLocalTime(lastUpdated)}`;
+    }
+    return "Awaiting data";
+  }, [isFetching, lastUpdated]);
+  return /* @__PURE__ */ jsxs5("div", { className: "min-h-screen bg-slate-950 text-slate-100", children: [
+    /* @__PURE__ */ jsx5(
+      OrdersHeader,
+      {
+        currentTimeLabel,
+        error,
+        isRailOpen,
+        lastUpdatedLabel,
+        onToggleRail: handleToggleRail,
+        openOrderCount
+      }
+    ),
+    /* @__PURE__ */ jsx5(
+      ModifiersRail,
+      {
+        isOpen: isRailOpen,
+        modifierAggregations,
+        showLoading
+      }
+    ),
+    /* @__PURE__ */ jsxs5(
+      "main",
+      {
+        className: classNames(
+          "relative z-10 min-h-screen pt-20 transition-all",
+          "px-4 pb-10 sm:px-6 lg:px-10",
+          "md:pl-80"
+        ),
+        children: [
+          /* @__PURE__ */ jsx5(
+            OrdersFilterBar,
+            {
+              activeFilter: filter,
+              filters: FILTERS,
+              onFilterChange: setFilter,
+              statusMessage: filterStatusMessage
+            }
+          ),
+          /* @__PURE__ */ jsx5(
+            OrdersGrid,
+            {
+              enrichedOrders,
+              error,
+              now,
+              onRetry: fetchOrders,
+              showEmptyState,
+              showLoading
+            }
+          )
+        ]
+      }
+    )
+  ] });
+};
+function formatDiningOption(option) {
+  if (!option) {
+    return "Unknown";
+  }
+  if (/[a-z]/.test(option)) {
+    return option;
+  }
+  return option.split("_").map((segment) => segment.charAt(0) + segment.slice(1).toLowerCase()).join(" ");
+}
+var OrdersAllDayView_default = OrdersAllDayView;
 
-window.addEventListener("beforeunload", () => {
-  if (pollTimer) clearInterval(pollTimer);
-  if (animationFrame) cancelAnimationFrame(animationFrame);
-});
-
-init();
+// src/ui/index.tsx
+import { jsx as jsx6 } from "react/jsx-runtime";
+var container = document.getElementById("app");
+if (container) {
+  const root = createRoot(container);
+  root.render(
+    /* @__PURE__ */ jsx6(React6.StrictMode, { children: /* @__PURE__ */ jsx6(OrdersAllDayView_default, {}) })
+  );
+}
+//# sourceMappingURL=app.js.map

@@ -1,6 +1,6 @@
 import React, { memo } from "react";
+import type { EnrichedOrder } from "../OrdersAllDayView";
 import {
-  EnrichedOrder,
   classNames,
   formatDiningOption,
   formatDuration,

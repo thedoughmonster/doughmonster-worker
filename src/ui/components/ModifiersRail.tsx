@@ -1,5 +1,6 @@
 import React, { memo } from "react";
-import { ModifierAggregateRow, classNames } from "../OrdersAllDayView";
+import type { ModifierAggregateRow } from "../OrdersAllDayView";
+import { classNames } from "../OrdersAllDayView";
 
 interface ModifiersRailProps {
   modifierAggregations: ModifierAggregateRow[];

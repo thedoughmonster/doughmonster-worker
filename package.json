@@ -6,15 +6,20 @@
   "scripts": {
     "dev": "wrangler dev",
     "check": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run build:ui && npm run build:worker",
+    "build:ui": "esbuild src/ui/index.tsx --bundle --format=esm --target=es2022 --jsx=automatic --outfile=public/app.js --sourcemap --log-level=info --external:react --external:react-dom/* --external:react/jsx-runtime",
+    "build:worker": "tsc -p tsconfig.build.json",
     "test": "rm -rf dist && npm run build --silent && node --test tests/*.mjs"
   },
-  "peerDependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
     "@cloudflare/workers-types": "^4.20240919.0",
+    "esbuild": "^0.25.4",
     "typescript": "^5.6.3",
     "wrangler": "^4.42.2"
   }

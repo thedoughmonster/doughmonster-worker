@@ -1,5 +1,6 @@
 import React, { memo } from "react";
-import { OrderStatus, classNames } from "../OrdersAllDayView";
+import type { OrderStatus } from "../OrdersAllDayView";
+import { classNames } from "../OrdersAllDayView";
 
 interface FilterOption {
   id: OrderStatus;
