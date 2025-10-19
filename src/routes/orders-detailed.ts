@@ -248,6 +248,7 @@ async function handleOrdersDetailed(
   const build = buildExpandedOrders({
     ordersPayload: ordersBody,
     menuDocument: menuBody.menu ?? null,
+    menuUpdatedAt: menuBody.metadata?.lastUpdated ?? null,
     limit: finalLimit,
     startedAt,
     timeBudgetMs: HANDLER_TIME_BUDGET_MS,
