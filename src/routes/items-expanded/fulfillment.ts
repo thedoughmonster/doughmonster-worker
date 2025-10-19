@@ -50,11 +50,44 @@ export function resolveFulfillmentStatus(
   anyNotReady: boolean,
   allReady: boolean
 ): string | null {
+  const webhookStatus = resolveGuestStatusFromHistory(order, check);
+  if (webhookStatus) return webhookStatus;
   const guest = pickStringPaths(order, check, GUEST_FULFILLMENT_FIELDS);
   if (guest) return guest;
   if (!hasItemStatus) return null;
   if (anyNotReady) return "IN_PREPARATION";
   if (allReady) return "READY_FOR_PICKUP";
+  return null;
+}
+
+function resolveGuestStatusFromHistory(order: ToastOrder, check: ToastCheck): string | null {
+  const historySources = [
+    (check as any)?.guestOrderFulfillmentStatusHistory,
+    (check as any)?.guestFulfillmentStatusHistory,
+    (order as any)?.guestOrderFulfillmentStatusHistory,
+    (order as any)?.guestFulfillmentStatusHistory,
+    (order as any)?.context?.guestOrderFulfillmentStatusHistory,
+    (order as any)?.context?.guestFulfillmentStatusHistory,
+  ];
+
+  for (const history of historySources) {
+    const status = extractLatestStatus(history);
+    if (status) return status;
+  }
+
+  return null;
+}
+
+function extractLatestStatus(history: unknown): string | null {
+  if (!Array.isArray(history)) return null;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (!entry || typeof entry !== "object") continue;
+    const value = (entry as any)?.status;
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
   return null;
 }
 

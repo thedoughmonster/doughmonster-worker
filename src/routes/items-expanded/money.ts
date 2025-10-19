@@ -43,7 +43,7 @@ export function collectModifierDetails(
       (base as any)?.groupName,
       (base as any)?.menuOptionGroup?.name,
     ]);
-    const id = pickString([(modifier as any)?.guid, (modifier as any)?.item?.guid, (base as any)?.guid]);
+    const id = pickString([(modifier as any)?.item?.guid, (base as any)?.guid, (modifier as any)?.guid]);
     const quantity = normalizeQuantity((modifier as any)?.quantity);
     const unitPrice = toCents(extractNumber(modifier as any, ["price", "receiptLinePrice"]));
     const totalPrice = unitPrice !== null ? unitPrice * quantity * parentQuantity : 0;
