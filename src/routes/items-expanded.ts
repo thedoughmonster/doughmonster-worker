@@ -359,7 +359,11 @@ async function enrichExpandedOrders(
     let guid = directMeta.guid ?? orderData.diningOptionGuid ?? null;
     let behavior = directMeta.behavior ?? null;
     let optionName = directMeta.name ?? null;
-    let normalizedOrderType = behavior ? normalizeOrderType(behavior) : null;
+    let behaviorSource: "direct" | "config" | null = behavior ? "direct" : null;
+    let optionNameSource: "direct" | "config" | null = optionName ? "direct" : null;
+
+    let normalizedOrderType =
+      orderData.orderTypeNormalized ?? normalizeOrderType(behavior ?? orderData.orderType);
 
     if (guid) {
       const normalizedGuid = guid.toLowerCase();
@@ -368,18 +372,17 @@ async function enrichExpandedOrders(
         const config = lookup.byGuid.get(normalizedGuid) ?? null;
         if (config) {
           if (!guid) guid = config.guid;
-          if (!behavior && config.behavior) {
+          if (config.behavior) {
             behavior = config.behavior;
-            normalizedOrderType = normalizeOrderType(config.behavior);
-          } else if (!normalizedOrderType && config.behavior) {
+            behaviorSource = "config";
             const mapped = normalizeOrderType(config.behavior);
             if (mapped) {
-              behavior = config.behavior;
               normalizedOrderType = mapped;
             }
           }
-          if (!optionName && config.name) {
+          if (config.name) {
             optionName = config.name;
+            optionNameSource = "config";
           }
         }
       }
@@ -397,7 +400,21 @@ async function enrichExpandedOrders(
       (orderData as any).diningOptionBehavior = behavior;
     }
 
-    if ((orderData.orderType === "UNKNOWN" || !orderData.orderType) && normalizedOrderType) {
+    if (behavior && !normalizedOrderType) {
+      normalizedOrderType = normalizeOrderType(behavior);
+    }
+
+    if (normalizedOrderType) {
+      orderData.orderTypeNormalized = normalizedOrderType;
+    }
+
+    const preferredLabel =
+      (optionNameSource === "config" ? optionName : null) ??
+      (behaviorSource === "config" ? behavior : null) ??
+      null;
+    if (preferredLabel) {
+      orderData.orderType = preferredLabel;
+    } else if ((!orderData.orderType || orderData.orderType === "UNKNOWN") && normalizedOrderType) {
       orderData.orderType = normalizedOrderType;
     }
   }

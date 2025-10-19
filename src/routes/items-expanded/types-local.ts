@@ -50,7 +50,16 @@ export interface ExpandedOrderItem {
   money?: ExpandedOrderItemMoney;
 }
 
-export type OrderType = "TAKEOUT" | "DELIVERY" | "DINE_IN" | "CURBSIDE" | "DRIVE_THRU" | "CATERING" | "UNKNOWN";
+export type NormalizedOrderType =
+  | "TAKEOUT"
+  | "DELIVERY"
+  | "DINE_IN"
+  | "CURBSIDE"
+  | "DRIVE_THRU"
+  | "CATERING"
+  | "UNKNOWN";
+
+export type OrderType = NormalizedOrderType | string;
 
 export interface ExpandedOrder {
   orderData: {
@@ -64,6 +73,7 @@ export interface ExpandedOrder {
     fulfillmentStatus: string | null;
     customerName: string | null;
     orderType: OrderType;
+    orderTypeNormalized?: NormalizedOrderType | null;
     diningOptionGuid: string | null;
     deliveryState?: string | null;
     deliveryInfo?: Record<string, unknown> | null;
