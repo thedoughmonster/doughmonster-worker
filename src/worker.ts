@@ -2,7 +2,7 @@ import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
-import handleItemsExpanded from "./routes/items-expanded.js";
+import ordersDetailedHandler from "./routes/orders-detailed.js";
 import ordersMergedHandler from "./routes/api/orders-merged";
 import configSnapshotHandler from "./routes/api/config-snapshot";
 
@@ -43,7 +43,18 @@ const router = new WorkerRouter();
 
 router.get("/api/menus", menusHandler);
 router.get("/api/orders/latest", ordersLatestHandler);
-router.get("/api/items-expanded", handleItemsExpanded);
+router.get("/api/orders-detailed", ordersDetailedHandler);
+router.get("/api/items-expanded", async (env, request) => {
+  const response = await ordersDetailedHandler(env, request);
+  const headers = new Headers(response.headers);
+  headers.set("Deprecation", "true");
+  headers.set("Link", "</api/orders-detailed>; rel=\"successor-version\"");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+});
 router.get("/api/orders-merged", ordersMergedHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
 

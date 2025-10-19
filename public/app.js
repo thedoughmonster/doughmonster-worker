@@ -1,4 +1,4 @@
-const ENDPOINT = "/api/items-expanded";
+const ENDPOINT = "/api/orders-detailed";
 const POLL_INTERVAL_MS = 10_000;
 const DUE_SOON_THRESHOLD_MS = 5 * 60 * 1000;
 const MAX_MODIFIERS_IN_RAIL = 50;
