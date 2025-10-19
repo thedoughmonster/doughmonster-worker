@@ -4,6 +4,7 @@ import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
 import handleItemsExpanded from "./routes/items-expanded.js";
 import ordersMergedHandler from "./routes/api/orders-merged";
+import configSnapshotHandler from "./routes/api/config-snapshot";
 
 type Env = ReturnType<typeof getEnv>;
 
@@ -44,6 +45,7 @@ router.get("/api/menus", menusHandler);
 router.get("/api/orders/latest", ordersLatestHandler);
 router.get("/api/items-expanded", handleItemsExpanded);
 router.get("/api/orders-merged", ordersMergedHandler);
+router.get("/api/config/snapshot", configSnapshotHandler);
 
 const STATIC_CACHE_SECONDS = 60;
 

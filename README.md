@@ -10,8 +10,33 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/orders-merged` | Fetches `/api/orders/latest` and `/api/menus`, returning both payloads without modifying either response body. | `curl -s "https://<worker>/api/orders-merged" \| jq` |
 | `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
+| `GET` | `/api/config/snapshot` | Fetches a fixed set of Toast configuration slices and caches the merged payload for 1 hour. | `curl -s "https://<worker>/api/config/snapshot" \| jq` |
 
 All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/items-expanded` can self-fetch them without leaving the worker boundary.
+
+### Config Snapshot (1h cache)
+
+`GET /api/config/snapshot` aggregates six Toast configuration slices—`diningOptions`, `orderTypes`, `revenueCenters`, `serviceAreas`, `taxRates`, and `discounts`—into a single payload. The response is cached in `CACHE_KV` for one hour with the cache key `toast:config:snapshot:all:<tenant-or-location>`, so subsequent calls within that window return immediately without re-fetching Toast.
+
+- Fetch the snapshot: `curl -s "$BASE_URL/api/config/snapshot" \| jq`
+- Each slice that fails upstream is represented as `null`; successful slices retain the JSON returned by Toast.
+
+Response shape:
+
+```json
+{
+  "updatedAt": "<ISO timestamp>",
+  "ttlSeconds": 3600,
+  "data": {
+    "diningOptions": [/* ... */],
+    "orderTypes": [/* ... */],
+    "revenueCenters": [/* ... */],
+    "serviceAreas": [/* ... */],
+    "taxRates": [/* ... */],
+    "discounts": [/* ... */]
+  }
+}
+```
 
 ### `/api/orders/latest`
 The handler supports flexible time-range and filter parameters:
