@@ -4,9 +4,10 @@
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
     "moduleResolution": "Node",
-    "types": ["jest", "node"],
+    "types": ["node"],
     "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "typeRoots": ["./src/ui/types", "./node_modules/@types"]
   },
   "include": ["src/ui/**/*", "tests/**/*"]
 }
