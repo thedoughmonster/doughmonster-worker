@@ -563,6 +563,7 @@ test('items-expanded exposes orderData block with required metadata as first key
   assert.equal(data.status, 'APPROVED');
   assert.equal(data.customerName, 'Sam Guest');
   assert.equal(data.orderType, 'TAKEOUT');
+  assert.equal(data.orderTypeNormalized, 'TAKEOUT');
   assert.equal(data.diningOptionGuid, 'dining-1');
   assert.equal('deliveryInfo' in data, false);
   assert.equal(order.orderId, undefined);
@@ -575,6 +576,55 @@ test('items-expanded exposes orderData block with required metadata as first key
   assert.equal(order.checkId, undefined);
   assert.equal(order.diningOptionGuid, undefined);
   assert.equal(order.fulfillmentStatus, undefined);
+});
+
+test('items-expanded prefers catalog dining option labels when available', async () => {
+  const orders = [
+    {
+      guid: 'order-catalog-label',
+      createdDate: '2024-01-01T14:00:00.000+0000',
+      context: { diningOption: { guid: 'dining-catalog-guid', behavior: 'TAKE_OUT' } },
+      checks: [
+        {
+          guid: 'check-catalog-label',
+          selections: [
+            {
+              guid: 'sel-catalog-label',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 10,
+              item: { guid: 'item-catalog-label', itemType: 'MENU_ITEM' },
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const diningOptions = [
+    {
+      guid: 'dining-catalog-guid',
+      behavior: 'DoorDash - Delivery',
+      name: 'DoorDash - Delivery',
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders, null, { diningOptions });
+  const response = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/items-expanded?limit=25')
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.orders.length, 1);
+  const [order] = body.orders;
+
+  assert.equal(order.orderData.diningOptionGuid, 'dining-catalog-guid');
+  assert.equal(order.orderData.orderType, 'DoorDash - Delivery');
+  assert.equal(order.orderData.orderTypeNormalized, 'DELIVERY');
+  assert.equal(order.orderData.diningOptionBehavior, 'DoorDash - Delivery');
+  assert.equal(order.orderData.diningOptionName, 'DoorDash - Delivery');
 });
 
 test('items-expanded filters out special requests and fees from items array', async () => {
@@ -666,7 +716,8 @@ test('items-expanded derives order type from dining option configuration when be
   assert.equal(response.status, 200);
   assert.equal(body.orders.length, 1);
   const order = body.orders[0];
-  assert.equal(order.orderData.orderType, 'CURBSIDE');
+  assert.equal(order.orderData.orderType, 'Curbside Pickup');
+  assert.equal(order.orderData.orderTypeNormalized, 'CURBSIDE');
   assert.equal(order.orderData.diningOptionGuid, 'option-guid');
   assert.equal(lookupCalls, 1);
 });
@@ -888,8 +939,11 @@ test('items-expanded derives order type from available metadata', async () => {
   assert.ok(takeout, 'takeout order should be present');
 
   assert.equal(curbside.orderData.orderType, 'CURBSIDE');
+  assert.equal(curbside.orderData.orderTypeNormalized, 'CURBSIDE');
   assert.equal(delivery.orderData.orderType, 'DELIVERY');
+  assert.equal(delivery.orderData.orderTypeNormalized, 'DELIVERY');
   assert.equal(takeout.orderData.orderType, 'TAKEOUT');
+  assert.equal(takeout.orderData.orderTypeNormalized, 'TAKEOUT');
 });
 
 test('items-expanded includes behavior-specific enrichment data when available', async () => {

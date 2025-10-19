@@ -1,5 +1,5 @@
 import type { ToastCheck, ToastOrder, ToastSelection } from "../../types/toast-orders.js";
-import type { OrderType } from "./types-local.js";
+import type { NormalizedOrderType } from "./types-local.js";
 
 const ORDER_TIME_FIELDS = ["createdDate", "openedDate", "promisedDate", "estimatedFulfillmentDate", "readyDate"];
 const ORDER_LOCATION_FIELDS = [
@@ -73,6 +73,8 @@ export function extractOrderMeta(order: ToastOrder, check: ToastCheck) {
   for (const [key, paths] of Object.entries(ORDER_META_STRINGS)) strings[key] = pickStringPaths(order, check, paths);
   const objects: Record<string, Record<string, unknown> | null> = {};
   for (const [key, paths] of Object.entries(ORDER_META_OBJECTS)) objects[key] = pickObjectPaths(order, check, paths);
+  const orderTypeNormalized = resolveOrderType(order, check);
+
   return {
     orderNumber: strings.orderNumber,
     timeDue: strings.timeDue,
@@ -80,7 +82,8 @@ export function extractOrderMeta(order: ToastOrder, check: ToastCheck) {
     status: strings.status,
     currency: strings.currency,
     customerName: strings.customerName,
-    orderType: resolveOrderType(order, check),
+    orderType: orderTypeNormalized,
+    orderTypeNormalized,
     diningOptionGuid: strings.diningOptionGuid,
     deliveryState: strings.deliveryState,
     deliveryInfo: objects.deliveryInfo,
@@ -335,7 +338,7 @@ export function resolveLineItemId(orderId: string, checkId: string | null, selec
   return `${orderId}:${checkId ?? ""}:open:${index}`;
 }
 
-export function resolveOrderType(order: ToastOrder, check: ToastCheck): OrderType {
+export function resolveOrderType(order: ToastOrder, check: ToastCheck): NormalizedOrderType {
   if ((order as any)?.context?.curbsidePickupInfo || (check as any)?.curbsidePickupInfo) return "CURBSIDE";
   if ((order as any)?.isDriveThru === true || (check as any)?.isDriveThru === true) return "DRIVE_THRU";
   if ((order as any)?.isDelivery === true || (check as any)?.isDelivery === true) return "DELIVERY";
@@ -352,7 +355,7 @@ export function resolveOrderType(order: ToastOrder, check: ToastCheck): OrderTyp
   return "UNKNOWN";
 }
 
-export function normalizeOrderType(value: unknown): OrderType | null {
+export function normalizeOrderType(value: unknown): NormalizedOrderType | null {
   if (!value) return null;
   if (typeof value === "object") {
     const candidate =
@@ -366,7 +369,7 @@ export function normalizeOrderType(value: unknown): OrderType | null {
   }
   if (typeof value !== "string") return null;
   const normalized = value.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  const map: Record<string, OrderType> = {
+  const map: Record<string, NormalizedOrderType> = {
     TAKEOUT: "TAKEOUT",
     TAKE_OUT: "TAKEOUT",
     TAKEAWAY: "TAKEOUT",

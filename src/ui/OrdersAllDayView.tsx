@@ -5,15 +5,16 @@ export const POLL_INTERVAL_MS = 10_000;
 
 type ToastTimestamp = string;
 
-type DiningOption =
+type NormalizedDiningOption =
   | "DINE_IN"
   | "TAKEOUT"
   | "DELIVERY"
   | "CURBSIDE"
   | "DRIVE_THRU"
   | "CATERING"
-  | "UNKNOWN"
-  | string;
+  | "UNKNOWN";
+
+type DiningOption = NormalizedDiningOption | string;
 
 type FulfillmentStatus =
   | "READY_FOR_PICKUP"
@@ -61,6 +62,7 @@ interface ToastOrderData {
   fulfillmentStatus: FulfillmentStatus;
   customerName: string | null;
   orderType: DiningOption;
+  orderTypeNormalized?: NormalizedDiningOption | null;
   diningOptionGuid?: string | null;
   promisedDate?: ToastTimestamp | null;
   estimatedFulfillmentDate?: ToastTimestamp | null;
@@ -197,7 +199,7 @@ function matchesFilter(order: ToastOrder, filter: OrderStatus): boolean {
       return order.orderData.fulfillmentStatus === "READY_FOR_PICKUP";
     case "delivery":
       return (
-        order.orderData.orderType === "DELIVERY" ||
+        (order.orderData.orderTypeNormalized ?? order.orderData.orderType) === "DELIVERY" ||
         order.orderData.deliveryState === "IN_PROGRESS" ||
         order.orderData.deliveryState === "PICKED_UP"
       );
@@ -671,7 +673,7 @@ const OrderCard: React.FC<{ order: EnrichedOrder; now: Date }> = ({ order, now }
   const elapsed = now.getTime() - placedAt.getTime();
   const urgencyClasses = getUrgencyClasses(dueAt, now);
 
-  const diningLabel = formatDiningOption(orderData.orderType);
+  const diningLabel = formatDiningOption(orderData.orderType ?? orderData.orderTypeNormalized ?? "UNKNOWN");
 
   return (
     <article
@@ -770,6 +772,9 @@ const OrderCard: React.FC<{ order: EnrichedOrder; now: Date }> = ({ order, now }
 function formatDiningOption(option: DiningOption): string {
   if (!option) {
     return "Unknown";
+  }
+  if (/[a-z]/.test(option)) {
+    return option;
   }
   return option
     .split("_")

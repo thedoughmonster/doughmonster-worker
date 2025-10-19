@@ -381,7 +381,9 @@ function matchesFilter(order, filter) {
     case "ready":
       return isReadyOrder(raw);
     case "delivery":
-      return raw?.orderData?.orderType === "DELIVERY";
+      return (
+        (raw?.orderData?.orderTypeNormalized ?? raw?.orderData?.orderType) === "DELIVERY"
+      );
     default:
       return true;
   }
@@ -426,7 +428,8 @@ function renderOrderCard(order) {
   const subtitle = document.createElement("div");
   subtitle.className = "order-card-subtitle";
   const orderNumber = raw.orderData?.orderNumber ? `#${raw.orderData.orderNumber}` : "No number";
-  const orderType = raw.orderData?.orderType || "UNKNOWN";
+  const orderType =
+    raw.orderData?.orderType || raw.orderData?.orderTypeNormalized || "UNKNOWN";
   const placedLabel = formatTime(placedAt);
   const numberSpan = document.createElement("span");
   numberSpan.textContent = orderNumber;

@@ -333,6 +333,10 @@ function buildOrderFromCheck(
     diningOptionGuid: meta.diningOptionGuid ?? null,
   };
 
+  if (meta.orderTypeNormalized) {
+    orderData.orderTypeNormalized = meta.orderTypeNormalized;
+  }
+
   if (meta.deliveryState) orderData.deliveryState = meta.deliveryState;
   if (meta.deliveryInfo) orderData.deliveryInfo = meta.deliveryInfo;
   if (meta.curbsidePickupInfo) orderData.curbsidePickupInfo = meta.curbsidePickupInfo;
