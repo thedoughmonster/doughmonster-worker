@@ -1,7 +1,7 @@
 import type { ToastCheck, ToastOrder, ToastSelection } from "../../types/toast-orders.js";
 import type { ToastMenusDocument } from "../../types/toast-menus.js";
 import type { MenuIndex } from "./menu-index.js";
-import { getCachedMenuIndex } from "./menu-index.js";
+import { createMenuIndex } from "./menu-index.js";
 import {
   extractOrderMeta,
   extractTimestamp,
@@ -32,7 +32,6 @@ import type {
 interface BuildArgs {
   ordersPayload: OrdersLatestResponse & { ok: true };
   menuDocument: ToastMenusDocument | null;
-  menuUpdatedAt: string | null;
   limit: number;
   startedAt: number;
   timeBudgetMs: number;
@@ -58,7 +57,7 @@ export function buildExpandedOrders(args: BuildArgs): {
     },
   };
 
-  const menuIndex = getCachedMenuIndex(args.menuDocument ?? null, args.menuUpdatedAt ?? null);
+  const menuIndex = createMenuIndex(args.menuDocument ?? null);
   const deadline = args.startedAt + args.timeBudgetMs;
   const orders = extractOrders(args.ordersPayload);
   const candidates: Array<{

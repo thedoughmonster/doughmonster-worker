@@ -1,21 +1,6 @@
 import type { ToastMenuItem, ToastMenusDocument, ToastModifierOption } from "../../types/toast-menus.js";
 import type { ToastSelection } from "../../types/toast-orders.js";
 
-const NULL_CACHE_KEY = "__null__";
-let activeVersionKey: string | null = null;
-
-function toCacheKey(value: string | null | undefined): string {
-  return typeof value === "string" && value.length > 0 ? value : NULL_CACHE_KEY;
-}
-
-function clearNonFallbackEntries() {
-  for (const key of MENU_INDEX_CACHE.keys()) {
-    if (key !== NULL_CACHE_KEY) {
-      MENU_INDEX_CACHE.delete(key);
-    }
-  }
-}
-
 export function createMenuIndex(document: ToastMenusDocument | null) {
   const itemsByGuid = new Map<string, ToastMenuItem>();
   const itemsByMulti = new Map<string, ToastMenuItem>();
@@ -70,44 +55,3 @@ export function createMenuIndex(document: ToastMenusDocument | null) {
 }
 
 export type MenuIndex = ReturnType<typeof createMenuIndex>;
-
-const MENU_INDEX_CACHE = new Map<string, MenuIndex>();
-
-export function getCachedMenuIndex(
-  document: ToastMenusDocument | null,
-  lastUpdated: string | null | undefined
-): MenuIndex {
-  const cacheKey = toCacheKey(lastUpdated ?? null);
-
-  if (!document) {
-    MENU_INDEX_CACHE.delete(cacheKey);
-    if (cacheKey === activeVersionKey) {
-      activeVersionKey = null;
-    }
-    return createMenuIndex(null);
-  }
-
-  if (cacheKey !== NULL_CACHE_KEY && cacheKey !== activeVersionKey) {
-    clearNonFallbackEntries();
-    activeVersionKey = cacheKey;
-  }
-
-  if (cacheKey === NULL_CACHE_KEY && activeVersionKey !== NULL_CACHE_KEY) {
-    clearNonFallbackEntries();
-    activeVersionKey = NULL_CACHE_KEY;
-  }
-
-  const cached = MENU_INDEX_CACHE.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const index = createMenuIndex(document);
-  MENU_INDEX_CACHE.set(cacheKey, index);
-  return index;
-}
-
-export function resetMenuIndexCacheForTests() {
-  MENU_INDEX_CACHE.clear();
-  activeVersionKey = null;
-}
