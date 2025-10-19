@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const module = await import('../dist/routes/items-expanded.js');
-const { createItemsExpandedHandler } = module;
+const module = await import('../dist/routes/orders-detailed.js');
+const { createOrdersDetailedHandler } = module;
 
 function createEnv() {
   return {
@@ -112,7 +112,7 @@ function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
       ? (input, init) => customFetch(input, init, defaultFetch)
       : defaultFetch;
 
-  const handler = createItemsExpandedHandler({
+  const handler = createOrdersDetailedHandler({
     fetch: fetchImpl,
     async getDiningOptions(env) {
       if (typeof getDiningOptions === 'function') {
@@ -192,7 +192,7 @@ function createHandlerWithOrders(orders, menuDoc = null, overrides = {}) {
   };
 }
 
-test('items-expanded calculates modifier totals with quantities and exposes modifier quantity', async () => {
+test('orders-detailed calculates modifier totals with quantities and exposes modifier quantity', async () => {
   const orders = [
     {
       guid: 'order-modifiers',
@@ -226,7 +226,7 @@ test('items-expanded calculates modifier totals with quantities and exposes modi
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -241,7 +241,7 @@ test('items-expanded calculates modifier totals with quantities and exposes modi
   assert.equal(item.money.totalItemPriceCents, 600);
 });
 
-test('items-expanded collapses identical modifiers on a single item into one entry', async () => {
+test('orders-detailed collapses identical modifiers on a single item into one entry', async () => {
   const orders = [
     {
       guid: 'order-modifiers-collapsed',
@@ -290,7 +290,7 @@ test('items-expanded collapses identical modifiers on a single item into one ent
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -309,7 +309,7 @@ test('items-expanded collapses identical modifiers on a single item into one ent
   );
 });
 
-test('items-expanded collapses duplicate modifiers emitted separately', async () => {
+test('orders-detailed collapses duplicate modifiers emitted separately', async () => {
   const orders = [
     {
       guid: 'order-duplicate-modifiers',
@@ -360,7 +360,7 @@ test('items-expanded collapses duplicate modifiers emitted separately', async ()
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -382,7 +382,7 @@ test('items-expanded collapses duplicate modifiers emitted separately', async ()
   );
 });
 
-test('items-expanded collapses duplicate modifiers without ids using name and group fallback', async () => {
+test('orders-detailed collapses duplicate modifiers without ids using name and group fallback', async () => {
   const orders = [
     {
       guid: 'order-duplicate-noid',
@@ -425,7 +425,7 @@ test('items-expanded collapses duplicate modifiers without ids using name and gr
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -440,7 +440,7 @@ test('items-expanded collapses duplicate modifiers without ids using name and gr
   assert.equal(item.money.modifierTotalCents, 150);
 });
 
-test('items-expanded collapses duplicate nested modifiers after flattening', async () => {
+test('orders-detailed collapses duplicate nested modifiers after flattening', async () => {
   const orders = [
     {
       guid: 'order-nested-duplicates',
@@ -492,7 +492,7 @@ test('items-expanded collapses duplicate nested modifiers after flattening', asy
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -510,7 +510,7 @@ test('items-expanded collapses duplicate nested modifiers after flattening', asy
   );
 });
 
-test('items-expanded exposes orderData block with required metadata as first key', async () => {
+test('orders-detailed exposes orderData block with required metadata as first key', async () => {
   const orders = [
     {
       guid: 'order-data',
@@ -543,7 +543,7 @@ test('items-expanded exposes orderData block with required metadata as first key
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -578,7 +578,7 @@ test('items-expanded exposes orderData block with required metadata as first key
   assert.equal(order.fulfillmentStatus, undefined);
 });
 
-test('items-expanded prefers catalog dining option labels when available', async () => {
+test('orders-detailed prefers catalog dining option labels when available', async () => {
   const orders = [
     {
       guid: 'order-catalog-label',
@@ -612,7 +612,7 @@ test('items-expanded prefers catalog dining option labels when available', async
   const handler = createHandlerWithOrders(orders, null, { diningOptions });
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=25')
+    new Request('https://worker.test/api/orders-detailed?limit=25')
   );
   const body = await response.json();
 
@@ -627,7 +627,7 @@ test('items-expanded prefers catalog dining option labels when available', async
   assert.equal(order.orderData.diningOptionName, 'DoorDash - Delivery');
 });
 
-test('items-expanded filters out special requests and fees from items array', async () => {
+test('orders-detailed filters out special requests and fees from items array', async () => {
   const orders = [
     {
       guid: 'order-filter',
@@ -664,7 +664,7 @@ test('items-expanded filters out special requests and fees from items array', as
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -674,7 +674,7 @@ test('items-expanded filters out special requests and fees from items array', as
   assert.equal(body.orders[0].items[0].lineItemId, 'sel-real');
 });
 
-test('items-expanded derives order type from dining option configuration when behavior is missing', async () => {
+test('orders-detailed derives order type from dining option configuration when behavior is missing', async () => {
   let lookupCalls = 0;
   const orders = [
     {
@@ -709,7 +709,7 @@ test('items-expanded derives order type from dining option configuration when be
 
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -722,7 +722,7 @@ test('items-expanded derives order type from dining option configuration when be
   assert.equal(lookupCalls, 1);
 });
 
-test('items-expanded uses customer name fallbacks when direct customer data is missing', async () => {
+test('orders-detailed uses customer name fallbacks when direct customer data is missing', async () => {
   const orders = [
     {
       guid: 'order-customer',
@@ -753,7 +753,7 @@ test('items-expanded uses customer name fallbacks when direct customer data is m
   const handler = createHandlerWithOrders(orders);
   const response = await handler(
     createEnv(),
-    new Request('https://worker.test/api/items-expanded?limit=50')
+    new Request('https://worker.test/api/orders-detailed?limit=50')
   );
   const body = await response.json();
 
@@ -763,7 +763,7 @@ test('items-expanded uses customer name fallbacks when direct customer data is m
   assert.equal(body.orders[0].orderData.customerName, 'VIP Table');
 });
 
-test('items-expanded resolves totals using the higher of upstream and computed values', async () => {
+test('orders-detailed resolves totals using the higher of upstream and computed values', async () => {
   const orders = [
     {
       guid: 'order-totals',
@@ -796,7 +796,7 @@ test('items-expanded resolves totals using the higher of upstream and computed v
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -806,7 +806,7 @@ test('items-expanded resolves totals using the higher of upstream and computed v
   assert.equal(money.totalItemPriceCents, 250);
 });
 
-test('items-expanded maintains totals when modifiers are deduplicated', async () => {
+test('orders-detailed maintains totals when modifiers are deduplicated', async () => {
   const orders = [
     {
       guid: 'order-total-dedup',
@@ -846,7 +846,7 @@ test('items-expanded maintains totals when modifiers are deduplicated', async ()
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -862,7 +862,7 @@ test('items-expanded maintains totals when modifiers are deduplicated', async ()
   assert.equal(item.money.modifierTotalCents, 200);
 });
 
-test('items-expanded derives order type from available metadata', async () => {
+test('orders-detailed derives order type from available metadata', async () => {
   const orders = [
     {
       guid: 'order-curbside',
@@ -926,7 +926,7 @@ test('items-expanded derives order type from available metadata', async () => {
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -946,7 +946,7 @@ test('items-expanded derives order type from available metadata', async () => {
   assert.equal(takeout.orderData.orderTypeNormalized, 'TAKEOUT');
 });
 
-test('items-expanded includes behavior-specific enrichment data when available', async () => {
+test('orders-detailed includes behavior-specific enrichment data when available', async () => {
   const orders = [
     {
       guid: 'order-delivery',
@@ -1050,7 +1050,7 @@ test('items-expanded includes behavior-specific enrichment data when available',
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -1083,7 +1083,7 @@ test('items-expanded includes behavior-specific enrichment data when available',
   assert.equal(takeout.orderData.estimatedFulfillmentDate, '2024-01-01T19:20:00.000+0000');
 });
 
-test('items-expanded exposes aggregated fulfillment status on orderData', async () => {
+test('orders-detailed exposes aggregated fulfillment status on orderData', async () => {
   const orders = [
     {
       guid: 'order-fulfillment-status',
@@ -1118,7 +1118,7 @@ test('items-expanded exposes aggregated fulfillment status on orderData', async 
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -1130,7 +1130,7 @@ test('items-expanded exposes aggregated fulfillment status on orderData', async 
   assert.deepEqual(statuses, ['NEW', 'READY']);
 });
 
-test('items-expanded keeps newest qualifying orders and item order stable across polls', async () => {
+test('orders-detailed keeps newest qualifying orders and item order stable across polls', async () => {
   const orders = [
     {
       guid: 'order-new-2',
@@ -1249,7 +1249,7 @@ test('items-expanded keeps newest qualifying orders and item order stable across
 
   const handler = createHandlerWithOrders(orders);
   const env = createEnv();
-  const request = new Request('https://worker.test/api/items-expanded?limit=3');
+  const request = new Request('https://worker.test/api/orders-detailed?limit=3');
 
   const responseA = await handler(env, request);
   const bodyA = await responseA.json();
@@ -1276,7 +1276,7 @@ test('items-expanded keeps newest qualifying orders and item order stable across
   );
 });
 
-test('items-expanded reports READY_FOR_PICKUP when all selections are ready', async () => {
+test('orders-detailed reports READY_FOR_PICKUP when all selections are ready', async () => {
   const orders = [
     {
       guid: 'order-fulfillment-ready',
@@ -1310,7 +1310,7 @@ test('items-expanded reports READY_FOR_PICKUP when all selections are ready', as
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -1321,7 +1321,7 @@ test('items-expanded reports READY_FOR_PICKUP when all selections are ready', as
   assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['READY', 'READY']);
 });
 
-test('items-expanded sorts candidates before building orders and reports diagnostics', async () => {
+test('orders-detailed sorts candidates before building orders and reports diagnostics', async () => {
   const orders = [
     {
       guid: 'order-low',
@@ -1397,7 +1397,7 @@ test('items-expanded sorts candidates before building orders and reports diagnos
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const request = new Request('https://worker.test/api/items-expanded?limit=2&debug=1');
+  const request = new Request('https://worker.test/api/orders-detailed?limit=2&debug=1');
   const response = await handler(createEnv(), request);
   const body = await response.json();
 
@@ -1414,7 +1414,7 @@ test('items-expanded sorts candidates before building orders and reports diagnos
   assert.equal(body.debug.diagnostics.itemsIncluded, 2);
 });
 
-test('items-expanded prioritizes webhook-derived fulfillment status over selection states', async () => {
+test('orders-detailed prioritizes webhook-derived fulfillment status over selection states', async () => {
   const orders = [
     {
       guid: 'order-fulfillment-webhook',
@@ -1445,7 +1445,7 @@ test('items-expanded prioritizes webhook-derived fulfillment status over selecti
   ];
 
   const handler = createHandlerWithOrders(orders);
-  const response = await handler(createEnv(), new Request('https://worker.test/api/items-expanded?limit=50'));
+  const response = await handler(createEnv(), new Request('https://worker.test/api/orders-detailed?limit=50'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -1456,9 +1456,9 @@ test('items-expanded prioritizes webhook-derived fulfillment status over selecti
   assert.deepEqual(order.items.map((item) => item.fulfillmentStatus), ['HOLD']);
 });
 
-test('items-expanded surfaces menu cache info and upstream diagnostics', async () => {
+test('orders-detailed surfaces menu cache info and upstream diagnostics', async () => {
   const handler = createHandlerWithOrders([], { menus: [] }, { menuCacheHit: true });
-  const request = new Request('https://worker.test/api/items-expanded?debug=1&limit=5');
+  const request = new Request('https://worker.test/api/orders-detailed?debug=1&limit=5');
   const response = await handler(createEnv(), request);
   const body = await response.json();
 

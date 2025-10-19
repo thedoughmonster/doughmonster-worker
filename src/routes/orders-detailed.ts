@@ -1,21 +1,21 @@
 import type { AppEnv } from "../config/env.js";
 import { getDiningOptions, type DiningOptionConfig } from "../clients/toast.js";
 import { jsonResponse } from "../lib/http.js";
-import { fetchMenuFromWorker, fetchOrdersFromWorker } from "./items-expanded/fetchers.js";
-import { buildExpandedOrders, extractOrders } from "./items-expanded/compose.js";
+import { fetchMenuFromWorker, fetchOrdersFromWorker } from "./orders-detailed/fetchers.js";
+import { buildExpandedOrders, extractOrders } from "./orders-detailed/compose.js";
 import {
   extractCustomerName,
   normalizeName,
   normalizeOrderType,
   pickStringPaths,
-} from "./items-expanded/extractors.js";
+} from "./orders-detailed/extractors.js";
 import type {
   DiagnosticsCounters,
   ExpandedOrder,
   MenusResponse,
   OrdersLatestResponse,
   UpstreamTrace,
-} from "./items-expanded/types-local.js";
+} from "./orders-detailed/types-local.js";
 import type { ToastCheck, ToastOrder } from "../types/toast-orders.js";
 
 const ORDERS_ENDPOINT = "/api/orders/latest";
@@ -27,15 +27,15 @@ const ORDERS_UPSTREAM_MAX = 200;
 const HANDLER_TIME_BUDGET_MS = 10_000;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-interface ItemsExpandedDependencies {
+interface OrdersDetailedDependencies {
   getDiningOptions: (env: AppEnv) => Promise<DiningOptionConfig[]>;
 }
 
-interface ItemsExpandedFactoryOptions extends Partial<ItemsExpandedDependencies> {
+interface OrdersDetailedFactoryOptions extends Partial<OrdersDetailedDependencies> {
   fetch?: typeof fetch;
 }
 
-const DEFAULT_DEPS: ItemsExpandedDependencies = {
+const DEFAULT_DEPS: OrdersDetailedDependencies = {
   getDiningOptions,
 };
 
@@ -90,8 +90,8 @@ function ensureCacheNamespace(env: AppEnv): AppEnv {
   return env;
 }
 
-export function createItemsExpandedHandler(options: ItemsExpandedFactoryOptions = {}) {
-  const deps: ItemsExpandedDependencies = {
+export function createOrdersDetailedHandler(options: OrdersDetailedFactoryOptions = {}) {
+  const deps: OrdersDetailedDependencies = {
     getDiningOptions: options.getDiningOptions ?? DEFAULT_DEPS.getDiningOptions,
   };
 
@@ -106,7 +106,7 @@ export function createItemsExpandedHandler(options: ItemsExpandedFactoryOptions 
 
     try {
       const runtimeEnv = ensureCacheNamespace(env);
-      return handleItemsExpanded(runtimeEnv, request, deps);
+      return handleOrdersDetailed(runtimeEnv, request, deps);
     } finally {
       if (shouldOverrideFetch) {
         (globalThis as any).fetch = previousFetch;
@@ -115,12 +115,12 @@ export function createItemsExpandedHandler(options: ItemsExpandedFactoryOptions 
   };
 }
 
-export default createItemsExpandedHandler();
+export default createOrdersDetailedHandler();
 
-async function handleItemsExpanded(
+async function handleOrdersDetailed(
   env: AppEnv,
   request: Request,
-  deps: ItemsExpandedDependencies
+  deps: OrdersDetailedDependencies
 ): Promise<Response> {
   const startedAt = Date.now();
   const requestId = Math.random().toString(36).slice(2, 10);
@@ -327,7 +327,7 @@ async function enrichExpandedOrders(
   expandedOrders: ExpandedOrder[],
   checkLookup: Map<string, CheckLookupRecord>,
   env: AppEnv,
-  deps: ItemsExpandedDependencies
+  deps: OrdersDetailedDependencies
 ): Promise<void> {
   if (expandedOrders.length === 0) return;
 
@@ -466,7 +466,7 @@ function collectDirectDiningOptionMeta(
 
 async function loadDiningOptionsLookup(
   env: AppEnv,
-  deps: ItemsExpandedDependencies
+  deps: OrdersDetailedDependencies
 ): Promise<DiningOptionsLookup> {
   try {
     const options = await deps.getDiningOptions(env);

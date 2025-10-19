@@ -9,10 +9,12 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/orders-merged` | Fetches `/api/orders/latest` and `/api/menus`, returning both payloads without modifying either response body. | `curl -s "https://<worker>/api/orders-merged" \| jq` |
-| `GET` | `/api/items-expanded` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/items-expanded?status=APPROVED" \| jq` |
+| `GET` | `/api/orders-detailed` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/orders-detailed?status=APPROVED" \| jq` |
 | `GET` | `/api/config/snapshot` | Fetches a fixed set of Toast configuration slices and caches the merged payload for 1 hour. | `curl -s "https://<worker>/api/config/snapshot" \| jq` |
 
-All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/items-expanded` can self-fetch them without leaving the worker boundary.
+> **Migration notice:** `/api/items-expanded` now serves as a temporary alias for `/api/orders-detailed` and emits a `Deprecation: true` header plus a successor `Link`. Update clients to the new path before the alias is removed.
+
+All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/orders-detailed` can self-fetch them without leaving the worker boundary.
 
 ### Config Snapshot (1h cache)
 
@@ -67,15 +69,15 @@ When the worker runs with `DEBUG` set and you append `?debug=1` (or `?debug=true
 
 Production consumers should continue calling the endpoint without `debug`; the telemetry fields are optional and only materialize when explicitly requested so the normal payload and caching behavior remain unchanged.
 
-### `/api/items-expanded`
+### `/api/orders-detailed`
 This endpoint is built for dashboards that need per-order snapshots with nested items:
 
 - Internally calls `/api/orders/latest` (to load recent orders) and `/api/menus` (to enrich menu metadata) so it reuses the worker's KV cache while returning the same JSON schema as the previous direct-Toast implementation.
-- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. `/api/orders/latest` handles the rolling lookback/pagination; items-expanded filters out non-line items, aggregates line-level totals, and applies the requested limit.
+- When called without filters it returns the 20 most recent non-voided orders across every approval status (including active and fulfilled orders), sorted from newest to oldest. `/api/orders/latest` handles the rolling lookback/pagination; orders-detailed filters out non-line items, aggregates line-level totals, and applies the requested limit.
 - Each order groups all items for a Toast check and includes modifier breakdowns, per-item pricing (base, modifier, total), order timing, customer/location metadata, and aggregated totals (base, modifiers, discounts, service charges, tips, and grand total).
 - Results are deterministic: orders are sorted by `orderTime` descending (breaking ties with `orderId` then `checkId`), and items are sorted by display/index metadata (display order → creation time → receipt line position → selection index → seat → name → `menuItemId` → `lineItemId`) so nothing jumps between polls.
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
-- Accepts optional ISO-8601 `start`/`end` query parameters; these are forwarded to `/api/orders/latest` when present. Otherwise the shared endpoint uses its adaptive window strategy and items-expanded returns whatever qualifies before the requested limit is reached.
+- Accepts optional ISO-8601 `start`/`end` query parameters; these are forwarded to `/api/orders/latest` when present. Otherwise the shared endpoint uses its adaptive window strategy and orders-detailed returns whatever qualifies before the requested limit is reached.
 - Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
 - **Progressive lookback:** When not using an explicit `start`/`end` range, the handler may retry `/api/orders/latest` with minute windows `[60, 240, 480, 1440, 2880, 4320, 10080]` until it fills the requested limit or reaches the 7-day fallback window.
 - Loads the published menu document once per request to hydrate item and modifier names. The response includes a `cacheInfo` block:
@@ -86,21 +88,21 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 
 | Query        | Description                                                                                   | Example                                            |
 | ------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Optional; omit to return the latest orders regardless of start time.   | `/api/items-expanded?start=2024-03-09T14:00:00Z`   |
-| `end`        | ISO-8601 timestamp (UTC) for the end of the window. Optional; defaults to "now" when only `start` is provided.             | `/api/items-expanded?end=2024-03-09T16:00:00Z`     |
-| `status`     | Case-insensitive Toast order status filter.                                                   | `/api/items-expanded?status=paid`                  |
-| `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/items-expanded?locationId=<location-guid>`   |
-| `limit`      | Maximum number of orders to return (1-500, default 20). Values above 500 are automatically clamped. | `/api/items-expanded?limit=25`                     |
+| `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Optional; omit to return the latest orders regardless of start time.   | `/api/orders-detailed?start=2024-03-09T14:00:00Z`   |
+| `end`        | ISO-8601 timestamp (UTC) for the end of the window. Optional; defaults to "now" when only `start` is provided.             | `/api/orders-detailed?end=2024-03-09T16:00:00Z`     |
+| `status`     | Case-insensitive Toast order status filter.                                                   | `/api/orders-detailed?status=paid`                  |
+| `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/orders-detailed?locationId=<location-guid>`   |
+| `limit`      | Maximum number of orders to return (1-500, default 20). Values above 500 are automatically clamped. | `/api/orders-detailed?limit=25`                     |
 
 #### Sample requests
 
-- Most recent orders across all statuses: `curl -s "https://<worker>/api/items-expanded" \| jq`
-- Filtered by location and status with custom window: `curl -s "https://<worker>/api/items-expanded?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
+- Most recent orders across all statuses: `curl -s "https://<worker>/api/orders-detailed" \| jq`
+- Filtered by location and status with custom window: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
 
 #### Debugging
 
 - Append `?debug=1` (or `true`/`debug`) to enable a rich debug payload along with diagnostic headers.
-- Debug mode adds the `x-request-id`, `x-items-expanded-debug`, `x-up-orders-status`, `x-up-menu-status`, and `x-qualifying-found` headers to responses.
+- Debug mode adds the `x-request-id`, `x-orders-detailed-debug`, `x-up-orders-status`, `x-up-menu-status`, and `x-qualifying-found` headers to responses.
 - Response body snippets in debug output are limited to 512 characters and are only emitted when debug mode is explicitly enabled.
 
 ### `/api/orders-merged`
@@ -143,7 +145,7 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 - The full document lives at `menu:published:v1`; metadata (`updatedAt`, `staleAt`, `expireAt`, optional `etag`) is stored at `menu:published:meta:v1`.
 - Reads are considered fresh for 30 minutes. Between 30 minutes and 24 hours the worker serves the cached document immediately and schedules a background refresh via `waitUntil`.
 - After 24 hours the worker blocks on Toast before replying and overwrites both KV entries with the new payload and timestamps.
-- Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1` or `/api/items-expanded?refresh=true`) forces a synchronous revalidate and updates the KV entries regardless of age.
+- Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1` or `/api/orders-detailed?refresh=true`) forces a synchronous revalidate and updates the KV entries regardless of age.
 - Responses that rely on the cached menu surface `cacheInfo.menuUpdatedAt` so you can see when the document was last refreshed.
 
 ## Operations UI
@@ -151,7 +153,7 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 Visiting the root path (`/`) now serves a standalone "Orders – All Day View" dashboard powered by the static files in `/public`.
 The experience mirrors the needs of an expediter station and runs entirely in the browser—no additional framework required.
 
-- Polls `/api/items-expanded` every 10 seconds (configurable in `public/app.js`) and re-renders without full-page refreshes.
+- Polls `/api/orders-detailed` every 10 seconds (configurable in `public/app.js`) and re-renders without full-page refreshes.
 - Fixed top bar shows the live clock, open order count (after filters), lookback toggle (`Default` vs `Full Day`), and the last
   successful refresh timestamp.
 - Modifier rail on the left aggregates modifiers across the currently visible orders (collapsible on small screens).
@@ -196,12 +198,12 @@ wrangler deploy
 Configure secrets/KV bindings via `wrangler.toml`, `.dev.vars`, or the Cloudflare dashboard before running locally or deploying.
 
 ## Self-Fetching & Origins
-- `/api/items-expanded` and `/api/orders-merged` now call their sibling handlers (`/api/orders/latest` and `/api/menus`) directly inside the worker instead of issuing HTTP self-requests. This avoids the Cloudflare 404 (`error code: 1042`) caused by workers.dev vs. custom domain routing mismatches.
+- `/api/orders-detailed` and `/api/orders-merged` now call their sibling handlers (`/api/orders/latest` and `/api/menus`) directly inside the worker instead of issuing HTTP self-requests. This avoids the Cloudflare 404 (`error code: 1042`) caused by workers.dev vs. custom domain routing mismatches.
 - If a direct invocation throws or returns an unexpected payload, the composite route falls back to the legacy network fetch for safety. The debug traces expose this via `internalFallbackUsed: true` and `path: "network"` along with the original status/snippet details.
 - Successful direct calls surface `path: "direct"` (plus `cacheHit` for menu lookups) in the debug payloads so you can confirm the fast path is being used.
 - The optional network fallback keeps the previous header forwarding and snippet capture so existing diagnostics remain intact while we evaluate a future service binding for self-calls.
 
-## `/api/items-expanded`
+## `/api/orders-detailed`
 
 ### Query parameters
 - `limit` (default 20, max 500): number of expanded orders to return after aggregation.
