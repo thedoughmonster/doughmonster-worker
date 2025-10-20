@@ -2,6 +2,22 @@
 
 A Cloudflare Worker that owns Toast authentication, pagination, and response shaping for Doughmonster. It exposes a handful of read-only endpoints so downstream clients only have to make simple HTTP requests.
 
+## Build targets
+
+### Cloudflare Worker (repo root)
+- Build command: `npm ci && npm run check && npm run build && npm test`
+
+### Cloudflare Pages UI (`web/`)
+- Build command: `npm ci && npm run build`
+- Output directory: `dist`
+
+### MIGRATION SUMMARY
+- `src/ui → web/src/ui`
+- `src/ui/OrdersAllDayView.tsx → web/src/ui/OrdersAllDayView.tsx`
+- `public/index.html → web/index.html`
+- `public/app.js → web/src/main.tsx`
+- `public/styles.css → web/src/styles.css`
+
 ## Endpoints
 | Method | Path | Description | Example |
 | ------ | ---- | ----------- | ------- |
@@ -151,10 +167,10 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 
 ## Operations UI
 
-Visiting the root path (`/`) now serves a standalone "Orders – All Day View" dashboard powered by the static files in `/public`.
-The experience mirrors the needs of an expediter station and runs entirely in the browser—no additional framework required.
+The Cloudflare Pages project under `web/` hosts the standalone "Orders – All Day View" dashboard built with Vite and React.
+Deploy the compiled `web/dist` bundle on Pages while the Worker continues to serve the API-only surface.
 
-- Polls `/api/orders-detailed` every 10 seconds (configurable in `public/app.js`) and re-renders without full-page refreshes.
+- Polls `/api/orders-detailed` every 10 seconds (configurable in `web/src/ui/OrdersAllDayView.tsx`) and re-renders without full-page refreshes.
 - Fixed top bar shows the live clock, open order count (after filters), lookback toggle (`Default` vs `Full Day`), and the last
   successful refresh timestamp.
 - Modifier rail on the left aggregates modifiers across the currently visible orders (collapsible on small screens).
@@ -168,7 +184,7 @@ The experience mirrors the needs of an expediter station and runs entirely in th
 1. Start the worker with `npm run dev` (Wrangler serves the worker and static assets).
 2. Open `http://127.0.0.1:8787/` to load the dashboard. The page polls the co-located API, so no additional configuration is
    required.
-3. Customize intervals, styles, or behavior via the files in `/public`.
+3. Customize intervals, styles, or behavior via the source in `web/src`.
 
 ## Environment variables
 | Name | Type | Purpose |
