@@ -69,6 +69,8 @@ export function createOrdersLatestHandler(
         debug: includeDebug,
       });
 
+      const ordersPayload = detail === "full" ? result.orders : result.orderIds;
+
       const responseBody: any = {
         ok: true,
         route: "/api/orders/latest",
@@ -79,7 +81,7 @@ export function createOrdersLatestHandler(
         expandUsed: EXPAND_FULL,
         count: result.orderIds.length,
         ids: result.orderIds,
-        orders: result.orderIds,
+        orders: ordersPayload,
       };
 
       const sourcesMap = includeDebug && Array.isArray(result.sources)
