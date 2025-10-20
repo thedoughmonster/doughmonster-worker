@@ -87,6 +87,11 @@ test('orders/latest caches responses and sorts by openedDate', async () => {
   assert.deepEqual(body.ids, ['order-2', 'order-1']);
   assert.equal(Array.isArray(body.data), true);
   assert.equal(body.data.length, 2);
+  assert.equal(Array.isArray(body.orders), true);
+  assert.deepEqual(
+    body.orders.map((order) => order.guid),
+    ['order-2', 'order-1']
+  );
   assert.equal(body.limit, 5);
   assert.equal(body.detail, 'full');
   assert.equal(calls.length, 1);
@@ -154,5 +159,6 @@ test('orders/latest supports detail=ids', async () => {
 
   assert.equal(body.detail, 'ids');
   assert.deepEqual(body.ids, ['order-ids']);
+  assert.deepEqual(body.orders, ['order-ids']);
   assert.equal('data' in body, false);
 });
