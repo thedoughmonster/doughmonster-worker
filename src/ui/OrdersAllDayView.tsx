@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-export const ORDERS_ENDPOINT = "https://example.com/api/orders-detailed";
+export const ORDERS_ENDPOINT = "/api/orders-detailed";
 export const POLL_INTERVAL_MS = 10_000;
 
 type ToastTimestamp = string;
