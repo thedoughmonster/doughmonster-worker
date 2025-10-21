@@ -1130,6 +1130,85 @@ test('orders-detailed exposes aggregated fulfillment status on orderData', async
   assert.deepEqual(statuses, ['NEW', 'READY']);
 });
 
+test('orders-detailed filters orders by fulfillmentStatus query parameter', async () => {
+  const createOrder = (guid, status, createdDate) => {
+    const check = {
+      guid: `${guid}-check`,
+      selections: [
+        {
+          guid: `${guid}-item`,
+          selectionType: 'MENU_ITEM',
+          quantity: 1,
+          receiptLinePrice: 5,
+          item: { guid: `${guid}-menu-item`, itemType: 'MENU_ITEM' },
+        },
+      ],
+    };
+    if (status !== null && status !== undefined) {
+      check.guestOrderFulfillmentStatus = { status };
+    }
+    return {
+      guid,
+      createdDate,
+      checks: [check],
+    };
+  };
+
+  const orders = [
+    createOrder('order-progress', 'IN_PROGRESS', '2024-01-01T12:40:00.000+0000'),
+    createOrder('order-ready-upper', 'READY_FOR_PICKUP', '2024-01-01T12:30:00.000+0000'),
+    createOrder('order-in-prep', 'IN_PREPARATION', '2024-01-01T12:20:00.000+0000'),
+    createOrder('order-ready-mixed', 'Ready For Pickup', '2024-01-01T12:10:00.000+0000'),
+    createOrder('order-no-status', null, '2024-01-01T12:05:00.000+0000'),
+    createOrder('order-cancelled', 'CANCELLED', '2024-01-01T12:00:00.000+0000'),
+  ];
+
+  const handler = createHandlerWithOrders(orders);
+
+  const singleResponse = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/orders-detailed?limit=6&fulfillmentStatus=READY_FOR_PICKUP')
+  );
+  const singleBody = await singleResponse.json();
+  assert.equal(singleResponse.status, 200);
+  assert.deepEqual(
+    singleBody.orders.map((order) => order.orderData.orderId),
+    ['order-ready-upper', 'order-ready-mixed']
+  );
+  assert.ok(
+    singleBody.orders.some(
+      (order) =>
+        order.orderData.orderId === 'order-ready-mixed' &&
+        order.orderData.fulfillmentStatus === 'Ready For Pickup'
+    )
+  );
+
+  const caseResponse = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/orders-detailed?limit=6&fulfillmentStatus=ready for pickup')
+  );
+  const caseBody = await caseResponse.json();
+  assert.equal(caseResponse.status, 200);
+  assert.deepEqual(
+    caseBody.orders.map((order) => order.orderData.orderId),
+    ['order-ready-upper', 'order-ready-mixed']
+  );
+
+  const multiResponse = await handler(
+    createEnv(),
+    new Request(
+      'https://worker.test/api/orders-detailed?limit=2&fulfillmentStatus= ready for pickup ,IN_PREPARATION&fulfillmentStatus=in_progress'
+    )
+  );
+  const multiBody = await multiResponse.json();
+  assert.equal(multiResponse.status, 200);
+  assert.equal(multiBody.orders.length, 2);
+  assert.deepEqual(
+    multiBody.orders.map((order) => order.orderData.orderId),
+    ['order-progress', 'order-ready-upper']
+  );
+});
+
 test('orders-detailed keeps newest qualifying orders and item order stable across polls', async () => {
   const orders = [
     {
