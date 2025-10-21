@@ -149,26 +149,39 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 - Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1` or `/api/orders-detailed?refresh=true`) forces a synchronous revalidate and updates the KV entries regardless of age.
 - Responses that rely on the cached menu surface `cacheInfo.menuUpdatedAt` so you can see when the document was last refreshed.
 
-## Operations UI
+## Operations & Monitoring
 
-Visiting the root path (`/`) now serves a standalone "Orders – All Day View" dashboard powered by the static files in `/public`.
-The experience mirrors the needs of an expediter station and runs entirely in the browser—no additional framework required.
+The worker now ships without a dashboard or static asset pipeline; all operations are performed through its HTTP API. Routine checks focus on endpoint availability, cache state, and Toast synchronization rather than UI behavior.
 
-- Polls `/api/orders-detailed` every 10 seconds (configurable in `public/app.js`) and re-renders without full-page refreshes.
-- Fixed top bar shows the live clock, open order count (after filters), lookback toggle (`Default` vs `Full Day`), and the last
-  successful refresh timestamp.
-- Modifier rail on the left aggregates modifiers across the currently visible orders (collapsible on small screens).
-- Order cards combine identical line items, collapse duplicate modifiers, surface fulfillment status chips, and highlight due
-  times (overdue vs. due soon).
-- Filters include `All`, `Open`, `Ready`, and `Delivery`. Switching to the "Full Day" lookback adds `start/end` parameters to the
-  API request covering local midnight through "now".
+- **Health probe:** `curl -i "$BASE_URL/api/health"` should return `200 OK` with `{ "ok": true }`.
+- **Order freshness:** `curl -s "$BASE_URL/api/orders/latest?limit=5" | jq '.ids'` confirms cursor advancement.
+- **Expanded orders:** `curl -s "$BASE_URL/api/orders-detailed?limit=3" | jq '.orders[0].items | length'` validates enrichment and aggregation.
+- **Config snapshot:** `curl -s "$BASE_URL/api/config/snapshot" | jq '.ttlSeconds'` surfaces cache TTLs and highlights stale slices.
+
+Set `BASE_URL` to either the production worker domain or your local dev URL (`http://127.0.0.1:8787`) before running the examples.
+
+### Cache maintenance
+
+- Menus: `wrangler kv:key list --namespace-id $CACHE_KV --prefix menu:` shows the cached menu keys; delete with `wrangler kv:key delete --namespace-id $CACHE_KV menu:published:v1` to force a refresh on the next request.
+- Orders: remove the `orders:*` keys from `CACHE_KV` to flush incremental indices before re-polling Toast.
+- Tokens: if authentication fails, rotate the `TOKEN_KV` secret or delete the cached bearer token key to trigger a re-login.
 
 ### Local development
 
-1. Start the worker with `npm run dev` (Wrangler serves the worker and static assets).
-2. Open `http://127.0.0.1:8787/` to load the dashboard. The page polls the co-located API, so no additional configuration is
-   required.
-3. Customize intervals, styles, or behavior via the files in `/public`.
+1. Create a `.dev.vars` file (ignored by git) to supply the Toast credentials and bindings expected by the worker:
+   ```bash
+   cat <<'EOF' > .dev.vars
+   TOAST_API_BASE=https://ws-api.toasttab.com
+   TOAST_AUTH_URL=https://auth.toasttab.com
+   TOAST_CLIENT_ID=your-machine-client-id
+   TOAST_CLIENT_SECRET=your-machine-client-secret
+   TOAST_RESTAURANT_GUID=your-restaurant-guid
+   DEBUG=1
+   EOF
+   ```
+   Define `TOKEN_KV` and `CACHE_KV` in `wrangler.toml` so Wrangler maps them to local KV namespaces during `wrangler dev`.
+2. Start the worker with `npm run dev` and interact with the API directly: `curl -s http://127.0.0.1:8787/api/health`.
+3. Use the same curl workflows as production to exercise orders, menus, and config endpoints while iterating on backend logic.
 
 ## Environment variables
 | Name | Type | Purpose |
