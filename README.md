@@ -2,21 +2,17 @@
 
 A Cloudflare Worker that owns Toast authentication, pagination, and response shaping for Doughmonster. It exposes a handful of read-only endpoints so downstream clients only have to make simple HTTP requests.
 
-## Build targets
+## Monorepo split
 
-### Cloudflare Worker (repo root)
-- Build command: `npm ci && npm run check && npm run build && npm test`
-
-### Cloudflare Pages UI (`web/`)
-- Build command: `npm ci && npm run build`
-- Output directory: `dist`
+- **Worker (repo root)**: built by the Cloudflare Workers GitHub integration. Build command: `npm ci && npm run check && npm run build && npm test`.
+- **Frontend (web/)**: built by Cloudflare Pages. Root directory: `web/`. Build command: `npm ci && npm run build`. Output directory: `dist`.
+- **UI API access**: the UI calls the Worker via the `VITE_API_BASE` environment variable (set in Pages; defaults to `http://localhost:8787` locally).
 
 ### MIGRATION SUMMARY
-- `src/ui → web/src/ui`
-- `src/ui/OrdersAllDayView.tsx → web/src/ui/OrdersAllDayView.tsx`
 - `public/index.html → web/index.html`
 - `public/app.js → web/src/main.tsx`
 - `public/styles.css → web/src/styles.css`
+- `src/ui/OrdersAllDayView.tsx → web/src/ui/OrdersAllDayView.tsx`
 
 ## Endpoints
 | Method | Path | Description | Example |

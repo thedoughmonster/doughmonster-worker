@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-export const ORDERS_ENDPOINT = "https://example.com/api/orders-detailed";
+const DEFAULT_API_BASE = "http://localhost:8787";
+const API_BASE = (import.meta.env.VITE_API_BASE ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+export const ORDERS_ENDPOINT = `${API_BASE}/api/orders-detailed`;
 export const POLL_INTERVAL_MS = 10_000;
 
 type ToastTimestamp = string;
