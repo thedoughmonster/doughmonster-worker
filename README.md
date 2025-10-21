@@ -115,6 +115,9 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - **Limit override (`limit`)**
   - Request more recent orders (up to 500): `curl -s "https://<worker>/api/orders-detailed?limit=50" \| jq`
   - Tight limit while filtering: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP&limit=10" \| jq`
+- Most recent orders across all statuses: `curl -s "https://<worker>/api/orders-detailed" \| jq`
+- Filtered by location and status with custom window: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
+- Filtered by fulfillment status: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup&fulfillmentStatus=IN_PREPARATION" \| jq`
 
 #### Debugging
 
