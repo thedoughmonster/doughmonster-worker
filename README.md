@@ -9,7 +9,7 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/orders-merged` | Fetches `/api/orders/latest` and `/api/menus`, returning both payloads without modifying either response body. | `curl -s "https://<worker>/api/orders-merged" \| jq` |
-| `GET` | `/api/orders-detailed` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, location, and limit filters. | `curl -s "https://<worker>/api/orders-detailed?status=APPROVED" \| jq` |
+| `GET` | `/api/orders-detailed` | Returns the most recent non-voided orders with nested item details and menu metadata. Supports time range, status, fulfillment-status, location, and limit filters. | `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP" \| jq` |
 | `GET` | `/api/config/snapshot` | Fetches a fixed set of Toast configuration slices and caches the merged payload for 1 hour. | `curl -s "https://<worker>/api/config/snapshot" \| jq` |
 
 > **Migration notice:** `/api/items-expanded` now serves as a temporary alias for `/api/orders-detailed` and emits a `Deprecation: true` header plus a successor `Link`. Update clients to the new path before the alias is removed.
@@ -78,7 +78,7 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 - Results are deterministic: orders are sorted by `orderTime` descending (breaking ties with `orderId` then `checkId`), and items are sorted by display/index metadata (display order → creation time → receipt line position → selection index → seat → name → `menuItemId` → `lineItemId`) so nothing jumps between polls.
 - `orderData` includes check-level context such as `status`, aggregated delivery/curbside/table metadata, and a `fulfillmentStatus` value that reflects the most advanced selection fulfillment state (NEW → HOLD → SENT → READY).
 - Accepts optional ISO-8601 `start`/`end` query parameters; these are forwarded to `/api/orders/latest` when present. Otherwise the shared endpoint uses its adaptive window strategy and orders-detailed returns whatever qualifies before the requested limit is reached.
-- Supports optional `status` and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
+- Supports optional `status`, `fulfillmentStatus`, and `locationId` filters and a `limit` that caps the number of orders returned (default 20, maximum 500). Override the default with `?limit=<n>` to request the last `n` qualifying orders.
 - **Response memoization:** Expanded orders are cached for five minutes using an order/check fingerprint (Toast `lastModifiedDate`, `version`, and selection ids/quantities/prices/status) so identical payloads skip rebuilding. Cache entries are deep-cloned before returning, capped at 250 entries, and `enrichExpandedOrders` still runs on every response to refresh dining-option metadata.
 - **Progressive lookback:** When not using an explicit `start`/`end` range, the handler may retry `/api/orders/latest` with minute windows `[60, 240, 480, 1440, 2880, 4320, 10080]` until it fills the requested limit or reaches the 7-day fallback window.
 - Loads the published menu document once per request to hydrate item and modifier names. The derived menu index is cached in-memory by the menu metadata timestamp (with a fallback bucket when no timestamp is available) so identical payloads reuse the same lookup without re-indexing. Only the active timestamp entry plus the fallback bucket are retained, ensuring the cache holds at most two menu indexes at any time. The response includes a `cacheInfo` block:
@@ -92,13 +92,29 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 | `start`      | ISO-8601 timestamp (UTC) for the beginning of the window. Optional; omit to return the latest orders regardless of start time.   | `/api/orders-detailed?start=2024-03-09T14:00:00Z`   |
 | `end`        | ISO-8601 timestamp (UTC) for the end of the window. Optional; defaults to "now" when only `start` is provided.             | `/api/orders-detailed?end=2024-03-09T16:00:00Z`     |
 | `status`     | Case-insensitive Toast order status filter.                                                   | `/api/orders-detailed?status=paid`                  |
+| `fulfillmentStatus` | Filter orders by the aggregated order-level fulfillment status. Accepts repeated or comma-separated values (case-insensitive). | `/api/orders-detailed?fulfillmentStatus=ready_for_pickup&fulfillmentStatus=in_preparation` |
 | `locationId` | Restrict results to a single Toast location GUID.                                             | `/api/orders-detailed?locationId=<location-guid>`   |
 | `limit`      | Maximum number of orders to return (1-500, default 20). Values above 500 are automatically clamped. | `/api/orders-detailed?limit=25`                     |
 
 #### Sample requests
 
-- Most recent orders across all statuses: `curl -s "https://<worker>/api/orders-detailed" \| jq`
-- Filtered by location and status with custom window: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
+- **Window controls (`start` / `end`)**
+  - Most recent orders since a specific timestamp: `curl -s "https://<worker>/api/orders-detailed?start=2024-03-09T14:00:00Z" \| jq`
+  - Explicit window with both bounds: `curl -s "https://<worker>/api/orders-detailed?start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
+  - Cap results before a cutoff without forcing a manual start: `curl -s "https://<worker>/api/orders-detailed?end=2024-03-09T16:00:00Z" \| jq`
+- **Status filter (`status`)**
+  - Only orders in a single Toast status: `curl -s "https://<worker>/api/orders-detailed?status=paid" \| jq`
+  - Combine status with a time window: `curl -s "https://<worker>/api/orders-detailed?status=closed&start=2024-03-09T12:00:00Z" \| jq`
+- **Fulfillment status filter (`fulfillmentStatus`)**
+  - Case-insensitive single value: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup" \| jq`
+  - Repeated parameters: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup&fulfillmentStatus=IN_PREPARATION" \| jq`
+  - Comma-separated list: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP,in_preparation" \| jq`
+- **Location filter (`locationId`)**
+  - Restrict to a single location: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>" \| jq`
+  - Layer with status filtering: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=open" \| jq`
+- **Limit override (`limit`)**
+  - Request more recent orders (up to 500): `curl -s "https://<worker>/api/orders-detailed?limit=50" \| jq`
+  - Tight limit while filtering: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP&limit=10" \| jq`
 
 #### Debugging
 
