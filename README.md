@@ -98,6 +98,23 @@ This endpoint is built for dashboards that need per-order snapshots with nested 
 
 #### Sample requests
 
+- **Window controls (`start` / `end`)**
+  - Most recent orders since a specific timestamp: `curl -s "https://<worker>/api/orders-detailed?start=2024-03-09T14:00:00Z" \| jq`
+  - Explicit window with both bounds: `curl -s "https://<worker>/api/orders-detailed?start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
+  - Cap results before a cutoff without forcing a manual start: `curl -s "https://<worker>/api/orders-detailed?end=2024-03-09T16:00:00Z" \| jq`
+- **Status filter (`status`)**
+  - Only orders in a single Toast status: `curl -s "https://<worker>/api/orders-detailed?status=paid" \| jq`
+  - Combine status with a time window: `curl -s "https://<worker>/api/orders-detailed?status=closed&start=2024-03-09T12:00:00Z" \| jq`
+- **Fulfillment status filter (`fulfillmentStatus`)**
+  - Case-insensitive single value: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup" \| jq`
+  - Repeated parameters: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup&fulfillmentStatus=IN_PREPARATION" \| jq`
+  - Comma-separated list: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP,in_preparation" \| jq`
+- **Location filter (`locationId`)**
+  - Restrict to a single location: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>" \| jq`
+  - Layer with status filtering: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=open" \| jq`
+- **Limit override (`limit`)**
+  - Request more recent orders (up to 500): `curl -s "https://<worker>/api/orders-detailed?limit=50" \| jq`
+  - Tight limit while filtering: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=READY_FOR_PICKUP&limit=10" \| jq`
 - Most recent orders across all statuses: `curl -s "https://<worker>/api/orders-detailed" \| jq`
 - Filtered by location and status with custom window: `curl -s "https://<worker>/api/orders-detailed?locationId=<location-guid>&status=closed&start=2024-03-09T14:00:00Z&end=2024-03-09T16:00:00Z" \| jq`
 - Filtered by fulfillment status: `curl -s "https://<worker>/api/orders-detailed?fulfillmentStatus=ready_for_pickup&fulfillmentStatus=IN_PREPARATION" \| jq`
