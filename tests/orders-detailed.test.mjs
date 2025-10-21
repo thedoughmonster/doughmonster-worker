@@ -1475,6 +1475,42 @@ test('orders-detailed surfaces menu cache info and upstream diagnostics', async 
   assert.equal(body.debug.menuUpstream.snippet, null);
 });
 
+test('orders-detailed ignores client detail param and still fetches full detail', async () => {
+  const orders = () => {
+    return [
+      {
+        guid: 'order-ignore-client-detail',
+        createdDate: '2024-01-01T12:00:00.000+0000',
+        checks: [
+          {
+            guid: 'check-ignore-client-detail',
+            selections: [
+              {
+                guid: 'sel-ignore-client-detail',
+                selectionType: 'MENU_ITEM',
+                quantity: 1,
+                receiptLinePrice: 8,
+                item: { guid: 'item-ignore-client-detail' },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+  };
+
+  const handler = createHandlerWithOrders(orders);
+  const request = new Request('https://worker.test/api/orders-detailed?detail=ids&limit=5');
+  const response = await handler(createEnv(), request);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(Array.isArray(body.orders), true);
+  assert.equal(body.orders.length, 1);
+  assert.equal(body.orders[0].orderData.orderId, 'order-ignore-client-detail');
+  assert.equal(body.orders[0].items.length, 1);
+});
+
 test('menu index cache reuses indexes for matching metadata', async () => {
   const menuIndexModule = await import('../dist/routes/orders-detailed/menu-index.js');
   menuIndexModule.resetMenuIndexCacheForTests();

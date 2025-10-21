@@ -134,7 +134,6 @@ async function handleOrdersDetailed(
   const endParam = url.searchParams.get("end");
   const statusParam = url.searchParams.get("status");
   const locationParam = url.searchParams.get("locationId");
-  const detailParam = url.searchParams.get("detail");
   const requestedLimit = parseNumber(url.searchParams.get("limit"), ORDERS_UPSTREAM_DEFAULT);
   const upstreamLimit = clamp(
     Math.max(finalLimit * 3, requestedLimit ?? ORDERS_UPSTREAM_DEFAULT),
@@ -147,7 +146,7 @@ async function handleOrdersDetailed(
 
   const ordersUrl = new URL(ORDERS_ENDPOINT, origin);
   ordersUrl.searchParams.set("limit", String(upstreamLimit));
-  ordersUrl.searchParams.set("detail", detailParam ?? "full");
+  ordersUrl.searchParams.set("detail", "full");
   if (startParam) ordersUrl.searchParams.set("start", startParam);
   if (endParam) ordersUrl.searchParams.set("end", endParam);
   if (statusParam) ordersUrl.searchParams.set("status", statusParam);
