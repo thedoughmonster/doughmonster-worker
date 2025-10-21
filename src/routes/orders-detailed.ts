@@ -134,6 +134,8 @@ async function handleOrdersDetailed(
   const endParam = url.searchParams.get("end");
   const statusParam = url.searchParams.get("status");
   const locationParam = url.searchParams.get("locationId");
+  const fulfillmentStatusFilters = collectFulfillmentStatusFilters(url.searchParams);
+  const fulfillmentFilterActive = fulfillmentStatusFilters.length > 0;
   const requestedLimit = parseNumber(url.searchParams.get("limit"), ORDERS_UPSTREAM_DEFAULT);
   const upstreamLimit = clamp(
     Math.max(finalLimit * 3, requestedLimit ?? ORDERS_UPSTREAM_DEFAULT),
@@ -244,19 +246,25 @@ async function handleOrdersDetailed(
   menuTrace.updatedAt = menuBody.metadata?.lastUpdated ?? null;
   menuTrace.cacheHit = Boolean(menuBody.cacheHit);
 
+  const buildLimit = fulfillmentFilterActive ? Math.min(MAX_LIMIT, finalLimit * 2) : finalLimit;
+
   const build = buildExpandedOrders({
     ordersPayload: ordersBody,
     menuDocument: menuBody.menu ?? null,
     menuUpdatedAt: menuBody.metadata?.lastUpdated ?? null,
-    limit: finalLimit,
+    limit: buildLimit,
     startedAt,
     timeBudgetMs: HANDLER_TIME_BUDGET_MS,
   });
 
-  await enrichExpandedOrders(build.orders, checkLookup, env, deps);
+  const expandedOrders = fulfillmentFilterActive
+    ? filterExpandedOrdersByFulfillmentStatus(build.orders, fulfillmentStatusFilters, finalLimit)
+    : build.orders;
+
+  await enrichExpandedOrders(expandedOrders, checkLookup, env, deps);
 
   const response: any = {
-    orders: build.orders,
+    orders: expandedOrders,
     cacheInfo: {
       menu: menuBody.cacheHit ? "hit-fresh" : "miss-network",
       menuUpdatedAt: menuBody.metadata?.lastUpdated ?? null,
@@ -284,6 +292,48 @@ async function handleOrdersDetailed(
   }
 
   return jsonResponse(response);
+}
+
+function normalizeFulfillmentStatusValue(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const replaced = trimmed.replace(/[\s-]+/g, "_");
+  const collapsed = replaced.replace(/_+/g, "_");
+  const normalized = collapsed.toUpperCase();
+  return normalized ? normalized : null;
+}
+
+function collectFulfillmentStatusFilters(searchParams: URLSearchParams): string[] {
+  const values = searchParams.getAll("fulfillmentStatus");
+  const normalized = new Set<string>();
+  for (const raw of values) {
+    if (typeof raw !== "string") continue;
+    const parts = raw.split(",");
+    for (const part of parts) {
+      const resolved = normalizeFulfillmentStatusValue(part);
+      if (resolved) normalized.add(resolved);
+    }
+  }
+  return Array.from(normalized);
+}
+
+function filterExpandedOrdersByFulfillmentStatus(
+  orders: ExpandedOrder[],
+  filters: string[],
+  limit: number
+): ExpandedOrder[] {
+  if (filters.length === 0) return orders;
+  const allowed = new Set(filters);
+  const filtered: ExpandedOrder[] = [];
+  for (const order of orders) {
+    const normalized = normalizeFulfillmentStatusValue(order?.orderData?.fulfillmentStatus ?? null);
+    if (normalized && allowed.has(normalized)) {
+      filtered.push(order);
+      if (filtered.length >= limit) break;
+    }
+  }
+  return filtered;
 }
 
 interface CheckLookupRecord {
