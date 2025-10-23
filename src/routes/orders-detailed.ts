@@ -14,6 +14,7 @@ import type {
   ExpandedOrder,
   MenusResponse,
   OrdersLatestResponse,
+  OrdersLatestSuccessResponse,
   UpstreamTrace,
 } from "./orders-detailed/types-local.js";
 import type { ToastCheck, ToastOrder } from "../types/toast-orders.js";
@@ -172,7 +173,7 @@ async function handleOrdersDetailed(
   const menuOk = Boolean(menuPayload && (menuPayload as MenusResponse).ok);
 
   if (!ordersResult.ok || !menuResult.ok || !ordersOk || !menuOk) {
-    const ordersBody = ordersOk ? (ordersPayload as OrdersLatestResponse & { ok: true }) : null;
+    const ordersBody = ordersOk ? (ordersPayload as OrdersLatestSuccessResponse) : null;
     const debug = buildDebugPayload({
       requestId,
       timingMs,
@@ -207,7 +208,7 @@ async function handleOrdersDetailed(
     );
   }
 
-  let ordersBody = ordersPayload as OrdersLatestResponse & { ok: true };
+  let ordersBody = ordersPayload as OrdersLatestSuccessResponse;
   const menuBody = menuPayload as MenusResponse & { ok: true };
 
   const uniqueOrders = new Map<string, ToastOrder>();
@@ -233,14 +234,14 @@ async function handleOrdersDetailed(
       if (!nextResult.ok) break;
       const nextPayload = nextResult.data;
       if (!nextPayload?.ok) break;
-      addOrders(extractOrders(nextPayload as OrdersLatestResponse & { ok: true }));
+      addOrders(extractOrders(nextPayload as OrdersLatestSuccessResponse));
     }
   }
 
   const aggregatedOrders = Array.from(uniqueOrders.values());
   const checkLookup = buildCheckLookup(aggregatedOrders);
   ordersFetched = aggregatedOrders.length;
-  ordersBody = { ...ordersBody, data: aggregatedOrders, orders: aggregatedOrders };
+  ordersBody = { ...ordersBody, detail: "full", data: aggregatedOrders, orders: aggregatedOrders };
 
   menuTrace.cacheStatus = menuBody.cacheHit ? "hit-fresh" : "miss-network";
   menuTrace.updatedAt = menuBody.metadata?.lastUpdated ?? null;

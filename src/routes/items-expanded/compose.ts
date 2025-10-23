@@ -26,7 +26,7 @@ import type {
   ExpandedOrderItem,
   ExpandedOrderItemMoney,
   ItemSortMeta,
-  OrdersLatestResponse,
+  OrdersLatestSuccessResponse,
 } from "../orders-detailed/types-local.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -175,7 +175,7 @@ function computeCheckFingerprint(
 }
 
 interface BuildArgs {
-  ordersPayload: OrdersLatestResponse & { ok: true };
+  ordersPayload: OrdersLatestSuccessResponse;
   menuDocument: ToastMenusDocument | null;
   menuUpdatedAt: string | null;
   limit: number;
@@ -346,9 +346,15 @@ export function buildExpandedOrders(args: BuildArgs): {
   return { orders: builtOrders, diagnostics, timedOut };
 }
 
-export function extractOrders(payload: OrdersLatestResponse & { ok: true }): ToastOrder[] {
-  if (Array.isArray(payload.data)) return payload.data;
-  if (Array.isArray((payload as any).orders)) return (payload as any).orders as ToastOrder[];
+export function extractOrders(payload: OrdersLatestSuccessResponse): ToastOrder[] {
+  if (Array.isArray(payload.data)) {
+    return payload.data.filter((order): order is ToastOrder => Boolean(order) && typeof order === "object");
+  }
+  if (Array.isArray(payload.orders)) {
+    return (payload.orders as unknown[]).filter(
+      (order): order is ToastOrder => Boolean(order) && typeof order === "object"
+    );
+  }
   return [];
 }
 

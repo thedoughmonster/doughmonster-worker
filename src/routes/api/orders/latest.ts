@@ -79,7 +79,7 @@ export function createOrdersLatestHandler(
         expandUsed: EXPAND_FULL,
         count: result.orderIds.length,
         ids: result.orderIds,
-        orders: result.orderIds,
+        orders: detail === "ids" ? result.orderIds : result.orders,
       };
 
       const sourcesMap = includeDebug && Array.isArray(result.sources)

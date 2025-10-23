@@ -17,8 +17,31 @@ export interface UpstreamTrace {
 
 export type ItemFulfillmentStatus = "NEW" | "HOLD" | "SENT" | "READY";
 
+type OrdersLatestWindow = { start?: string | null; end?: string | null };
+
+interface OrdersLatestBaseSuccess {
+  ok: true;
+  detail?: "ids" | "full";
+  ids?: string[];
+  window?: OrdersLatestWindow;
+}
+
+export interface OrdersLatestSuccessFull extends OrdersLatestBaseSuccess {
+  detail?: "full";
+  data?: ToastOrder[];
+  orders?: ToastOrder[];
+}
+
+export interface OrdersLatestSuccessIds extends OrdersLatestBaseSuccess {
+  detail: "ids";
+  data?: undefined;
+  orders?: string[];
+}
+
+export type OrdersLatestSuccessResponse = OrdersLatestSuccessFull | OrdersLatestSuccessIds;
+
 export type OrdersLatestResponse =
-  | { ok: true; data?: ToastOrder[]; orders?: ToastOrder[]; window?: { start?: string | null; end?: string | null } }
+  | OrdersLatestSuccessResponse
   | { ok: false; error?: { message?: string } | string | null };
 
 export type MenusResponse =
