@@ -1554,6 +1554,62 @@ test('orders-detailed surfaces menu cache info and upstream diagnostics', async 
   assert.equal(body.debug.menuUpstream.snippet, null);
 });
 
+test('orders-detailed reads full orders from orders field when data is missing', async () => {
+  const orders = [
+    {
+      guid: 'order-missing-data',
+      createdDate: '2024-01-02T10:00:00.000+0000',
+      checks: [
+        {
+          guid: 'check-missing-data',
+          selections: [
+            {
+              guid: 'sel-missing-data',
+              selectionType: 'MENU_ITEM',
+              quantity: 1,
+              receiptLinePrice: 7,
+              item: { guid: 'item-missing-data' },
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  const handler = createHandlerWithOrders(orders, null, {
+    fetch: async (input, init, fallback) => {
+      const url = (() => {
+        if (typeof input === 'string') return new URL(input, 'https://worker.test');
+        if (input instanceof URL) return new URL(input.toString());
+        if (input && typeof input.url === 'string') return new URL(input.url);
+        return new URL(String(input), 'https://worker.test');
+      })();
+
+      if (url.pathname === '/api/orders/latest') {
+        const cloned = JSON.parse(JSON.stringify(orders));
+        return new Response(
+          JSON.stringify({ ok: true, detail: 'full', orders: cloned }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+
+      return fallback(input, init);
+    },
+  });
+
+  const response = await handler(
+    createEnv(),
+    new Request('https://worker.test/api/orders-detailed?limit=10')
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(Array.isArray(body.orders), true);
+  assert.equal(body.orders.length, 1);
+  assert.equal(body.orders[0].orderData.orderId, 'order-missing-data');
+  assert.equal(body.orders[0].items.length, 1);
+});
+
 test('orders-detailed ignores client detail param and still fetches full detail', async () => {
   const orders = () => {
     return [
