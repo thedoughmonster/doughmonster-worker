@@ -1610,6 +1610,58 @@ test('orders-detailed reads full orders from orders field when data is missing',
   assert.equal(body.orders[0].items.length, 1);
 });
 
+test('orders-detailed surfaces extended lookback when minutes provided', async () => {
+  const minutes = 20160;
+  const oldDate = '2023-12-01T12:00:00.000+0000';
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  let requestedStartMs = null;
+
+  const orders = (url) => {
+    const startIso = url.searchParams.get('start');
+    if (startIso) {
+      const parsed = Date.parse(startIso);
+      if (Number.isFinite(parsed)) {
+        requestedStartMs = parsed;
+        if (Date.now() - parsed >= sevenDaysMs) {
+          return [
+            {
+              guid: 'order-old-minutes',
+              createdDate: oldDate,
+              checks: [
+                {
+                  guid: 'check-old-minutes',
+                  selections: [
+                    {
+                      guid: 'sel-old-minutes',
+                      selectionType: 'MENU_ITEM',
+                      quantity: 1,
+                      receiptLinePrice: 5,
+                      item: { guid: 'item-old-minutes' },
+                    },
+                  ],
+                },
+              ],
+            },
+          ];
+        }
+      }
+    }
+    return [];
+  };
+
+  const handler = createHandlerWithOrders(orders);
+  const request = new Request(`https://worker.test/api/orders-detailed?minutes=${minutes}&limit=5`);
+  const response = await handler(createEnv(), request);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(Array.isArray(body.orders), true);
+  assert.equal(body.orders.length, 1);
+  assert.equal(body.orders[0].orderData.orderId, 'order-old-minutes');
+  assert.equal(requestedStartMs !== null, true);
+  assert.equal(Date.now() - requestedStartMs >= sevenDaysMs, true);
+});
+
 test('orders-detailed ignores client detail param and still fetches full detail', async () => {
   const orders = () => {
     return [

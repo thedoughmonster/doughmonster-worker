@@ -27,6 +27,7 @@ const ORDERS_UPSTREAM_DEFAULT = 60;
 const ORDERS_UPSTREAM_MAX = 200;
 const HANDLER_TIME_BUDGET_MS = 10_000;
 const DEFAULT_FALLBACK_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_LOOKBACK_WINDOWS = [60, 240, 480, 1440, 2880, 4320, 10080];
 
 interface OrdersDetailedDependencies {
   getDiningOptions: (env: AppEnv) => Promise<DiningOptionConfig[]>;
@@ -133,6 +134,8 @@ async function handleOrdersDetailed(
   const finalLimit = clamp(parseNumber(url.searchParams.get("limit"), DEFAULT_LIMIT), 1, MAX_LIMIT);
   const startParam = url.searchParams.get("start");
   const endParam = url.searchParams.get("end");
+  const minutesValue = parseNumber(url.searchParams.get("minutes"), Number.NaN);
+  const minutesParam = Number.isFinite(minutesValue) && minutesValue > 0 ? Math.round(minutesValue) : null;
   const statusParam = url.searchParams.get("status");
   const locationParam = url.searchParams.get("locationId");
   const fulfillmentStatusFilters = collectFulfillmentStatusFilters(url.searchParams);
@@ -144,6 +147,7 @@ async function handleOrdersDetailed(
     ORDERS_UPSTREAM_MAX
   );
   const rangeMode = Boolean(startParam || endParam);
+  const minutesActive = !rangeMode && minutesParam !== null ? minutesParam : null;
   const lookbackWindowsTried: number[] = [];
   let ordersFetched = 0;
 
@@ -154,12 +158,18 @@ async function handleOrdersDetailed(
   if (endParam) ordersUrl.searchParams.set("end", endParam);
   if (statusParam) ordersUrl.searchParams.set("status", statusParam);
   if (locationParam) ordersUrl.searchParams.set("locationId", locationParam);
+  if (minutesActive !== null) ordersUrl.searchParams.set("minutes", String(minutesActive));
 
   const menuUrl = new URL(MENUS_ENDPOINT, origin);
   if (refreshRequested) menuUrl.searchParams.set("refresh", "1");
 
+  const ordersFetchOptions: { rangeMode: boolean; minutes?: number } = { rangeMode };
+  if (minutesActive !== null) {
+    ordersFetchOptions.minutes = minutesActive;
+  }
+
   const [ordersResult, menuResult] = await Promise.all([
-    fetchOrdersFromWorker(env, request, ordersUrl, { rangeMode }),
+    fetchOrdersFromWorker(env, request, ordersUrl, ordersFetchOptions),
     fetchMenuFromWorker(env, request, menuUrl),
   ]);
 
@@ -224,13 +234,23 @@ async function handleOrdersDetailed(
   addOrders(extractOrders(ordersBody));
 
   if (!rangeMode && uniqueOrders.size < finalLimit) {
-    const lookbackWindows = [60, 240, 480, 1440, 2880, 4320, 10080];
+    const fallbackRangeLimitMs = minutesActive !== null
+      ? minutesActive * 60_000
+      : DEFAULT_FALLBACK_RANGE_MS;
+    const lookbackWindows = buildFallbackWindows(minutesActive);
+    const seenLookbackMinutes = new Set<number>();
+    if (minutesActive !== null) {
+      seenLookbackMinutes.add(minutesActive);
+    }
+
     for (const minutes of lookbackWindows) {
       if (uniqueOrders.size >= finalLimit) break;
-      if (minutes * 60_000 > DEFAULT_FALLBACK_RANGE_MS) break;
+      if (seenLookbackMinutes.has(minutes)) continue;
+      if (minutes * 60_000 > fallbackRangeLimitMs) break;
       const lookbackUrl = new URL(ordersUrl.toString());
       const nextResult = await fetchOrdersFromWorker(env, request, lookbackUrl, { rangeMode, minutes });
       lookbackWindowsTried.push(minutes);
+      seenLookbackMinutes.add(minutes);
       if (!nextResult.ok) break;
       const nextPayload = nextResult.data;
       if (!nextPayload?.ok) break;
@@ -597,6 +617,23 @@ function extractErrorMessage(response: OrdersLatestResponse | MenusResponse | nu
   if (typeof error === "string") return error;
   if (typeof error?.message === "string") return error.message;
   return null;
+}
+
+function buildFallbackWindows(minutesParam: number | null): number[] {
+  if (minutesParam === null) {
+    return DEFAULT_LOOKBACK_WINDOWS.slice();
+  }
+
+  const normalized = Math.max(1, Math.round(minutesParam));
+  const windows: number[] = [normalized];
+
+  for (const candidate of DEFAULT_LOOKBACK_WINDOWS) {
+    if (candidate > normalized) {
+      windows.push(candidate);
+    }
+  }
+
+  return windows;
 }
 
 function clamp(value: number, min: number, max: number): number {
