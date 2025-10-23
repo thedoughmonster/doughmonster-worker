@@ -124,8 +124,15 @@ function wait(ms: number): Promise<void> {
 }
 
 export function jsonResponse<T>(data: T, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers ?? {});
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "*");
+  headers.set("Access-Control-Max-Age", "86400");
+
   return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json; charset=utf-8" },
     ...init,
+    headers,
   });
 }
