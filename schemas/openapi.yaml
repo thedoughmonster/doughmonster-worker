@@ -7,11 +7,8 @@ info:
     All endpoints are read-only and return JSON responses. Authentication is handled by
     the worker and is not part of this schema.
 servers:
-  - url: https://{environment}.example.com
-    description: Example production deployment
-    variables:
-      environment:
-        default: doughmonster-worker
+  - url: https://doughmonster-worker.thedoughmonster.workers.dev
+    description: Production deployment
   - url: http://127.0.0.1:8787
     description: Local development (wrangler dev)
 tags:
