@@ -20,6 +20,8 @@ export interface OrdersLatestDeps {
 
 const LIMIT_MIN = 1;
 const LIMIT_MAX = 200;
+const PAGE_SIZE_MIN = 1;
+const PAGE_SIZE_MAX = 100;
 
 export function createOrdersLatestHandler(
   deps: OrdersLatestDeps = { getOrdersBulk }
@@ -34,6 +36,11 @@ export function createOrdersLatestHandler(
     const detail = detailParam === "ids" ? "ids" : "full";
 
     const minutesValue = parseNumber(url.searchParams.get("minutes"), null);
+    const pageSizeRaw = parseNumber(url.searchParams.get("pageSize"), null);
+    const pageSize =
+      pageSizeRaw === null
+        ? null
+        : clamp(Math.trunc(pageSizeRaw), PAGE_SIZE_MIN, PAGE_SIZE_MAX);
 
     const startParam = url.searchParams.get("start");
     const endParam = url.searchParams.get("end");
@@ -63,6 +70,7 @@ export function createOrdersLatestHandler(
         detail,
         locationId,
         status,
+        pageSize,
         since: parseIsoToDate(sinceParam),
         sinceRaw: sinceParam,
         windowOverride,
@@ -76,6 +84,7 @@ export function createOrdersLatestHandler(
         detail,
         minutes: minutesUsed ?? result.minutes,
         window: result.window,
+        pageSize: result.pageSize,
         expandUsed: EXPAND_FULL,
         count: result.orderIds.length,
         ids: result.orderIds,
