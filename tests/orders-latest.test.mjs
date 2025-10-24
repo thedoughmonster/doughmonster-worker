@@ -89,7 +89,9 @@ test('orders/latest caches responses and sorts by openedDate', async () => {
   assert.equal(body.data.length, 2);
   assert.equal(body.limit, 5);
   assert.equal(body.detail, 'full');
+  assert.equal(body.pageSize, 5);
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].pageSize, 5);
 
   const cursorRaw = env.CACHE_KV.store.get('orders:lastFulfilledCursor');
   const cursor = JSON.parse(cursorRaw);
@@ -99,6 +101,25 @@ test('orders/latest caches responses and sorts by openedDate', async () => {
   const recentRaw = env.CACHE_KV.store.get('orders:recentIndex');
   const recent = JSON.parse(recentRaw);
   assert.deepEqual(recent, ['order-2', 'order-1']);
+});
+
+test('orders/latest forwards pageSize query parameter', async () => {
+  const env = createEnv();
+  const calls = [];
+  const handler = createOrdersLatestHandler({
+    async getOrdersBulk(_env, params) {
+      calls.push(params);
+      return { orders: [], nextPage: null };
+    },
+  });
+
+  const response = await handler(env, new Request('https://worker.test/api/orders/latest?pageSize=5'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.pageSize, 5);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].pageSize, 5);
 });
 
 test('orders/latest uses fulfilled cursor for incremental fetches', async () => {
