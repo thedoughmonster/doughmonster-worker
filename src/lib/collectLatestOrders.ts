@@ -26,7 +26,9 @@ import {
 } from "../cache/orders.js";
 
 const DEFAULT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
-const FETCH_PAGE_SIZE = 100;
+const DEFAULT_PAGE_SIZE = 5;
+const MAX_PAGE_SIZE = 100;
+const MIN_PAGE_SIZE = 1;
 const MAX_PAGES = 200;
 const CACHE_VERSION = 1;
 const RECENT_INDEX_LIMIT = 300;
@@ -54,6 +56,7 @@ export interface CollectLatestOrdersOptions {
   locationId: string | null;
   status: string | null;
   debug: boolean;
+  pageSize?: number | null;
   since?: Date | null;
   sinceRaw?: string | null;
   windowOverride?: { start: Date; end: Date } | null;
@@ -65,6 +68,7 @@ export interface CollectLatestOrdersResult {
   orderIds: string[];
   minutes: number | null;
   window: { start: string; end: string };
+  pageSize: number;
   debug?: CollectLatestOrdersDebug;
   sources?: Array<{ id: string; source: OrderSourceType }>;
 }
@@ -113,6 +117,7 @@ interface CollectLatestOrdersDebug {
     since: string | null;
     locationId: string | null;
     status: string | null;
+    pageSize: number;
   };
   resultCount?: number;
 }
@@ -138,6 +143,7 @@ export async function collectLatestOrders({
   locationId,
   status,
   debug,
+  pageSize = null,
   since = null,
   sinceRaw = null,
   windowOverride = null,
@@ -164,13 +170,14 @@ export async function collectLatestOrders({
   let totalWritten = 0;
 
   let page = 1;
+  const resolvedPageSize = resolvePageSize(pageSize);
   while (page <= MAX_PAGES) {
     const apiStart = telemetry.now();
     const { orders, nextPage } = await getOrdersBulkImpl(workingEnv, {
       startIso,
       endIso,
       page,
-      pageSize: FETCH_PAGE_SIZE,
+      pageSize: resolvedPageSize,
       expansions: EXPAND_FULL,
     } as any);
     telemetry.recordApiRequest(apiStart);
@@ -266,6 +273,7 @@ export async function collectLatestOrders({
     orderIds,
     minutes,
     window,
+    pageSize: resolvedPageSize,
   };
 
   if (debug) {
@@ -323,12 +331,24 @@ export async function collectLatestOrders({
         since: sinceEcho,
         locationId,
         status,
+        pageSize: resolvedPageSize,
       },
       resultCount: orderIds.length,
     };
   }
 
   return result;
+}
+
+function resolvePageSize(pageSize: number | null | undefined): number {
+  if (typeof pageSize !== "number" || !Number.isFinite(pageSize)) {
+    return DEFAULT_PAGE_SIZE;
+  }
+  const normalized = Math.trunc(pageSize);
+  if (Number.isNaN(normalized)) {
+    return DEFAULT_PAGE_SIZE;
+  }
+  return Math.max(MIN_PAGE_SIZE, Math.min(MAX_PAGE_SIZE, normalized));
 }
 
 async function processOrder(env: AppEnv, order: any, telemetry: OrdersTelemetry): Promise<ProcessedOrder | null> {
