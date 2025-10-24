@@ -15,12 +15,15 @@ async function getAccessToken(env: AppEnv): Promise<string> {
   const kv = env.TOKEN_KV;
   const cached = await kv.get(TOKEN_CACHE_KEY, "json").catch(() => null);
   const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
 
   if (
     cached &&
     typeof cached === "object" &&
     typeof (cached as any).accessToken === "string" &&
     typeof (cached as any).expiresAt === "number" &&
+    typeof (cached as any).issuedAtDay === "string" &&
+    (cached as any).issuedAtDay === today &&
     (cached as any).expiresAt - now > 60_000
   ) {
     return (cached as any).accessToken as string;
@@ -56,10 +59,11 @@ async function getAccessToken(env: AppEnv): Promise<string> {
 
   const expiresInMs = Math.max(120, Math.min(86_400, ttlSec || 0)) * 1000;
   const expiresAt = now + expiresInMs;
+  const issuedAtDay = today;
 
   await kv.put(
     TOKEN_CACHE_KEY,
-    JSON.stringify({ accessToken, expiresAt }),
+    JSON.stringify({ accessToken, expiresAt, issuedAtDay }),
     { expirationTtl: Math.max(60, Math.floor(expiresInMs / 1000) - 60) }
   );
 
