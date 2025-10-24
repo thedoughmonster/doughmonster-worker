@@ -1,0 +1,1142 @@
+openapi: 3.1.0
+info:
+  title: Doughmonster Worker API
+  version: 1.0.0
+  description: |
+    OpenAPI schema describing the public endpoints exposed by the Doughmonster Worker.
+    All endpoints are read-only and return JSON responses. Authentication is handled by
+    the worker and is not part of this schema.
+servers:
+  - url: https://doughmonster-worker.thedoughmonster.workers.dev
+    description: Production deployment
+  - url: http://127.0.0.1:8787
+    description: Local development (wrangler dev)
+tags:
+  - name: Health
+  - name: Menus
+  - name: Orders
+  - name: Configuration
+paths:
+  /api/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      description: Returns `{"ok": true}` when the worker is healthy.
+      responses:
+        '200':
+          description: Worker is available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/menus:
+    get:
+      tags: [Menus]
+      summary: Retrieve the cached Toast menu document
+      description: |
+        Returns the currently cached Toast menus document along with cache metadata. Append
+        `?refresh=1` (or any other truthy value) to force a synchronous refresh of the cached
+        payload before responding.
+      parameters:
+        - in: query
+          name: refresh
+          description: Force a synchronous refresh of the published menu when set to a truthy value.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Menu document retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenusResponse'
+        '502':
+          description: Upstream Toast API failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          description: Unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/orders/latest:
+    get:
+      tags: [Orders]
+      summary: Fetch the most recent Toast orders
+      description: |
+        Returns the most recent Toast orders using the worker's incremental KV-backed cache. By default
+        the worker returns the five newest orders with full detail. Pass `detail=ids` to receive only the
+        GUIDs while retaining ordering.
+      parameters:
+        - in: query
+          name: limit
+          description: Maximum number of orders to return (defaults to 5).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 5
+        - in: query
+          name: detail
+          description: Toggle payload verbosity (`full` returns hydrated orders, `ids` returns GUIDs only).
+          schema:
+            type: string
+            enum: [full, ids]
+            default: full
+        - in: query
+          name: minutes
+          description: Override the rolling window with an explicit lookback in minutes.
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: pageSize
+          description: Hint for the Toast bulk API page size (advanced diagnostics only).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - in: query
+          name: start
+          description: ISO-8601 timestamp that constrains the lower bound of the fetch window.
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: end
+          description: ISO-8601 timestamp that constrains the upper bound of the fetch window.
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: since
+          description: Override the internal cursor with an ISO-8601 timestamp (debugging aid).
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: status
+          description: Filter Toast orders by status (case insensitive).
+          schema:
+            type: string
+        - in: query
+          name: locationId
+          description: Filter Toast orders by location GUID.
+          schema:
+            type: string
+        - in: query
+          name: debug
+          description: Include extended diagnostics when `true` and the worker runs with `DEBUG` enabled.
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Orders fetched successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersLatestResponse'
+        default:
+          description: Error response emitted when the worker cannot return orders successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/orders-detailed:
+    get:
+      tags: [Orders]
+      summary: Retrieve expanded order details with menu enrichment
+      description: |
+        Returns the most recent non-voided Toast orders enriched with menu metadata and normalized totals.
+        The endpoint internally calls `/api/orders/latest` and `/api/menus`, applies filtering, and returns
+        a deterministic list of expanded orders ready for presentation.
+      parameters:
+        - $ref: '#/components/parameters/OrdersDetailedLimit'
+        - $ref: '#/components/parameters/OrdersDetailedStart'
+        - $ref: '#/components/parameters/OrdersDetailedEnd'
+        - $ref: '#/components/parameters/OrdersDetailedMinutes'
+        - $ref: '#/components/parameters/OrdersDetailedStatus'
+        - $ref: '#/components/parameters/OrdersDetailedFulfillmentStatus'
+        - $ref: '#/components/parameters/OrdersDetailedLocationId'
+        - $ref: '#/components/parameters/OrdersDetailedRefresh'
+        - $ref: '#/components/parameters/OrdersDetailedDebug'
+      responses:
+        '200':
+          description: Expanded orders returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersDetailedSuccess'
+        '502':
+          description: One or more upstream dependencies failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersDetailedError'
+        default:
+          description: Unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/items-expanded:
+    get:
+      tags: [Orders]
+      summary: Legacy alias for `/api/orders-detailed`
+      description: |
+        Deprecated alias that proxies `/api/orders-detailed` and emits a `Deprecation: true` header. New
+        clients should migrate to `/api/orders-detailed`.
+      deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/OrdersDetailedLimit'
+        - $ref: '#/components/parameters/OrdersDetailedStart'
+        - $ref: '#/components/parameters/OrdersDetailedEnd'
+        - $ref: '#/components/parameters/OrdersDetailedMinutes'
+        - $ref: '#/components/parameters/OrdersDetailedStatus'
+        - $ref: '#/components/parameters/OrdersDetailedFulfillmentStatus'
+        - $ref: '#/components/parameters/OrdersDetailedLocationId'
+        - $ref: '#/components/parameters/OrdersDetailedRefresh'
+        - $ref: '#/components/parameters/OrdersDetailedDebug'
+      responses:
+        '200':
+          description: Expanded orders returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersDetailedSuccess'
+        '502':
+          description: One or more upstream dependencies failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersDetailedError'
+        default:
+          description: Unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/orders-merged:
+    get:
+      tags: [Orders]
+      summary: Retrieve orders and menus payloads together
+      description: Calls `/api/orders/latest` and `/api/menus`, returning their bodies unchanged inside a single payload.
+      responses:
+        '200':
+          description: Orders and menus were retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersMergedSuccess'
+        '502':
+          description: At least one upstream response failed or was not valid JSON.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersMergedError'
+        default:
+          description: Unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/config/snapshot:
+    get:
+      tags: [Configuration]
+      summary: Fetch cached Toast configuration slices
+      description: |
+        Returns the merged snapshot of multiple Toast configuration slices. The payload is cached for one hour
+        per tenant/location scope. Each slice is set to `null` if it could not be fetched from Toast.
+      responses:
+        '200':
+          description: Configuration snapshot retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigSnapshotResponse'
+        default:
+          description: Unexpected error response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  parameters:
+    OrdersDetailedLimit:
+      name: limit
+      in: query
+      description: Maximum number of expanded orders to return (defaults to 5, maximum 500).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 5
+    OrdersDetailedStart:
+      name: start
+      in: query
+      description: ISO-8601 timestamp for the earliest order to include.
+      schema:
+        type: string
+        format: date-time
+    OrdersDetailedEnd:
+      name: end
+      in: query
+      description: ISO-8601 timestamp for the latest order to include.
+      schema:
+        type: string
+        format: date-time
+    OrdersDetailedMinutes:
+      name: minutes
+      in: query
+      description: Look back this many minutes from "now" when no explicit window is provided.
+      schema:
+        type: integer
+        minimum: 1
+    OrdersDetailedStatus:
+      name: status
+      in: query
+      description: Filter orders by Toast status (case insensitive).
+      schema:
+        type: string
+    OrdersDetailedFulfillmentStatus:
+      name: fulfillmentStatus
+      in: query
+      description: Filter by normalized item fulfillment statuses. May be repeated or comma separated.
+      schema:
+        type: array
+        items:
+          type: string
+      style: form
+      explode: true
+    OrdersDetailedLocationId:
+      name: locationId
+      in: query
+      description: Restrict results to the specified Toast location GUID.
+      schema:
+        type: string
+    OrdersDetailedRefresh:
+      name: refresh
+      in: query
+      description: Forwarded to `/api/menus` to force a synchronous refresh when set to `1`.
+      schema:
+        type: boolean
+    OrdersDetailedDebug:
+      name: debug
+      in: query
+      description: Include detailed diagnostics when enabled and the worker permits debug output.
+      schema:
+        type: boolean
+  schemas:
+    HealthResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+    ErrorObject:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        code:
+          type: string
+          description: Machine readable error code when available.
+    ErrorResponse:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/ErrorObject'
+            - type: string
+      additionalProperties: true
+    MenusResponse:
+      oneOf:
+        - $ref: '#/components/schemas/MenusSuccess'
+        - $ref: '#/components/schemas/ErrorResponse'
+    MenusSuccess:
+      type: object
+      required: [ok, menu, metadata, cacheHit]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        menu:
+          oneOf:
+            - $ref: '#/components/schemas/ToastMenusDocument'
+            - type: 'null'
+        metadata:
+          type: object
+          required: [lastUpdated]
+          properties:
+            lastUpdated:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+        cacheHit:
+          type: boolean
+      additionalProperties: false
+    ToastMenusDocument:
+      type: object
+      description: Opaque representation of the Toast menus document.
+      additionalProperties: true
+    OrdersLatestResponse:
+      oneOf:
+        - $ref: '#/components/schemas/OrdersLatestSuccessFull'
+        - $ref: '#/components/schemas/OrdersLatestSuccessIds'
+        - $ref: '#/components/schemas/OrdersLatestError'
+    OrdersLatestBase:
+      type: object
+      required: [ok, route, limit, detail, minutes, window, pageSize, expandUsed, count, ids]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        route:
+          type: string
+          example: /api/orders/latest
+        limit:
+          type: integer
+        detail:
+          type: string
+          enum: [full, ids]
+        minutes:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        window:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+            end:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+        pageSize:
+          type: integer
+        expandUsed:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+        ids:
+          type: array
+          items:
+            type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrdersLatestSource'
+        debug:
+          $ref: '#/components/schemas/OrdersLatestDebug'
+    OrdersLatestSuccessFull:
+      allOf:
+        - $ref: '#/components/schemas/OrdersLatestBase'
+        - type: object
+          properties:
+            detail:
+              type: string
+              enum: [full]
+            orders:
+              type: array
+              items:
+                $ref: '#/components/schemas/ToastOrder'
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ToastOrder'
+          required: [orders]
+    OrdersLatestSuccessIds:
+      allOf:
+        - $ref: '#/components/schemas/OrdersLatestBase'
+        - type: object
+          properties:
+            detail:
+              type: string
+              enum: [ids]
+            orders:
+              type: array
+              items:
+                type: string
+          required: [orders]
+    OrdersLatestError:
+      type: object
+      required: [ok, route, error]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        route:
+          type: string
+          example: /api/orders/latest
+        error:
+          type: string
+      additionalProperties: true
+    OrdersLatestSource:
+      type: object
+      required: [id, source]
+      properties:
+        id:
+          type: string
+        source:
+          type: string
+          enum: [cache, api, merged]
+    OrdersLatestDebug:
+      type: object
+      properties:
+        fetchWindow:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+        cursorBefore:
+          oneOf:
+            - $ref: '#/components/schemas/OrderCursor'
+            - type: 'null'
+        cursorAfter:
+          oneOf:
+            - $ref: '#/components/schemas/OrderCursor'
+            - type: 'null'
+        pages:
+          type: array
+          items:
+            type: object
+            properties:
+              page:
+                type: integer
+              count:
+                type: integer
+              returned:
+                type: integer
+              nextPage:
+                oneOf:
+                  - type: integer
+                  - type: 'null'
+        totals:
+          type: object
+          properties:
+            fetched:
+              type: integer
+            written:
+              type: integer
+            skipped:
+              type: integer
+            readyCandidates:
+              type: integer
+        kv:
+          type: object
+          properties:
+            reads:
+              type: integer
+            writes:
+              type: integer
+            indexLoads:
+              type: integer
+            indexWrites:
+              type: integer
+            bytesRead:
+              type: integer
+            bytesWritten:
+              type: integer
+        api:
+          type: object
+          properties:
+            requests:
+              type: integer
+            pages:
+              type: array
+              items:
+                type: object
+                properties:
+                  page:
+                    type: integer
+                  returned:
+                    type: integer
+                  count:
+                    type: integer
+                  nextPage:
+                    oneOf:
+                      - type: integer
+                      - type: 'null'
+        cache:
+          type: object
+          properties:
+            hits:
+              type: integer
+            misses:
+              type: integer
+            updated:
+              type: integer
+        cursor:
+          type: object
+          properties:
+            before:
+              oneOf:
+                - $ref: '#/components/schemas/OrderCursor'
+                - type: 'null'
+            after:
+              oneOf:
+                - $ref: '#/components/schemas/OrderCursor'
+                - type: 'null'
+        timing:
+          type: object
+          properties:
+            toastFetchMs:
+              type: number
+            kvMs:
+              type: number
+            totalMs:
+              type: number
+        params:
+          type: object
+          properties:
+            limit:
+              type: integer
+            detail:
+              type: string
+            debug:
+              type: boolean
+            since:
+              oneOf:
+                - type: string
+                - type: 'null'
+            locationId:
+              oneOf:
+                - type: string
+                - type: 'null'
+            status:
+              oneOf:
+                - type: string
+                - type: 'null'
+            pageSize:
+              oneOf:
+                - type: integer
+                - type: 'null'
+        resultCount:
+          type: integer
+      additionalProperties: true
+    OrderCursor:
+      type: object
+      properties:
+        ts:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        orderGuid:
+          oneOf:
+            - type: string
+            - type: 'null'
+        businessDate:
+          oneOf:
+            - type: integer
+            - type: 'null'
+    ToastOrder:
+      type: object
+      description: Opaque representation of a Toast order. Fields vary by Toast API version.
+      additionalProperties: true
+    OrdersDetailedSuccess:
+      type: object
+      required: [orders, cacheInfo]
+      properties:
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpandedOrder'
+        cacheInfo:
+          type: object
+          required: [menu, menuUpdatedAt]
+          properties:
+            menu:
+              type: string
+              description: Cache status for the menu payload (for example `hit-fresh` or `miss-network`).
+            menuUpdatedAt:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+        debug:
+          $ref: '#/components/schemas/OrdersDetailedDebug'
+    OrdersDetailedError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorObject'
+        debug:
+          $ref: '#/components/schemas/OrdersDetailedDebug'
+      additionalProperties: true
+    ExpandedOrder:
+      type: object
+      required: [orderData, items, totals]
+      properties:
+        orderData:
+          $ref: '#/components/schemas/ExpandedOrderData'
+        currency:
+          oneOf:
+            - type: string
+            - type: 'null'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpandedOrderItem'
+        totals:
+          $ref: '#/components/schemas/ExpandedOrderTotals'
+    ExpandedOrderData:
+      type: object
+      required: [orderId, orderTime, orderType]
+      properties:
+        orderId:
+          type: string
+        location:
+          type: object
+          properties:
+            locationId:
+              oneOf:
+                - type: string
+                - type: 'null'
+        orderTime:
+          type: string
+          format: date-time
+        timeDue:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        orderNumber:
+          oneOf:
+            - type: string
+            - type: 'null'
+        checkId:
+          oneOf:
+            - type: string
+            - type: 'null'
+        status:
+          oneOf:
+            - type: string
+            - type: 'null'
+        fulfillmentStatus:
+          oneOf:
+            - type: string
+            - type: 'null'
+        customerName:
+          oneOf:
+            - type: string
+            - type: 'null'
+        orderType:
+          type: string
+        orderTypeNormalized:
+          oneOf:
+            - type: string
+            - type: 'null'
+        diningOptionGuid:
+          oneOf:
+            - type: string
+            - type: 'null'
+        deliveryState:
+          oneOf:
+            - type: string
+            - type: 'null'
+        deliveryInfo:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        curbsidePickupInfo:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        table:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        seats:
+          oneOf:
+            - type: array
+              items:
+                type: integer
+            - type: 'null'
+        employee:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: 'null'
+        promisedDate:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+        estimatedFulfillmentDate:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+    ExpandedOrderItem:
+      type: object
+      required: [lineItemId, itemName, quantity, modifiers]
+      properties:
+        lineItemId:
+          type: string
+        menuItemId:
+          oneOf:
+            - type: string
+            - type: 'null'
+        itemName:
+          type: string
+        quantity:
+          type: number
+        fulfillmentStatus:
+          oneOf:
+            - type: string
+            - type: 'null'
+        modifiers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpandedOrderItemModifier'
+        specialInstructions:
+          oneOf:
+            - type: string
+            - type: 'null'
+        money:
+          oneOf:
+            - $ref: '#/components/schemas/ExpandedOrderItemMoney'
+            - type: 'null'
+    ExpandedOrderItemModifier:
+      type: object
+      required: [name, priceCents, quantity]
+      properties:
+        id:
+          oneOf:
+            - type: string
+            - type: 'null'
+        name:
+          type: string
+        groupName:
+          oneOf:
+            - type: string
+            - type: 'null'
+        priceCents:
+          type: integer
+        quantity:
+          type: number
+    ExpandedOrderItemMoney:
+      type: object
+      properties:
+        baseItemPriceCents:
+          type: integer
+        modifierTotalCents:
+          type: integer
+        totalItemPriceCents:
+          type: integer
+    ExpandedOrderTotals:
+      type: object
+      required:
+        - baseItemsSubtotalCents
+        - modifiersSubtotalCents
+        - discountTotalCents
+        - serviceChargeCents
+        - tipCents
+        - grandTotalCents
+      properties:
+        baseItemsSubtotalCents:
+          type: integer
+        modifiersSubtotalCents:
+          type: integer
+        discountTotalCents:
+          type: integer
+        serviceChargeCents:
+          type: integer
+        tipCents:
+          type: integer
+        grandTotalCents:
+          type: integer
+    OrdersDetailedDebug:
+      type: object
+      properties:
+        requestId:
+          type: string
+        timingMs:
+          type: integer
+        ordersTrace:
+          $ref: '#/components/schemas/UpstreamTrace'
+        menuTrace:
+          $ref: '#/components/schemas/UpstreamTrace'
+        window:
+          type: object
+          required: [startIso, endIso]
+          properties:
+            startIso:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+            endIso:
+              oneOf:
+                - type: string
+                  format: date-time
+                - type: 'null'
+        limit:
+          type: integer
+        originSeen:
+          type: string
+        lastPage:
+          type: integer
+        timedOut:
+          type: boolean
+        diagnostics:
+          $ref: '#/components/schemas/DiagnosticsCounters'
+        lookbackWindowsTried:
+          type: array
+          items:
+            type: integer
+        ordersFetched:
+          type: integer
+        ordersUpstream:
+          $ref: '#/components/schemas/UpstreamTrace'
+        menuUpstream:
+          $ref: '#/components/schemas/UpstreamTrace'
+      additionalProperties: true
+    UpstreamTrace:
+      type: object
+      required: [path, url, absoluteUrl]
+      properties:
+        path:
+          type: string
+          enum: [direct, network]
+        internalFallbackUsed:
+          type: boolean
+        url:
+          type: string
+        absoluteUrl:
+          type: string
+        status:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        ok:
+          oneOf:
+            - type: boolean
+            - type: 'null'
+        bytes:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        snippet:
+          oneOf:
+            - type: string
+            - type: 'null'
+        cacheStatus:
+          oneOf:
+            - type: string
+            - type: 'null'
+        cacheHit:
+          oneOf:
+            - type: boolean
+            - type: 'null'
+        updatedAt:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+      additionalProperties: true
+    DiagnosticsCounters:
+      type: object
+      properties:
+        ordersSeen:
+          type: integer
+        checksSeen:
+          type: integer
+        itemsIncluded:
+          type: integer
+        dropped:
+          type: object
+          properties:
+            ordersVoided:
+              type: integer
+            ordersTimeParse:
+              type: integer
+            selectionsVoided:
+              type: integer
+            selectionsFiltered:
+              type: integer
+        totals:
+          type: object
+          properties:
+            baseItemsSubtotalCents:
+              type: integer
+            modifiersSubtotalCents:
+              type: integer
+            discountTotalCents:
+              type: integer
+            serviceChargeCents:
+              type: integer
+            tipCents:
+              type: integer
+            grandTotalCents:
+              type: integer
+      additionalProperties: true
+    OrdersMergedSuccess:
+      type: object
+      required: [ok, route, orders, menus]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        route:
+          type: string
+          example: /api/orders-merged
+        orders:
+          $ref: '#/components/schemas/OrdersLatestResponse'
+        menus:
+          $ref: '#/components/schemas/MenusResponse'
+    OrdersMergedError:
+      type: object
+      required: [ok, route, error, orders, menus]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        route:
+          type: string
+          example: /api/orders-merged
+        error:
+          $ref: '#/components/schemas/ErrorObject'
+        orders:
+          $ref: '#/components/schemas/UpstreamSummary'
+        menus:
+          $ref: '#/components/schemas/UpstreamSummary'
+    UpstreamSummary:
+      type: object
+      required: [path, ok, status, body]
+      properties:
+        path:
+          type: string
+          enum: [direct, network]
+        ok:
+          type: boolean
+        status:
+          oneOf:
+            - type: integer
+            - type: 'null'
+        body:
+          description: Parsed upstream body when available.
+          nullable: true
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: array
+              items: {}
+            - type: string
+            - type: number
+            - type: boolean
+        errorMessage:
+          type: string
+    ConfigSnapshotResponse:
+      type: object
+      required: [updatedAt, ttlSeconds, data]
+      properties:
+        updatedAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+        data:
+          type: object
+          required:
+            - diningOptions
+            - orderTypes
+            - revenueCenters
+            - serviceAreas
+            - taxRates
+            - discounts
+          properties:
+            diningOptions:
+              description: Toast dining options slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+            orderTypes:
+              description: Toast order types slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+            revenueCenters:
+              description: Toast revenue centers slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+            serviceAreas:
+              description: Toast service areas slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+            taxRates:
+              description: Toast tax rates slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+            discounts:
+              description: Toast discounts slice payload when available.
+              nullable: true
+              oneOf:
+                - type: object
+                  additionalProperties: true
+                - type: array
+                  items: {}
+                - type: string
+                - type: number
+                - type: boolean
+      additionalProperties: false

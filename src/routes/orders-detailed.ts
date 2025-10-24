@@ -21,7 +21,7 @@ import type { ToastCheck, ToastOrder } from "../types/toast-orders.js";
 
 const ORDERS_ENDPOINT = "/api/orders/latest";
 const MENUS_ENDPOINT = "/api/menus";
-const DEFAULT_LIMIT = 20;
+const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 500;
 const ORDERS_UPSTREAM_DEFAULT = 60;
 const ORDERS_UPSTREAM_MAX = 200;
