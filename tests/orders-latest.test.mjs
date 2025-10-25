@@ -71,9 +71,9 @@ test('orders/latest returns sorted orders limited by the query parameter', async
   assert.equal(body.count, 2);
   assert.deepEqual(body.ids, ['order-2', 'order-1']);
   assert.equal(body.limit, 2);
-  assert.equal(body.pageSize, 5);
+  assert.equal(body.pageSize, 100);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].pageSize, 5);
+  assert.equal(calls[0].pageSize, 100);
 });
 
 test('orders/latest forwards pageSize query parameter', async () => {
@@ -93,6 +93,41 @@ test('orders/latest forwards pageSize query parameter', async () => {
   assert.equal(body.pageSize, 7);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].pageSize, 7);
+});
+
+test('orders/latest returns more than five orders by default', async () => {
+  const env = createEnv();
+  const handler = createOrdersLatestHandler({
+    async getOrdersBulk(_env) {
+      return {
+        orders: [
+          buildOrder('order-1', '2024-10-10T08:00:00+0000'),
+          buildOrder('order-2', '2024-10-10T08:05:00+0000'),
+          buildOrder('order-3', '2024-10-10T08:10:00+0000'),
+          buildOrder('order-4', '2024-10-10T08:15:00+0000'),
+          buildOrder('order-5', '2024-10-10T08:20:00+0000'),
+          buildOrder('order-6', '2024-10-10T08:25:00+0000'),
+        ],
+        nextPage: null,
+      };
+    },
+  });
+
+  const response = await handler(env, new Request('https://worker.test/api/orders/latest'));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.limit, 200);
+  assert.equal(body.pageSize, 100);
+  assert.equal(body.count, 6);
+  assert.deepEqual(body.ids, [
+    'order-6',
+    'order-5',
+    'order-4',
+    'order-3',
+    'order-2',
+    'order-1',
+  ]);
 });
 
 test('orders/latest continues fetching pages until enough matching results are found', async () => {
@@ -151,4 +186,40 @@ test('orders/latest supports detail=ids', async () => {
   assert.equal(body.detail, 'ids');
   assert.deepEqual(body.ids, ['order-ids']);
   assert.equal('data' in body, false);
+});
+
+test('collectLatestOrders defaults to current calendar day window', async () => {
+  const moduleCollect = await import('../dist/lib/collectLatestOrders.js');
+  const { collectLatestOrders } = moduleCollect;
+  const { toToastIsoUtc } = await import('../dist/lib/order-utils.js');
+
+  const env = createEnv();
+  const calls = [];
+  const now = new Date('2024-10-11T15:45:30.000Z');
+
+  await collectLatestOrders({
+    env,
+    deps: {
+      async getOrdersBulk(_env, params) {
+        calls.push(params);
+        return { orders: [], nextPage: null };
+      },
+    },
+    limit: 10,
+    detail: 'full',
+    locationId: null,
+    status: null,
+    debug: false,
+    pageSize: null,
+    since: null,
+    sinceRaw: null,
+    windowOverride: null,
+    now,
+  });
+
+  assert.equal(calls.length, 1);
+  const expectedStart = toToastIsoUtc(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+  const expectedEnd = toToastIsoUtc(now);
+  assert.equal(calls[0].startIso, expectedStart);
+  assert.equal(calls[0].endIso, expectedEnd);
 });

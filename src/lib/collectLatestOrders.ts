@@ -9,7 +9,7 @@ import {
 } from "./order-utils.js";
 
 const DEFAULT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
-const DEFAULT_PAGE_SIZE = 5;
+const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 100;
 const MIN_PAGE_SIZE = 1;
 const MAX_PAGES = 200;
@@ -224,11 +224,19 @@ function resolveFetchWindow({
     return { start: windowOverride.start, end: windowOverride.end };
   }
 
-  let start = since ?? new Date(now.getTime() - DEFAULT_LOOKBACK_MS);
   const end = new Date(now.getTime());
+  let start = since ? new Date(since.getTime()) : startOfCalendarDay(now);
 
   if (end.getTime() <= start.getTime()) {
-    start = new Date(end.getTime() - DEFAULT_LOOKBACK_MS);
+    if (since) {
+      start = new Date(end.getTime() - DEFAULT_LOOKBACK_MS);
+    } else {
+      const fallbackStart = startOfCalendarDay(end);
+      start =
+        fallbackStart.getTime() < end.getTime()
+          ? fallbackStart
+          : new Date(end.getTime() - 60_000);
+    }
   }
 
   return { start, end };
@@ -243,6 +251,10 @@ function resolvePageSize(pageSize: number | null | undefined): number {
     return DEFAULT_PAGE_SIZE;
   }
   return Math.max(MIN_PAGE_SIZE, Math.min(MAX_PAGE_SIZE, normalized));
+}
+
+function startOfCalendarDay(value: Date): Date {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
 }
 
 function computeWindowMinutes(start: Date, end: Date): number | null {

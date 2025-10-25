@@ -20,6 +20,7 @@ export interface OrdersLatestDeps {
 
 const LIMIT_MIN = 1;
 const LIMIT_MAX = 200;
+const DEFAULT_LIMIT = LIMIT_MAX;
 const PAGE_SIZE_MIN = 1;
 const PAGE_SIZE_MAX = 100;
 
@@ -29,8 +30,8 @@ export function createOrdersLatestHandler(
   return async function handleOrdersLatest(env: AppEnv, request: Request) {
     const url = new URL(request.url);
 
-    const limitRaw = parseNumber(url.searchParams.get("limit"), 5);
-    const limit = clamp(limitRaw ?? 5, LIMIT_MIN, LIMIT_MAX);
+    const limitRaw = parseNumber(url.searchParams.get("limit"), DEFAULT_LIMIT);
+    const limit = clamp(limitRaw ?? DEFAULT_LIMIT, LIMIT_MIN, LIMIT_MAX);
 
     const detailParam = url.searchParams.get("detail");
     const detail = detailParam === "ids" ? "ids" : "full";
