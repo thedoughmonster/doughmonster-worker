@@ -177,3 +177,52 @@ test('orders/latest supports detail=ids', async () => {
   assert.deepEqual(body.ids, ['order-ids']);
   assert.equal('data' in body, false);
 });
+
+test('orders/latest reads future business date index when UTC day lags', async () => {
+  const env = createEnv();
+  const futureBusinessDate = '20241025';
+  const futureOrder = buildOrder('order-future', '2024-10-25T01:00:00+0000', 'READY');
+
+  env.CACHE_KV.store.set(`orders:index:${futureBusinessDate}`, JSON.stringify(['order-future']));
+  env.CACHE_KV.store.set(`orders:byId:order-future`, JSON.stringify(futureOrder));
+  env.CACHE_KV.store.set('orders:recentIndex', JSON.stringify([]));
+
+  const handler = createOrdersLatestHandler({
+    async getOrdersBulk() {
+      return { orders: [], nextPage: null };
+    },
+  });
+
+  const fixedNow = Date.parse('2024-10-24T23:30:00Z');
+  const RealDate = Date;
+  class MockDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(fixedNow);
+      } else {
+        super(...args);
+      }
+    }
+
+    static now() {
+      return fixedNow;
+    }
+  }
+  MockDate.parse = RealDate.parse;
+  MockDate.UTC = RealDate.UTC;
+
+  globalThis.Date = MockDate;
+
+  try {
+    const response = await handler(env, new Request('https://worker.test/api/orders/latest'));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.count, 1);
+    assert.deepEqual(body.ids, ['order-future']);
+    assert.equal(Array.isArray(body.data), true);
+    assert.equal(body.data[0].guid, 'order-future');
+  } finally {
+    globalThis.Date = RealDate;
+  }
+});
