@@ -45,35 +45,55 @@ function buildOrder(guid, openedDate, overrides = {}) {
   };
 }
 
-test('orders/latest returns sorted orders limited by the query parameter', async () => {
+test('orders/latest returns toast results with minimal processing', async () => {
   const env = createEnv();
-  const calls = [];
+  let capturedParams = null;
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
-      calls.push(params);
+      capturedParams = params;
       return {
         orders: [
-          buildOrder('order-2', '2024-10-10T10:05:00+0000'),
           buildOrder('order-1', '2024-10-10T10:00:00+0000'),
-          buildOrder('order-3', '2024-10-10T09:30:00+0000'),
+          buildOrder('order-2', '2024-10-10T09:30:00+0000'),
+          buildOrder('order-3', '2024-10-10T09:00:00+0000'),
         ],
-        nextPage: null,
       };
     },
   });
 
-  const request = new Request('https://worker.test/api/orders/latest?limit=2');
-  const response = await handler(env, request);
+  const response = await handler(env, new Request('https://worker.test/api/orders/latest?limit=2'));
   const body = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
-  assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['order-2', 'order-1']);
+  assert.equal(body.route, '/api/orders/latest');
   assert.equal(body.limit, 2);
+  assert.equal(body.detail, 'full');
+  assert.equal(body.count, 2);
+  assert.deepEqual(body.ids, ['order-1', 'order-2']);
+  assert.deepEqual(body.orders, body.data);
+  assert.equal(body.data.length, 2);
   assert.equal(body.pageSize, 5);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].pageSize, 5);
+  assert.equal(Array.isArray(body.expandUsed), true);
+  assert.equal(body.expandUsed.length > 0, true);
+  assert.equal(typeof body.minutes, 'number');
+  assert.equal(typeof body.window.start, 'string');
+  assert.equal(typeof body.window.end, 'string');
+
+  assert.ok(capturedParams);
+  assert.equal(capturedParams.page, 1);
+  assert.equal(capturedParams.pageSize, 5);
+  assert.deepEqual(capturedParams.expansions, [
+    'checks',
+    'items',
+    'payments',
+    'discounts',
+    'serviceCharges',
+    'customers',
+    'employee',
+  ]);
+  assert.equal(typeof capturedParams.startIso, 'string');
+  assert.equal(typeof capturedParams.endIso, 'string');
 });
 
 test('orders/latest forwards pageSize query parameter', async () => {
@@ -82,11 +102,14 @@ test('orders/latest forwards pageSize query parameter', async () => {
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
       calls.push(params);
-      return { orders: [], nextPage: null };
+      return { orders: [] };
     },
   });
 
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?pageSize=7'));
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?pageSize=7')
+  );
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -95,60 +118,24 @@ test('orders/latest forwards pageSize query parameter', async () => {
   assert.equal(calls[0].pageSize, 7);
 });
 
-test('orders/latest continues fetching pages until enough matching results are found', async () => {
-  const env = createEnv();
-  const calls = [];
-  const responses = [
-    {
-      orders: [
-        buildOrder('order-ignored-1', '2024-10-10T08:00:00+0000', {
-          locationGuid: 'loc-other',
-        }),
-      ],
-      nextPage: 2,
-    },
-    {
-      orders: [
-        buildOrder('order-match-2', '2024-10-10T12:30:00+0000'),
-        buildOrder('order-match-1', '2024-10-10T11:45:00+0000'),
-      ],
-      nextPage: null,
-    },
-  ];
-
-  const handler = createOrdersLatestHandler({
-    async getOrdersBulk(_env, params) {
-      calls.push(params);
-      return responses.shift() ?? { orders: [], nextPage: null };
-    },
-  });
-
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?limit=2'));
-  const body = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['order-match-2', 'order-match-1']);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].page, 1);
-  assert.equal(calls[1].page, 2);
-});
-
 test('orders/latest supports detail=ids', async () => {
   const env = createEnv();
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env) {
       return {
         orders: [buildOrder('order-ids', '2024-10-11T09:15:00+0000')],
-        nextPage: null,
       };
     },
   });
 
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?detail=ids'));
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?detail=ids')
+  );
   const body = await response.json();
 
   assert.equal(body.detail, 'ids');
   assert.deepEqual(body.ids, ['order-ids']);
+  assert.deepEqual(body.orders, ['order-ids']);
   assert.equal('data' in body, false);
 });
