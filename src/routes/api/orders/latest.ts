@@ -29,21 +29,24 @@ export function createOrdersLatestHandler(
   return async function handleOrdersLatest(env: AppEnv, request: Request) {
     const url = new URL(request.url);
 
-    const limitRaw = parseNumber(url.searchParams.get("limit"), 5);
-    const limit = clamp(limitRaw ?? 5, LIMIT_MIN, LIMIT_MAX);
+    const limitRaw = parseNumber(url.searchParams.get("limit"), null);
+    const limitNormalized =
+      limitRaw === null || Number.isNaN(limitRaw) ? null : Math.trunc(limitRaw);
+    const limit =
+      limitNormalized === null
+        ? Number.POSITIVE_INFINITY
+        : clamp(limitNormalized, LIMIT_MIN, LIMIT_MAX);
+    const limitForResponse = Number.isFinite(limit) ? limit : null;
 
     const detailParam = url.searchParams.get("detail");
     const detail = detailParam === "ids" ? "ids" : "full";
 
-    const minutesValue = parseNumber(url.searchParams.get("minutes"), null);
     const pageSizeRaw = parseNumber(url.searchParams.get("pageSize"), null);
     const pageSize =
       pageSizeRaw === null
         ? null
         : clamp(Math.trunc(pageSizeRaw), PAGE_SIZE_MIN, PAGE_SIZE_MAX);
 
-    const startParam = url.searchParams.get("start");
-    const endParam = url.searchParams.get("end");
     const sinceParam = url.searchParams.get("since");
 
     const locationId = url.searchParams.get("locationId");
@@ -57,9 +60,6 @@ export function createOrdersLatestHandler(
       const now = new Date();
 
       const { windowOverride, minutesUsed } = resolveWindow({
-        startParam,
-        endParam,
-        minutesValue,
         now,
       });
 
@@ -80,7 +80,7 @@ export function createOrdersLatestHandler(
       const responseBody: any = {
         ok: true,
         route: "/api/orders/latest",
-        limit,
+        limit: limitForResponse,
         detail,
         minutes: minutesUsed ?? result.minutes,
         window: result.window,
@@ -172,44 +172,26 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function resolveWindow({
-  startParam,
-  endParam,
-  minutesValue,
   now,
 }: {
-  startParam: string | null;
-  endParam: string | null;
-  minutesValue: number | null;
   now: Date;
 }): {
-  windowOverride: { start: Date; end: Date } | null;
-  minutesUsed: number | null;
+  windowOverride: { start: Date; end: Date };
+  minutesUsed: number;
 } {
-  const parsedStart = parseIsoToDate(startParam);
-  const parsedEnd = parseIsoToDate(endParam);
-
-  if (parsedStart && parsedEnd && parsedStart.getTime() < parsedEnd.getTime()) {
-    return {
-      windowOverride: { start: parsedStart, end: parsedEnd },
-      minutesUsed: Math.round((parsedEnd.getTime() - parsedStart.getTime()) / 60_000),
-    };
-  }
-
-  const minutes = minutesValue ?? null;
-  if (minutes !== null && minutes > 0) {
-    return {
-      windowOverride: {
-        start: new Date(now.getTime() - minutes * 60_000),
-        end: new Date(now.getTime()),
-      },
-      minutesUsed: minutes,
-    };
-  }
+  const start = startOfDay(now);
+  const end = new Date(now.getTime());
 
   return {
-    windowOverride: null,
-    minutesUsed: null,
+    windowOverride: { start, end },
+    minutesUsed: Math.round((end.getTime() - start.getTime()) / 60_000),
   };
+}
+
+function startOfDay(date: Date): Date {
+  const start = new Date(date.getTime());
+  start.setHours(0, 0, 0, 0);
+  return start;
 }
 
 function parseIsoToDate(value: string | null): Date | null {

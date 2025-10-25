@@ -1610,11 +1610,11 @@ test('orders-detailed reads full orders from orders field when data is missing',
   assert.equal(body.orders[0].items.length, 1);
 });
 
-test('orders-detailed surfaces extended lookback when minutes provided', async () => {
+test('orders-detailed keeps latest orders window scoped to current day even when minutes provided', async () => {
   const minutes = 20160;
-  const oldDate = '2023-12-01T12:00:00.000+0000';
-  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
   let requestedStartMs = null;
+  let requestedEndMs = null;
 
   const orders = (url) => {
     const startIso = url.searchParams.get('start');
@@ -1622,31 +1622,37 @@ test('orders-detailed surfaces extended lookback when minutes provided', async (
       const parsed = Date.parse(startIso);
       if (Number.isFinite(parsed)) {
         requestedStartMs = parsed;
-        if (Date.now() - parsed >= sevenDaysMs) {
-          return [
-            {
-              guid: 'order-old-minutes',
-              createdDate: oldDate,
-              checks: [
-                {
-                  guid: 'check-old-minutes',
-                  selections: [
-                    {
-                      guid: 'sel-old-minutes',
-                      selectionType: 'MENU_ITEM',
-                      quantity: 1,
-                      receiptLinePrice: 5,
-                      item: { guid: 'item-old-minutes' },
-                    },
-                  ],
-                },
-              ],
-            },
-          ];
-        }
       }
     }
-    return [];
+
+    const endIso = url.searchParams.get('end');
+    if (endIso) {
+      const parsed = Date.parse(endIso);
+      if (Number.isFinite(parsed)) {
+        requestedEndMs = parsed;
+      }
+    }
+
+    return [
+      {
+        guid: 'order-current-day',
+        createdDate: new Date().toISOString().replace('Z', '+0000'),
+        checks: [
+          {
+            guid: 'check-current-day',
+            selections: [
+              {
+                guid: 'sel-current-day',
+                selectionType: 'MENU_ITEM',
+                quantity: 1,
+                receiptLinePrice: 5,
+                item: { guid: 'item-current-day' },
+              },
+            ],
+          },
+        ],
+      },
+    ];
   };
 
   const handler = createHandlerWithOrders(orders);
@@ -1656,10 +1662,16 @@ test('orders-detailed surfaces extended lookback when minutes provided', async (
 
   assert.equal(response.status, 200);
   assert.equal(Array.isArray(body.orders), true);
-  assert.equal(body.orders.length, 1);
-  assert.equal(body.orders[0].orderData.orderId, 'order-old-minutes');
+  assert.equal(body.orders.length >= 1, true);
+  assert.equal(body.orders[0].orderData.orderId, 'order-current-day');
   assert.equal(requestedStartMs !== null, true);
-  assert.equal(Date.now() - requestedStartMs >= sevenDaysMs, true);
+  assert.equal(requestedEndMs !== null, true);
+
+  const expectedStart = new Date();
+  expectedStart.setHours(0, 0, 0, 0);
+  assert.equal(requestedStartMs, expectedStart.getTime());
+
+  assert.equal(Math.abs(requestedEndMs - Date.now()) < 60_000, true);
 });
 
 test('orders-detailed ignores client detail param and still fetches full detail', async () => {
