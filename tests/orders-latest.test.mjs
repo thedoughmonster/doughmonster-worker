@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const module = await import('../dist/routes/api/orders/latest.js');
 const { createOrdersLatestHandler } = module;
 
-function createEnv() {
+function createEnv(overrides = {}) {
   return {
     TOAST_API_BASE: 'https://toast.example',
     TOAST_AUTH_URL: 'https://toast.example/auth',
@@ -19,15 +19,25 @@ function createEnv() {
         return undefined;
       },
     },
+    ...overrides,
   };
 }
 
 function buildOrder(guid, openedDate, overrides = {}) {
+  const inferredBusinessDate =
+    typeof openedDate === 'string'
+      ? openedDate.replace(/[^0-9]/g, '').slice(0, 8) || '20241010'
+      : '20241010';
+  const businessDate = overrides.businessDate ?? inferredBusinessDate;
   return {
     guid,
     openedDate,
     createdDate: openedDate,
-    context: { locationGuid: overrides.locationGuid ?? 'loc-main' },
+    businessDate,
+    context: {
+      locationGuid: overrides.locationGuid ?? 'loc-main',
+      businessDate,
+    },
     status: overrides.status ?? 'READY',
     checks: [
       {
@@ -45,35 +55,56 @@ function buildOrder(guid, openedDate, overrides = {}) {
   };
 }
 
-test('orders/latest returns sorted orders limited by the query parameter', async () => {
+function buildResponse(orders, nextPage) {
+  return { orders, nextPage };
+}
+
+test('orders/latest returns every order for the requested business date', async () => {
   const env = createEnv();
   const calls = [];
+  const responses = [
+    buildResponse(
+      [
+        buildOrder('order-latest', '2024-10-10T12:00:00+0000'),
+        buildOrder('order-oldest', '2024-10-10T09:00:00+0000'),
+      ],
+      2
+    ),
+    buildResponse([buildOrder('order-middle', '2024-10-10T10:30:00+0000')], null),
+  ];
+
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
       calls.push(params);
-      return {
-        orders: [
-          buildOrder('order-2', '2024-10-10T10:05:00+0000'),
-          buildOrder('order-1', '2024-10-10T10:00:00+0000'),
-          buildOrder('order-3', '2024-10-10T09:30:00+0000'),
-        ],
-        nextPage: null,
-      };
+      return responses.shift() ?? buildResponse([], null);
     },
   });
 
-  const request = new Request('https://worker.test/api/orders/latest?limit=2');
-  const response = await handler(env, request);
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?businessDate=20241010')
+  );
   const body = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(body.ok, true);
-  assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['order-2', 'order-1']);
-  assert.equal(body.limit, 2);
-  assert.equal(body.pageSize, 5);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].pageSize, 5);
+  assert.equal(body.limit, 5);
+  assert.equal(body.pageSize, 100);
+  assert.equal(body.count, 3);
+  assert.deepEqual(body.ids, ['order-latest', 'order-middle', 'order-oldest']);
+  assert.deepEqual(
+    body.orders.map((order) => order.guid),
+    ['order-latest', 'order-middle', 'order-oldest']
+  );
+  assert.equal(body.window.businessDate, '20241010');
+  assert.equal(body.window.start, '2024-10-10T00:00:00.000+00:00');
+  assert.equal(body.window.end, '2024-10-11T00:00:00.000+00:00');
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].startIso, '2024-10-10T00:00:00.000+0000');
+  assert.equal(calls[0].endIso, '2024-10-11T00:00:00.000+0000');
+  assert.equal(calls[0].page, 1);
+  assert.equal(calls[1].page, 2);
 });
 
 test('orders/latest forwards pageSize query parameter', async () => {
@@ -82,11 +113,14 @@ test('orders/latest forwards pageSize query parameter', async () => {
   const handler = createOrdersLatestHandler({
     async getOrdersBulk(_env, params) {
       calls.push(params);
-      return { orders: [], nextPage: null };
+      return buildResponse([], null);
     },
   });
 
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?pageSize=7'));
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?businessDate=20241010&pageSize=7')
+  );
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -95,60 +129,49 @@ test('orders/latest forwards pageSize query parameter', async () => {
   assert.equal(calls[0].pageSize, 7);
 });
 
-test('orders/latest continues fetching pages until enough matching results are found', async () => {
+test('orders/latest supports detail=ids and omits data payload', async () => {
   const env = createEnv();
-  const calls = [];
-  const responses = [
-    {
-      orders: [
-        buildOrder('order-ignored-1', '2024-10-10T08:00:00+0000', {
-          locationGuid: 'loc-other',
-        }),
-      ],
-      nextPage: 2,
-    },
-    {
-      orders: [
-        buildOrder('order-match-2', '2024-10-10T12:30:00+0000'),
-        buildOrder('order-match-1', '2024-10-10T11:45:00+0000'),
-      ],
-      nextPage: null,
-    },
-  ];
-
   const handler = createOrdersLatestHandler({
-    async getOrdersBulk(_env, params) {
-      calls.push(params);
-      return responses.shift() ?? { orders: [], nextPage: null };
+    async getOrdersBulk() {
+      return buildResponse(
+        [buildOrder('order-ids', '2024-10-11T09:15:00+0000', { businessDate: '20241011' })],
+        null
+      );
     },
   });
 
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?limit=2'));
-  const body = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.equal(body.count, 2);
-  assert.deepEqual(body.ids, ['order-match-2', 'order-match-1']);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].page, 1);
-  assert.equal(calls[1].page, 2);
-});
-
-test('orders/latest supports detail=ids', async () => {
-  const env = createEnv();
-  const handler = createOrdersLatestHandler({
-    async getOrdersBulk(_env) {
-      return {
-        orders: [buildOrder('order-ids', '2024-10-11T09:15:00+0000')],
-        nextPage: null,
-      };
-    },
-  });
-
-  const response = await handler(env, new Request('https://worker.test/api/orders/latest?detail=ids'));
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?detail=ids&businessDate=20241011')
+  );
   const body = await response.json();
 
   assert.equal(body.detail, 'ids');
   assert.deepEqual(body.ids, ['order-ids']);
+  assert.deepEqual(body.orders, ['order-ids']);
   assert.equal('data' in body, false);
+});
+
+test('orders/latest uses the configured time zone when building the request window', async () => {
+  const env = createEnv({ TOAST_TIME_ZONE: 'America/Los_Angeles' });
+  const calls = [];
+  const handler = createOrdersLatestHandler({
+    async getOrdersBulk(_env, params) {
+      calls.push(params);
+      return buildResponse([], null);
+    },
+  });
+
+  const response = await handler(
+    env,
+    new Request('https://worker.test/api/orders/latest?businessDate=20240704')
+  );
+  const body = await response.json();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].startIso, '2024-07-04T00:00:00.000-0700');
+  assert.equal(calls[0].endIso, '2024-07-05T00:00:00.000-0700');
+  assert.equal(body.window.start, '2024-07-04T00:00:00.000-07:00');
+  assert.equal(body.window.end, '2024-07-05T00:00:00.000-07:00');
+  assert.equal(body.window.timeZone, 'America/Los_Angeles');
 });
