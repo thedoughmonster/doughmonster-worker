@@ -536,13 +536,7 @@ async function gatherLatestOrders({
 }
 
 async function collectCandidateIds(env: AppEnv, limit: number): Promise<string[]> {
-  const recent = await getRecentIndex(env);
-  if (recent.length >= limit) {
-    return recent;
-  }
-
   const now = new Date();
-  const additional: string[] = [];
   const keys: string[] = [];
   const seenKeys = new Set<string>();
 
@@ -562,17 +556,28 @@ async function collectCandidateIds(env: AppEnv, limit: number): Promise<string[]
     }
   }
 
+  const candidates: string[] = [];
+  const seenGuids = new Set<string>();
+
   for (const key of keys) {
     const entries = await getIndexForDate(env, key);
     for (const guid of entries) {
-      additional.push(guid);
-    }
-    if (recent.length + additional.length >= limit) {
-      break;
+      if (!seenGuids.has(guid)) {
+        seenGuids.add(guid);
+        candidates.push(guid);
+      }
     }
   }
 
-  return [...recent, ...additional];
+  const recent = await getRecentIndex(env);
+  for (const guid of recent) {
+    if (!seenGuids.has(guid)) {
+      seenGuids.add(guid);
+      candidates.push(guid);
+    }
+  }
+
+  return candidates.slice(0, limit);
 }
 
 interface TelemetryMetrics {

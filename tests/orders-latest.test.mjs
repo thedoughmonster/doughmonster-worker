@@ -285,3 +285,61 @@ test('orders/latest prioritizes next-day business date fallback before prior day
     globalThis.Date = RealDate;
   }
 });
+
+test('orders/latest keeps future business date results even when recent index is saturated', async () => {
+  const env = createEnv();
+  const previousBusinessDate = '20241024';
+  const futureBusinessDate = '20241025';
+
+  const previousOrderGuids = Array.from({ length: 3 }, (_, index) => `order-prev-${index + 1}`);
+  const futureOrder = buildOrder('order-future', '2024-10-25T08:00:00+0000', 'READY');
+
+  env.CACHE_KV.store.set(`orders:index:${futureBusinessDate}`, JSON.stringify(['order-future']));
+  env.CACHE_KV.store.set(`orders:byId:order-future`, JSON.stringify(futureOrder));
+
+  env.CACHE_KV.store.set(`orders:index:${previousBusinessDate}`, JSON.stringify(previousOrderGuids));
+  for (const [index, guid] of previousOrderGuids.entries()) {
+    const openedHour = String(9 + index).padStart(2, '0');
+    const order = buildOrder(guid, `2024-10-24T${openedHour}:00:00+0000`, 'READY');
+    env.CACHE_KV.store.set(`orders:byId:${guid}`, JSON.stringify(order));
+  }
+
+  env.CACHE_KV.store.set('orders:recentIndex', JSON.stringify(previousOrderGuids));
+
+  const handler = createOrdersLatestHandler({
+    async getOrdersBulk() {
+      return { orders: [], nextPage: null };
+    },
+  });
+
+  const fixedNow = Date.parse('2024-10-24T23:30:00Z');
+  const RealDate = Date;
+  class MockDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(fixedNow);
+      } else {
+        super(...args);
+      }
+    }
+
+    static now() {
+      return fixedNow;
+    }
+  }
+  MockDate.parse = RealDate.parse;
+  MockDate.UTC = RealDate.UTC;
+
+  globalThis.Date = MockDate;
+
+  try {
+    const response = await handler(env, new Request('https://worker.test/api/orders/latest?limit=2'));
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.count, 2);
+    assert.equal(body.ids.includes('order-future'), true);
+  } finally {
+    globalThis.Date = RealDate;
+  }
+});
