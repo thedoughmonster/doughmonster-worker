@@ -548,9 +548,10 @@ async function collectCandidateIds(env: AppEnv, limit: number): Promise<string[]
 
   for (let i = 0; i < FALLBACK_DAYS; i += 1) {
     const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+    const nextDate = new Date(date.getTime() + 24 * 60 * 60 * 1000);
     const candidates = [
+      formatBusinessDate(nextDate),
       formatBusinessDate(date),
-      formatBusinessDate(new Date(date.getTime() + 24 * 60 * 60 * 1000)),
     ];
 
     for (const key of candidates) {
