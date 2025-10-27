@@ -12,6 +12,8 @@ servers:
     description: "Local development (wrangler dev)"
 tags:
   -
+    name: Documentation
+  -
     name: Health
   -
     name: Menus
@@ -39,6 +41,24 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/ErrorResponse"
+  /api/docs/openapi.json:
+    get:
+      summary: "Fetch the OpenAPI definition"
+      description: "Returns the OpenAPI schema for the Doughmonster Worker API, suitable for AI agents and client code generation."
+      tags:
+        - Documentation
+      responses:
+        200:
+          description: "OpenAPI schema returned successfully."
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: "Hints that the schema can be cached by clients for five minutes while allowing stale reuse for a day."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/OpenApiDocument"
   /api/health:
     get:
       summary: "Health check"
@@ -740,6 +760,10 @@ components:
         - menu
         - metadata
         - cacheHit
+    OpenApiDocument:
+      description: "OpenAPI document describing the Doughmonster Worker HTTP interface."
+      type: object
+      additionalProperties: true
     OrderCursor:
       type: object
       properties:
