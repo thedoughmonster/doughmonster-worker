@@ -16,6 +16,10 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 
 All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders/latest` are mounted on the worker router so `/api/orders-detailed` can self-fetch them without leaving the worker boundary.
 
+### API documentation
+
+Run `npm run docs` to regenerate the structured OpenAPI definitions under `schemas/`. Both `openapi.json` and `openapi.yaml` are derived artifacts—commit the generated output, but do not edit either file manually.
+
 ### Config Snapshot (1h cache)
 
 `GET /api/config/snapshot` aggregates six Toast configuration slices—`diningOptions`, `orderTypes`, `revenueCenters`, `serviceAreas`, `taxRates`, and `discounts`—into a single payload. The response is cached in `CACHE_KV` for one hour with the cache key `toast:config:snapshot:all:<tenant-or-location>`, so subsequent calls within that window return immediately without re-fetching Toast.

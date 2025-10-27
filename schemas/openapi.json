@@ -1,0 +1,3221 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Doughmonster Worker API",
+    "version": "1.0.0",
+    "description": "OpenAPI metadata describing the public endpoints exposed by the Doughmonster Worker."
+  },
+  "servers": [
+    {
+      "url": "https://doughmonster-worker.thedoughmonster.workers.dev",
+      "description": "Production deployment"
+    },
+    {
+      "url": "http://127.0.0.1:8787",
+      "description": "Local development (wrangler dev)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Menus"
+    },
+    {
+      "name": "Orders"
+    },
+    {
+      "name": "Configuration"
+    }
+  ],
+  "paths": {
+    "/api/config/snapshot": {
+      "get": {
+        "summary": "Fetch Toast configuration snapshot",
+        "description": "Fetches a fixed set of Toast configuration slices and caches the merged payload for one hour.",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Configuration snapshot returned successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigSnapshotResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "summary": "Health check",
+        "description": "Returns `{\"ok\": true}` when the worker is healthy.",
+        "tags": [
+          "Health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Worker is available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/items-expanded": {
+      "get": {
+        "summary": "Legacy alias for `/api/orders-detailed`",
+        "description": "Deprecated alias that proxies `/api/orders-detailed` and emits a `Deprecation: true` header. New clients should migrate to `/api/orders-detailed`.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "Expanded orders returned successfully.",
+            "headers": {
+              "Deprecation": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                },
+                "description": "Signals that the alias will be removed in a future release."
+              },
+              "Link": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Indicates the canonical successor endpoint."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersDetailedSuccess"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "One or more upstream dependencies failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersDetailedError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "deprecated": true,
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrdersDetailedLimit"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedStart"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedEnd"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedMinutes"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedStatus"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedFulfillmentStatus"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedLocationId"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedRefresh"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedDebug"
+          }
+        ]
+      }
+    },
+    "/api/menus": {
+      "get": {
+        "summary": "Retrieve the cached Toast menu document",
+        "description": "Returns the currently cached Toast menus document along with cache metadata. Append `?refresh=1` (or any other truthy value) to force a synchronous refresh before responding.",
+        "tags": [
+          "Menus"
+        ],
+        "responses": {
+          "200": {
+            "description": "Menu document retrieved successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenusResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream Toast API failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/MenusRefresh"
+          }
+        ]
+      }
+    },
+    "/api/orders-detailed": {
+      "get": {
+        "summary": "Retrieve expanded order details with menu enrichment",
+        "description": "Returns the most recent non-voided Toast orders enriched with menu metadata and normalized totals. The endpoint internally calls `/api/orders/latest` and `/api/menus`, applies filtering, and returns a deterministic list of expanded orders ready for presentation.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "Expanded orders returned successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersDetailedSuccess"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "One or more upstream dependencies failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersDetailedError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrdersDetailedLimit"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedStart"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedEnd"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedMinutes"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedStatus"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedFulfillmentStatus"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedLocationId"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedRefresh"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersDetailedDebug"
+          }
+        ]
+      }
+    },
+    "/api/orders-merged": {
+      "get": {
+        "summary": "Retrieve orders and menus payloads together",
+        "description": "Calls `/api/orders/latest` and `/api/menus`, returning their bodies unchanged inside a single payload.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "Orders and menus were retrieved successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersMergedSuccess"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "At least one upstream response failed or was not valid JSON.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersMergedError"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orders/latest": {
+      "get": {
+        "summary": "Fetch the most recent Toast orders",
+        "description": "Returns the most recent Toast orders using the worker's incremental KV-backed cache. By default the worker returns the five newest orders with full detail. Pass `detail=ids` to receive only the GUIDs while retaining ordering.",
+        "tags": [
+          "Orders"
+        ],
+        "responses": {
+          "200": {
+            "description": "Orders fetched successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrdersLatestResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Error response emitted when the worker cannot return orders successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrdersLatestLimit"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestDetail"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestMinutes"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestPageSize"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestStart"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestEnd"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestSince"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestBusinessDate"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestTimeZone"
+          },
+          {
+            "$ref": "#/components/parameters/OrdersLatestDebug"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ConfigSnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ttlSeconds": {
+            "type": "integer"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "diningOptions": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast diningOptions slice payload when available."
+              },
+              "orderTypes": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast orderTypes slice payload when available."
+              },
+              "revenueCenters": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast revenueCenters slice payload when available."
+              },
+              "serviceAreas": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast serviceAreas slice payload when available."
+              },
+              "taxRates": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast taxRates slice payload when available."
+              },
+              "discounts": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  {
+                    "type": "array",
+                    "items": {}
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Toast discounts slice payload when available."
+              }
+            },
+            "required": [
+              "diningOptions",
+              "orderTypes",
+              "revenueCenters",
+              "serviceAreas",
+              "taxRates",
+              "discounts"
+            ]
+          }
+        },
+        "required": [
+          "updatedAt",
+          "ttlSeconds",
+          "data"
+        ],
+        "additionalProperties": false
+      },
+      "DiagnosticsCounters": {
+        "type": "object",
+        "properties": {
+          "ordersSeen": {
+            "type": "integer"
+          },
+          "checksSeen": {
+            "type": "integer"
+          },
+          "itemsIncluded": {
+            "type": "integer"
+          },
+          "dropped": {
+            "type": "object",
+            "properties": {
+              "ordersVoided": {
+                "type": "integer"
+              },
+              "ordersTimeParse": {
+                "type": "integer"
+              },
+              "selectionsVoided": {
+                "type": "integer"
+              },
+              "selectionsFiltered": {
+                "type": "integer"
+              }
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "baseItemsSubtotalCents": {
+                "type": "integer"
+              },
+              "modifiersSubtotalCents": {
+                "type": "integer"
+              },
+              "discountTotalCents": {
+                "type": "integer"
+              },
+              "serviceChargeCents": {
+                "type": "integer"
+              },
+              "tipCents": {
+                "type": "integer"
+              },
+              "grandTotalCents": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "ErrorObject": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "code": {
+            "description": "Machine readable error code when available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": false
+          },
+          "error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorObject"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "ExpandedOrder": {
+        "type": "object",
+        "properties": {
+          "orderData": {
+            "$ref": "#/components/schemas/ExpandedOrderData"
+          },
+          "currency": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpandedOrderItem"
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ExpandedOrderTotals"
+          }
+        },
+        "required": [
+          "orderData",
+          "items",
+          "totals"
+        ]
+      },
+      "ExpandedOrderData": {
+        "type": "object",
+        "properties": {
+          "orderId": {
+            "type": "string"
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "locationId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "orderTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeDue": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "orderNumber": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fulfillmentStatus": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "customerName": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "orderType": {
+            "type": "string"
+          },
+          "orderTypeNormalized": {
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "TAKEOUT",
+                  "DELIVERY",
+                  "DINE_IN",
+                  "CURBSIDE",
+                  "DRIVE_THRU",
+                  "CATERING",
+                  "UNKNOWN"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "diningOptionGuid": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deliveryState": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deliveryInfo": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "curbsidePickupInfo": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "table": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seats": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "employee": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "promisedDate": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "estimatedFulfillmentDate": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "orderId",
+          "orderTime",
+          "orderType"
+        ]
+      },
+      "ExpandedOrderItem": {
+        "type": "object",
+        "properties": {
+          "lineItemId": {
+            "type": "string"
+          },
+          "menuItemId": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "itemName": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "number"
+          },
+          "fulfillmentStatus": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpandedOrderItemModifier"
+            }
+          },
+          "specialInstructions": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "money": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpandedOrderItemMoney"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "lineItemId",
+          "itemName",
+          "quantity",
+          "modifiers"
+        ]
+      },
+      "ExpandedOrderItemModifier": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "groupName": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priceCents": {
+            "type": "integer"
+          },
+          "quantity": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "priceCents",
+          "quantity"
+        ]
+      },
+      "ExpandedOrderItemMoney": {
+        "type": "object",
+        "properties": {
+          "baseItemPriceCents": {
+            "type": "integer"
+          },
+          "modifierTotalCents": {
+            "type": "integer"
+          },
+          "totalItemPriceCents": {
+            "type": "integer"
+          }
+        }
+      },
+      "ExpandedOrderTotals": {
+        "type": "object",
+        "properties": {
+          "baseItemsSubtotalCents": {
+            "type": "integer"
+          },
+          "modifiersSubtotalCents": {
+            "type": "integer"
+          },
+          "discountTotalCents": {
+            "type": "integer"
+          },
+          "serviceChargeCents": {
+            "type": "integer"
+          },
+          "tipCents": {
+            "type": "integer"
+          },
+          "grandTotalCents": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "baseItemsSubtotalCents",
+          "modifiersSubtotalCents",
+          "discountTotalCents",
+          "serviceChargeCents",
+          "tipCents",
+          "grandTotalCents"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "MenusResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MenusSuccess"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ]
+      },
+      "MenusSuccess": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "menu": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ToastMenusDocument"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "lastUpdated": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "lastUpdated"
+            ]
+          },
+          "cacheHit": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "menu",
+          "metadata",
+          "cacheHit"
+        ]
+      },
+      "OrderCursor": {
+        "type": "object",
+        "properties": {
+          "ts": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "orderGuid": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "businessDate": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "OrdersDetailedDebug": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "timingMs": {
+            "type": "integer"
+          },
+          "ordersTrace": {
+            "$ref": "#/components/schemas/UpstreamTrace"
+          },
+          "menuTrace": {
+            "$ref": "#/components/schemas/UpstreamTrace"
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "startIso": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "endIso": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "startIso",
+              "endIso"
+            ]
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "originSeen": {
+            "type": "string"
+          },
+          "lastPage": {
+            "type": "integer"
+          },
+          "timedOut": {
+            "type": "boolean"
+          },
+          "diagnostics": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticsCounters"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lookbackWindowsTried": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "ordersFetched": {
+            "type": "integer"
+          },
+          "ordersUpstream": {
+            "$ref": "#/components/schemas/UpstreamTrace"
+          },
+          "menuUpstream": {
+            "$ref": "#/components/schemas/UpstreamTrace"
+          }
+        },
+        "additionalProperties": true
+      },
+      "OrdersDetailedError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorObject"
+          },
+          "debug": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrdersDetailedDebug"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "OrdersDetailedResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OrdersDetailedSuccess"
+          },
+          {
+            "$ref": "#/components/schemas/OrdersDetailedError"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          }
+        ]
+      },
+      "OrdersDetailedSuccess": {
+        "type": "object",
+        "properties": {
+          "orders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpandedOrder"
+            }
+          },
+          "cacheInfo": {
+            "type": "object",
+            "properties": {
+              "menu": {
+                "description": "Cache status for the menu payload (for example `hit-fresh` or `miss-network`).",
+                "type": "string"
+              },
+              "menuUpdatedAt": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "menu",
+              "menuUpdatedAt"
+            ]
+          },
+          "debug": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrdersDetailedDebug"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "orders",
+          "cacheInfo"
+        ]
+      },
+      "OrdersLatestBase": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "route": {
+            "description": "Echoed route path.",
+            "type": "string",
+            "example": "/api/orders/latest"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "full",
+              "ids"
+            ]
+          },
+          "minutes": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "end": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "businessDate": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
+          },
+          "pageSize": {
+            "type": "integer"
+          },
+          "expandUsed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "count": {
+            "type": "integer"
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "orders": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToastOrder"
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "data": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToastOrder"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrdersLatestSource"
+            }
+          },
+          "debug": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrdersLatestDebug"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "route",
+          "limit",
+          "detail",
+          "minutes",
+          "window",
+          "pageSize",
+          "expandUsed",
+          "count",
+          "ids"
+        ]
+      },
+      "OrdersLatestDebug": {
+        "type": "object",
+        "properties": {
+          "fetchWindow": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "end": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
+          },
+          "cursorBefore": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrderCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cursorAfter": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OrderCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "page": {
+                  "type": "integer"
+                },
+                "count": {
+                  "type": "integer"
+                },
+                "returned": {
+                  "type": "integer"
+                },
+                "nextPage": {
+                  "oneOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "fetched": {
+                "type": "integer"
+              },
+              "written": {
+                "type": "integer"
+              },
+              "skipped": {
+                "type": "integer"
+              },
+              "readyCandidates": {
+                "type": "integer"
+              }
+            }
+          },
+          "kv": {
+            "type": "object",
+            "properties": {
+              "reads": {
+                "type": "integer"
+              },
+              "writes": {
+                "type": "integer"
+              },
+              "indexLoads": {
+                "type": "integer"
+              },
+              "indexWrites": {
+                "type": "integer"
+              },
+              "bytesRead": {
+                "type": "integer"
+              },
+              "bytesWritten": {
+                "type": "integer"
+              }
+            }
+          },
+          "api": {
+            "type": "object",
+            "properties": {
+              "requests": {
+                "type": "integer"
+              },
+              "pages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "page": {
+                      "type": "integer"
+                    },
+                    "returned": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "nextPage": {
+                      "oneOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "cache": {
+            "type": "object",
+            "properties": {
+              "hits": {
+                "type": "integer"
+              },
+              "misses": {
+                "type": "integer"
+              },
+              "updated": {
+                "type": "integer"
+              }
+            }
+          },
+          "cursor": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OrderCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "after": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OrderCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "timing": {
+            "type": "object",
+            "properties": {
+              "toastFetchMs": {
+                "type": "number"
+              },
+              "kvMs": {
+                "type": "number"
+              },
+              "totalMs": {
+                "type": "number"
+              }
+            }
+          },
+          "params": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "type": "integer"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "debug": {
+                "type": "boolean"
+              },
+              "since": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "locationId": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pageSize": {
+                "oneOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": true
+          },
+          "resultCount": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "OrdersLatestError": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": false
+          },
+          "route": {
+            "type": "string",
+            "example": "/api/orders/latest"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "route",
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "OrdersLatestResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OrdersLatestSuccessFull"
+          },
+          {
+            "$ref": "#/components/schemas/OrdersLatestSuccessIds"
+          },
+          {
+            "$ref": "#/components/schemas/OrdersLatestError"
+          }
+        ]
+      },
+      "OrdersLatestSource": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "cache",
+              "api",
+              "merged"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "source"
+        ]
+      },
+      "OrdersLatestSuccessFull": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/OrdersLatestBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "full"
+                ]
+              },
+              "orders": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToastOrder"
+                }
+              },
+              "data": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToastOrder"
+                }
+              }
+            },
+            "required": [
+              "orders"
+            ]
+          }
+        ]
+      },
+      "OrdersLatestSuccessIds": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/OrdersLatestBase"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "detail": {
+                "type": "string",
+                "enum": [
+                  "ids"
+                ]
+              },
+              "orders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "orders"
+            ]
+          }
+        ]
+      },
+      "OrdersMergedError": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": false
+          },
+          "route": {
+            "type": "string",
+            "example": "/api/orders-merged"
+          },
+          "error": {
+            "$ref": "#/components/schemas/ErrorObject"
+          },
+          "orders": {
+            "$ref": "#/components/schemas/UpstreamSummary"
+          },
+          "menus": {
+            "$ref": "#/components/schemas/UpstreamSummary"
+          }
+        },
+        "required": [
+          "ok",
+          "route",
+          "error",
+          "orders",
+          "menus"
+        ]
+      },
+      "OrdersMergedSuccess": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "const": true
+          },
+          "route": {
+            "type": "string",
+            "example": "/api/orders-merged"
+          },
+          "orders": {
+            "$ref": "#/components/schemas/OrdersLatestResponse"
+          },
+          "menus": {
+            "$ref": "#/components/schemas/MenusResponse"
+          }
+        },
+        "required": [
+          "ok",
+          "route",
+          "orders",
+          "menus"
+        ]
+      },
+      "ToastCheck": {
+        "title": "Check",
+        "description": "Represents a single check within an order, containing selections, discounts, service charges, and payments.",
+        "type": "object",
+        "properties": {
+          "guid": {
+            "description": "Toast-maintained GUID for the referenced entity.",
+            "type": "string"
+          },
+          "entityType": {
+            "description": "Type discriminator returned by Toast (response only).",
+            "type": "string"
+          },
+          "externalId": {
+            "description": "External identifier string prefixed by the naming authority.",
+            "type": "string"
+          },
+          "createdDate": {
+            "description": "Timestamp when Toast received the check.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "openedDate": {
+            "description": "Timestamp when the check opened (defaults to current time).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "closedDate": {
+            "description": "Timestamp when payment status became CLOSED.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "modifiedDate": {
+            "description": "Most recent modification timestamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "deletedDate": {
+            "description": "Timestamp when the check was deleted (epoch when active).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted": {
+            "description": "True when the check was deleted.",
+            "type": "boolean"
+          },
+          "selections": {
+            "description": "Menu item and modifier selections on the check.",
+            "type": "array",
+            "items": {
+              "description": "Selection",
+              "type": "object"
+            }
+          },
+          "customer": {
+            "description": "Guest information attached to the check (required for takeout/delivery POSTs).",
+            "type": "object"
+          },
+          "appliedLoyaltyInfo": {
+            "description": "Loyalty program metadata associated with the check.",
+            "type": "object"
+          },
+          "taxExempt": {
+            "description": "True when the check is tax exempt (defaults to false).",
+            "type": "boolean"
+          },
+          "displayNumber": {
+            "description": "Ticket display number (not guaranteed unique).",
+            "type": "string"
+          },
+          "appliedServiceCharges": {
+            "description": "Service charges applied to the check.",
+            "type": "array",
+            "items": {
+              "description": "Applied service charge",
+              "type": "object"
+            }
+          },
+          "amount": {
+            "description": "Calculated check total excluding gratuity and taxes (response only).",
+            "type": "number"
+          },
+          "taxAmount": {
+            "description": "Calculated tax amount including service charge taxes (response only).",
+            "type": "number"
+          },
+          "totalAmount": {
+            "description": "Total amount including discounts and taxes.",
+            "type": "number"
+          },
+          "payments": {
+            "description": "Payments applied to the check.",
+            "type": "array",
+            "items": {
+              "description": "Payment",
+              "type": "object"
+            }
+          },
+          "tabName": {
+            "description": "Tab name shown on the KDS (max 255 characters).",
+            "type": "string"
+          },
+          "paymentStatus": {
+            "description": "Payment workflow status (response only).",
+            "enum": [
+              "OPEN",
+              "PAID",
+              "CLOSED"
+            ],
+            "type": "string"
+          },
+          "appliedDiscounts": {
+            "description": "Discounts applied to the check.",
+            "type": "array",
+            "items": {
+              "description": "Applied discount",
+              "type": "object"
+            }
+          },
+          "voided": {
+            "description": "True when the check was voided (response only).",
+            "type": "boolean"
+          },
+          "voidDate": {
+            "description": "Timestamp when the check was voided (response only).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "voidBusinessDate": {
+            "description": "Business date (yyyyMMdd) for the void (response only).",
+            "type": "number"
+          },
+          "paidDate": {
+            "description": "Most recent payment timestamp (defaults to now on POST).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "createdDevice": {
+            "description": "Toast POS device that created the check.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "Device identifier",
+                "type": "string"
+              }
+            }
+          },
+          "lastModifiedDevice": {
+            "description": "Toast POS device that last modified the check.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "Device identifier",
+                "type": "string"
+              }
+            }
+          },
+          "duration": {
+            "description": "Seconds between creation and payment (response only).",
+            "type": "number"
+          },
+          "openedBy": {
+            "description": "Employee who opened the check.",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          }
+        },
+        "required": [
+          "guid",
+          "selections"
+        ]
+      },
+      "ToastMenuItem": {
+        "title": "MenuItem",
+        "description": "Menu item configuration including pricing, tags, and modifier group references.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Guest-facing name (Toast substitutes \"Missing name\" when blank).",
+            "type": "string"
+          },
+          "kitchenName": {
+            "description": "Kitchen ticket label for the item.",
+            "type": "string"
+          },
+          "guid": {
+            "description": "Menu item GUID assigned by Toast.",
+            "type": "string"
+          },
+          "multiLocationId": {
+            "description": "Identifier shared across locations for the same conceptual item.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Optional description displayed in menus.",
+            "type": "string"
+          },
+          "itemTags": {
+            "description": "Item tags such as vegetarian, gluten-free, or alcohol.",
+            "type": "array",
+            "items": {
+              "description": "Item tag",
+              "type": "object"
+            }
+          },
+          "price": {
+            "description": "Resolved price for the menu item.",
+            "type": "number"
+          },
+          "unitOfMeasure": {
+            "description": "Unit of measure for weighed pricing.",
+            "enum": [
+              "NONE",
+              "LB",
+              "OZ",
+              "KG",
+              "G"
+            ],
+            "type": "string"
+          },
+          "portions": {
+            "description": "Portion definitions available for the item (for example, pizza halves).",
+            "type": "array",
+            "items": {
+              "description": "Portion",
+              "type": "object"
+            }
+          },
+          "modifierGroupReferences": {
+            "description": "Reference IDs for modifier groups applied to this item.",
+            "type": "array",
+            "items": {
+              "description": "Modifier group referenceId",
+              "type": "number"
+            }
+          },
+          "prepTime": {
+            "description": "Prep time in seconds (nullable).",
+            "type": "number"
+          },
+          "prepStations": {
+            "description": "GUIDs for assigned prep stations.",
+            "type": "array",
+            "items": {
+              "description": "Prep station GUID",
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ToastMenusDocument": {
+        "title": "Restaurant",
+        "description": "Menus API restaurant payload containing published menus plus modifier references.",
+        "type": "object",
+        "properties": {
+          "restaurantGuid": {
+            "description": "Restaurant GUID associated with the published menus.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "lastUpdated": {
+            "description": "Timestamp when menu data was last published.",
+            "type": "string"
+          },
+          "restaurantTimeZone": {
+            "description": "Restaurant time zone expressed as an IANA identifier.",
+            "type": "string"
+          },
+          "menus": {
+            "description": "Published menus for the restaurant.",
+            "type": "array",
+            "items": {
+              "description": "Menu",
+              "type": "object"
+            }
+          },
+          "modifierGroupReferences": {
+            "description": "Dictionary of modifier groups keyed by referenceId.",
+            "type": "object"
+          },
+          "modifierOptionReferences": {
+            "description": "Dictionary of modifier options keyed by referenceId.",
+            "type": "object"
+          },
+          "preModifierGroupReferences": {
+            "description": "Dictionary of pre-modifier groups keyed by referenceId.",
+            "type": "object"
+          }
+        }
+      },
+      "ToastModifierGroup": {
+        "title": "ModifierGroup",
+        "description": "Modifier group configuration describing pricing strategy and selection rules.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Display name for the modifier group.",
+            "type": "string"
+          },
+          "guid": {
+            "description": "Modifier group GUID assigned by Toast.",
+            "type": "string"
+          },
+          "referenceId": {
+            "description": "Numeric identifier used by menu items to reference the group.",
+            "type": "number"
+          },
+          "pricingStrategy": {
+            "description": "Pricing strategy for the modifier group (NONE, SIZE_PRICE, SEQUENCE_PRICE, SIZE_SEQUENCE_PRICE).",
+            "type": "string"
+          },
+          "pricingRules": {
+            "description": "Strategy-specific pricing rules used when calculating option prices.",
+            "type": "object"
+          },
+          "defaultOptionsChargePrice": {
+            "description": "Whether default modifiers add to the parent item price (YES/NO).",
+            "enum": [
+              "NO",
+              "YES"
+            ],
+            "type": "string"
+          },
+          "defaultOptionsSubstitutionPricing": {
+            "description": "Whether substitution pricing is enabled for the group (YES/NO).",
+            "enum": [
+              "NO",
+              "YES"
+            ],
+            "type": "string"
+          },
+          "minSelections": {
+            "description": "Minimum number of modifier options required.",
+            "type": "number"
+          },
+          "maxSelections": {
+            "description": "Maximum number of modifier options allowed (null indicates unlimited).",
+            "type": "number"
+          },
+          "requiredMode": {
+            "description": "POS behavior for presenting the group (REQUIRED, OPTIONAL_FORCE_SHOW, OPTIONAL).",
+            "enum": [
+              "REQUIRED",
+              "OPTIONAL_FORCE_SHOW",
+              "OPTIONAL"
+            ],
+            "type": "string"
+          },
+          "isMultiSelect": {
+            "description": "True when multiple modifier options may be selected.",
+            "type": "boolean"
+          },
+          "preModifierGroupReference": {
+            "description": "ReferenceId of the associated premodifier group.",
+            "type": "number"
+          },
+          "modifierOptionReferences": {
+            "description": "Reference IDs for modifier options contained in the group.",
+            "type": "array",
+            "items": {
+              "description": "Modifier option referenceId",
+              "type": "number"
+            }
+          }
+        }
+      },
+      "ToastModifierOption": {
+        "title": "ModifierOption",
+        "description": "Modifier option configuration including pricing strategy, tags, and availability metadata.",
+        "type": "object",
+        "properties": {
+          "referenceId": {
+            "description": "Numeric identifier referenced by modifier groups.",
+            "type": "number"
+          },
+          "name": {
+            "description": "Display name for the modifier option (Toast substitutes \"Missing name\" when blank).",
+            "type": "string"
+          },
+          "guid": {
+            "description": "Modifier option GUID for the underlying item reference.",
+            "type": "string"
+          },
+          "price": {
+            "description": "Resolved price for the modifier option (null when group-level pricing applies).",
+            "type": "number"
+          },
+          "pricingStrategy": {
+            "description": "Pricing strategy applied to the modifier option (GROUP_PRICE, BASE_PRICE, MENU_SPECIFIC_PRICE, TIME_SPECIFIC_PRICE, etc.).",
+            "type": "string"
+          },
+          "pricingRules": {
+            "description": "Pricing rules used when additional calculation is required.",
+            "type": "object"
+          },
+          "itemTags": {
+            "description": "Item tags applied to the modifier option.",
+            "type": "array",
+            "items": {
+              "description": "Item tag",
+              "type": "object"
+            }
+          },
+          "isDefault": {
+            "description": "Indicates whether the modifier option is included by default.",
+            "type": "boolean"
+          },
+          "allowsDuplicates": {
+            "description": "Indicates whether the modifier option can be selected multiple times.",
+            "type": "boolean"
+          },
+          "portions": {
+            "description": "Portions that the modifier option can cover.",
+            "type": "array",
+            "items": {
+              "description": "Portion",
+              "type": "object"
+            }
+          }
+        }
+      },
+      "ToastOrder": {
+        "title": "Order",
+        "description": "A Toast platform order composed of one or more checks. Captures dining option, delivery metadata, pricing features, and workflow state.",
+        "type": "object",
+        "properties": {
+          "guid": {
+            "description": "Toast-maintained GUID for the referenced entity.",
+            "type": "string"
+          },
+          "entityType": {
+            "description": "Type discriminator returned by Toast (response only).",
+            "type": "string"
+          },
+          "externalId": {
+            "description": "External identifier string prefixed by the naming authority.",
+            "type": "string"
+          },
+          "openedDate": {
+            "description": "Business date for the order (matches createdDate for ASAP and promisedDate for scheduled orders).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "modifiedDate": {
+            "description": "Most recent modification timestamp for the order or nested entities.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "promisedDate": {
+            "description": "Scheduled fulfillment timestamp for future orders (null for dine-in / ASAP).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "channelGuid": {
+            "description": "Reserved UUID channel identifier.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "diningOption": {
+            "description": "Restaurant-configured dining option applied to the order.",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "checks": {
+            "description": "Checks that belong to the order (most orders have one check).",
+            "type": "array",
+            "items": {
+              "description": "Check",
+              "type": "object"
+            }
+          },
+          "table": {
+            "description": "Table where the order was placed.",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "serviceArea": {
+            "description": "Service area metadata (response only).",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "restaurantService": {
+            "description": "Meal service associated with the order (response only).",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "revenueCenter": {
+            "description": "Revenue center assigned to the order.",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "source": {
+            "description": "Ordering channel reported by Toast (In Store, Online, API, Kiosk, Branded channels, Catering, etc.).",
+            "type": "string"
+          },
+          "duration": {
+            "description": "Seconds between creation and payment (response only).",
+            "type": "number"
+          },
+          "deliveryInfo": {
+            "description": "Delivery metadata required for orders fulfilled via DELIVERY behavior.",
+            "type": "object"
+          },
+          "requiredPrepTime": {
+            "description": "ISO-8601 duration overriding the default prep window (increments of five minutes).",
+            "format": "duration",
+            "type": "string"
+          },
+          "estimatedFulfillmentDate": {
+            "description": "Expected ready-for-pickup or delivery timestamp (response only).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "numberOfGuests": {
+            "description": "Number of guests associated with the order.",
+            "type": "number"
+          },
+          "voided": {
+            "description": "Set to true when the order was voided (response only).",
+            "type": "boolean"
+          },
+          "voidDate": {
+            "description": "Timestamp when the order was voided (response only).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "voidBusinessDate": {
+            "description": "Business date (yyyyMMdd) associated with the void (response only).",
+            "type": "number"
+          },
+          "paidDate": {
+            "description": "Most recent payment timestamp (defaults to current time on POST).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "closedDate": {
+            "description": "Timestamp when payment status transitioned to CLOSED.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "deletedDate": {
+            "description": "Timestamp when the order was deleted (1970 epoch when not deleted).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "deleted": {
+            "description": "True when the order has been deleted (response only).",
+            "type": "boolean"
+          },
+          "businessDate": {
+            "description": "Business date (yyyyMMdd) on which the order was fulfilled (response only).",
+            "type": "number"
+          },
+          "server": {
+            "description": "Employee assigned to the order.",
+            "type": "object",
+            "properties": {
+              "guid": {
+                "description": "Toast-maintained GUID for the referenced entity.",
+                "type": "string"
+              },
+              "entityType": {
+                "description": "Type discriminator returned by Toast (response only).",
+                "type": "string"
+              },
+              "externalId": {
+                "description": "External identifier string prefixed by the naming authority.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "guid"
+            ]
+          },
+          "pricingFeatures": {
+            "description": "Pricing features applied to the order (for example, TAXESV2, TAXESV3).",
+            "type": "array",
+            "items": {
+              "description": "Pricing feature",
+              "type": "string"
+            }
+          },
+          "approvalStatus": {
+            "description": "Approval workflow state for the order (response only).",
+            "enum": [
+              "NEEDS_APPROVAL",
+              "APPROVED",
+              "FUTURE",
+              "NOT_APPROVED"
+            ],
+            "type": "string"
+          },
+          "createdDevice": {
+            "description": "Toast POS device that created the order.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "Device identifier",
+                "type": "string"
+              }
+            }
+          },
+          "createdDate": {
+            "description": "Timestamp when Toast received the order.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "lastModifiedDevice": {
+            "description": "Toast POS device that last modified the order.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "Device identifier",
+                "type": "string"
+              }
+            }
+          },
+          "curbsidePickupInfo": {
+            "description": "Guest-provided curbside pickup identifiers.",
+            "type": "object"
+          },
+          "marketplaceFacilitatorTaxInfo": {
+            "description": "Marketplace facilitator tax metadata supplied on POST requests.",
+            "type": "object"
+          },
+          "createdInTestMode": {
+            "description": "True when the order was created while the restaurant was in test mode.",
+            "type": "boolean"
+          },
+          "appliedPackagingInfo": {
+            "description": "Guest packaging preferences for the order.",
+            "type": "object"
+          },
+          "excessFood": {
+            "description": "True when the order tracks excess food rather than a guest sale (response only).",
+            "type": "boolean"
+          },
+          "displayNumber": {
+            "description": "Display number printed on receipts/tickets (response only).",
+            "type": "string"
+          },
+          "context": {
+            "description": "Auxiliary Toast order context containing alternate timestamps and location metadata.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "diningOption",
+          "checks",
+          "guid"
+        ]
+      },
+      "ToastSelection": {
+        "title": "Selection",
+        "description": "Represents a primary menu item or modifier selection. Supports nested modifiers, pricing metadata, and fulfillment state.",
+        "type": "object",
+        "properties": {
+          "guid": {
+            "description": "Toast-maintained GUID for the referenced entity.",
+            "type": "string"
+          },
+          "entityType": {
+            "description": "Type discriminator returned by Toast (response only).",
+            "type": "string"
+          },
+          "externalId": {
+            "description": "External identifier string prefixed by the naming authority.",
+            "type": "string"
+          },
+          "item": {
+            "description": "Reference to the selected menu item.",
+            "type": "object"
+          },
+          "itemGroup": {
+            "description": "Menu group reference from which the item was selected.",
+            "type": "object"
+          },
+          "optionGroup": {
+            "description": "Modifier group reference for modifier selections.",
+            "type": "object"
+          },
+          "preModifier": {
+            "description": "Selected pre-modifier reference.",
+            "type": "object"
+          },
+          "quantity": {
+            "description": "Quantity ordered (supports decimals for weighted items).",
+            "type": "number"
+          },
+          "seatNumber": {
+            "description": "Seat assignment for the selection (response only, 0 = shared, -1 = unassigned).",
+            "type": "number"
+          },
+          "unitOfMeasure": {
+            "description": "Unit of measure required for weighed items.",
+            "enum": [
+              "NONE",
+              "LB",
+              "OZ",
+              "KG",
+              "G"
+            ],
+            "type": "string"
+          },
+          "selectionType": {
+            "description": "Classification for the selection (OPEN_ITEM, SPECIAL_REQUEST, HOUSE_ACCOUNT_PAY_BALANCE, etc.).",
+            "enum": [
+              "NONE",
+              "OPEN_ITEM",
+              "SPECIAL_REQUEST",
+              "PORTION",
+              "HOUSE_ACCOUNT_PAY_BALANCE",
+              "TOAST_CARD_SELL",
+              "TOAST_CARD_RELOAD"
+            ],
+            "type": "string"
+          },
+          "salesCategory": {
+            "description": "Sales category reference associated with the selection (response only).",
+            "type": "object"
+          },
+          "appliedDiscounts": {
+            "description": "Discounts applied directly to this selection (response only).",
+            "type": "array",
+            "items": {
+              "description": "Applied discount",
+              "type": "object"
+            }
+          },
+          "deferred": {
+            "description": "True when the selection tracks deferred revenue (for example, gift card).",
+            "type": "boolean"
+          },
+          "preDiscountPrice": {
+            "description": "Gross sale price before discounts (response only).",
+            "type": "number"
+          },
+          "price": {
+            "description": "Net price after discounts and modifiers (response only).",
+            "type": "number"
+          },
+          "tax": {
+            "description": "Total tax amount collected for this selection (response only).",
+            "type": "number"
+          },
+          "voided": {
+            "description": "True when the selection was voided (response only).",
+            "type": "boolean"
+          },
+          "voidDate": {
+            "description": "Timestamp when the selection was voided (response only).",
+            "format": "date-time",
+            "type": "string"
+          },
+          "voidBusinessDate": {
+            "description": "Business date (yyyyMMdd) when the selection was voided (response only).",
+            "type": "number"
+          },
+          "voidReason": {
+            "description": "Void reason reference (response only).",
+            "type": "object"
+          },
+          "refundDetails": {
+            "description": "Refund metadata for the selection.",
+            "type": "object"
+          },
+          "displayName": {
+            "description": "Display name for the selection (also used for special request text).",
+            "type": "string"
+          },
+          "createdDate": {
+            "description": "Timestamp when the selection was created.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "modifiedDate": {
+            "description": "Timestamp when the selection was last modified.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "modifiers": {
+            "description": "Nested modifier selections applied to this selection.",
+            "type": "array",
+            "items": {
+              "description": "Modifier selection",
+              "type": "object"
+            }
+          },
+          "fulfillmentStatus": {
+            "description": "Kitchen display workflow status (response only).",
+            "enum": [
+              "NEW",
+              "HOLD",
+              "SENT",
+              "READY"
+            ],
+            "type": "string"
+          },
+          "fulfillment": {
+            "description": "Fulfillment requirements for the selection (response only).",
+            "type": "object"
+          },
+          "taxInclusion": {
+            "description": "Indicates whether the selection price includes tax or inherits from parent.",
+            "enum": [
+              "INCLUDED",
+              "NOT_INCLUDED",
+              "INHERITED"
+            ],
+            "type": "string"
+          },
+          "appliedTaxes": {
+            "description": "Tax breakdown applied to the selection (response only).",
+            "type": "array",
+            "items": {
+              "description": "Applied tax rate",
+              "type": "object"
+            }
+          },
+          "diningOption": {
+            "description": "Dining option reference applied to the selection (response only).",
+            "type": "object"
+          },
+          "openPriceAmount": {
+            "description": "Open-price override amount supplied at order time (POST only).",
+            "type": "number"
+          },
+          "receiptLinePrice": {
+            "description": "Price before quantity, taxes, or discounts are applied.",
+            "type": "number"
+          },
+          "optionGroupPricingMode": {
+            "description": "Pricing mode inherited from the associated modifier group.",
+            "enum": [
+              "INCLUDED",
+              "FIXED_PRICE",
+              "ADJUSTS_PRICE",
+              "REPLACES_PRICE",
+              "LOCATION_SPECIFIC_PRICE"
+            ],
+            "type": "string"
+          },
+          "externalPriceAmount": {
+            "description": "Marketplace facilitator calculated price (POST only).",
+            "type": "number"
+          },
+          "splitOrigin": {
+            "description": "Reserved Toast reference for split operations.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "guid",
+          "item",
+          "itemGroup",
+          "quantity"
+        ]
+      },
+      "UpstreamSummary": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "enum": [
+              "direct",
+              "network"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": true
+              },
+              {
+                "type": "array",
+                "items": {}
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Parsed upstream body when available."
+          },
+          "errorMessage": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "ok",
+          "status",
+          "body"
+        ]
+      },
+      "UpstreamTrace": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "enum": [
+              "direct",
+              "network"
+            ]
+          },
+          "internalFallbackUsed": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "absoluteUrl": {
+            "type": "string"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bytes": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snippet": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cacheStatus": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cacheHit": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updatedAt": {
+            "oneOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "url",
+          "absoluteUrl"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "parameters": {
+      "MenusRefresh": {
+        "name": "refresh",
+        "in": "query",
+        "description": "Force a synchronous refresh of the published menu when set to a truthy value.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "OrdersDetailedDebug": {
+        "name": "debug",
+        "in": "query",
+        "description": "Include detailed diagnostics when enabled and the worker permits debug output.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "OrdersDetailedEnd": {
+        "name": "end",
+        "in": "query",
+        "description": "ISO-8601 timestamp for the latest order to include.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "OrdersDetailedFulfillmentStatus": {
+        "name": "fulfillmentStatus",
+        "in": "query",
+        "description": "Filter by normalized item fulfillment statuses. May be repeated or comma separated.",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "NEW",
+              "HOLD",
+              "SENT",
+              "READY"
+            ]
+          }
+        },
+        "style": "form",
+        "explode": true
+      },
+      "OrdersDetailedLimit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Maximum number of expanded orders to return (defaults to 5, maximum 500).",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 5
+        }
+      },
+      "OrdersDetailedLocationId": {
+        "name": "locationId",
+        "in": "query",
+        "description": "Restrict results to the specified Toast location GUID.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "OrdersDetailedMinutes": {
+        "name": "minutes",
+        "in": "query",
+        "description": "Look back this many minutes from \"now\" when no explicit window is provided.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "OrdersDetailedRefresh": {
+        "name": "refresh",
+        "in": "query",
+        "description": "Forwarded to `/api/menus` to force a synchronous refresh when set to `1`.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "OrdersDetailedStart": {
+        "name": "start",
+        "in": "query",
+        "description": "ISO-8601 timestamp for the earliest order to include.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "OrdersDetailedStatus": {
+        "name": "status",
+        "in": "query",
+        "description": "Filter orders by Toast status (case insensitive).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "OrdersLatestBusinessDate": {
+        "name": "businessDate",
+        "in": "query",
+        "description": "Explicit Toast business date (yyyyMMdd) to anchor the fetch window.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{8}$"
+        }
+      },
+      "OrdersLatestDebug": {
+        "name": "debug",
+        "in": "query",
+        "description": "Include extended diagnostics when `true` and the worker runs with `DEBUG` enabled.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "OrdersLatestDetail": {
+        "name": "detail",
+        "in": "query",
+        "description": "Toggle payload verbosity (`full` returns hydrated orders, `ids` returns GUIDs only).",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "full",
+            "ids"
+          ],
+          "default": "full"
+        }
+      },
+      "OrdersLatestEnd": {
+        "name": "end",
+        "in": "query",
+        "description": "ISO-8601 timestamp that constrains the upper bound of the fetch window.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "OrdersLatestLimit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Maximum number of orders to return (defaults to 5).",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 5
+        }
+      },
+      "OrdersLatestMinutes": {
+        "name": "minutes",
+        "in": "query",
+        "description": "Override the rolling window with an explicit lookback in minutes.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "OrdersLatestPageSize": {
+        "name": "pageSize",
+        "in": "query",
+        "description": "Hint for the Toast bulk API page size (advanced diagnostics only).",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "OrdersLatestSince": {
+        "name": "since",
+        "in": "query",
+        "description": "Override the internal cursor with an ISO-8601 timestamp (debugging aid).",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "OrdersLatestStart": {
+        "name": "start",
+        "in": "query",
+        "description": "ISO-8601 timestamp that constrains the lower bound of the fetch window.",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "OrdersLatestTimeZone": {
+        "name": "timeZone",
+        "in": "query",
+        "description": "IANA time zone identifier used to interpret time-based parameters (defaults to UTC).",
+        "schema": {
+          "type": "string",
+          "default": "UTC"
+        }
+      }
+    }
+  }
+}
