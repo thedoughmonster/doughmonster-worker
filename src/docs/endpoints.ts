@@ -1204,6 +1204,13 @@ const schemaDefinitions: Record<string, SchemaNode> = {
       },
     },
   },
+  OpenApiDocument: {
+    kind: "json",
+    type: "object",
+    description:
+      "OpenAPI document describing the Doughmonster Worker HTTP interface.",
+    additionalProperties: true,
+  },
 };
 
 const parameterDefinitions: Record<string, ParameterDefinition> = {
@@ -1397,6 +1404,30 @@ const endpoints: EndpointDefinition[] = [
         description: "Worker is available.",
         content: {
           "application/json": { kind: "ref", ref: "HealthResponse" },
+        },
+      },
+    ],
+  },
+  {
+    path: "/api/docs/openapi.json",
+    method: "get",
+    summary: "Fetch the OpenAPI definition",
+    description:
+      "Returns the OpenAPI schema for the Doughmonster Worker API, suitable for AI agents and client code generation.",
+    tags: ["Documentation"],
+    responses: [
+      {
+        status: 200,
+        description: "OpenAPI schema returned successfully.",
+        headers: {
+          "Cache-Control": {
+            description:
+              "Hints that the schema can be cached by clients for five minutes while allowing stale reuse for a day.",
+            schema: { kind: "json", type: "string" },
+          },
+        },
+        content: {
+          "application/json": { kind: "ref", ref: "OpenApiDocument" },
         },
       },
     ],
@@ -1640,6 +1671,7 @@ export const apiDocs: ApiDocsMetadata = {
     },
   ],
   tags: [
+    { name: "Documentation" },
     { name: "Health" },
     { name: "Menus" },
     { name: "Orders" },

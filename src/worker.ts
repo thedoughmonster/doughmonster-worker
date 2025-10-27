@@ -5,6 +5,8 @@ import ordersLatestHandler from "./routes/api/orders/latest";
 import ordersDetailedHandler from "./routes/orders-detailed.js";
 import ordersMergedHandler from "./routes/api/orders-merged";
 import configSnapshotHandler from "./routes/api/config-snapshot";
+import openApiDocumentHandler from "./routes/api/docs/openapi";
+import docsIndexHandler from "./routes/docs/index";
 
 export const corsHeaders: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -77,6 +79,8 @@ router.get("/api/items-expanded", async (env, request) => {
 });
 router.get("/api/orders-merged", ordersMergedHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
+router.get("/api/docs/openapi.json", openApiDocumentHandler);
+router.get("/docs", docsIndexHandler);
 
 interface ExecutionContextLike {
   waitUntil(promise: Promise<unknown>): void;

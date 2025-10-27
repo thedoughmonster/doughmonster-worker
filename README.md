@@ -6,6 +6,8 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | Method | Path | Description | Example |
 | ------ | ---- | ----------- | ------- |
 | `GET` | `/api/health` | Simple uptime probe that always returns `{ "ok": true }`. | `curl -i https://<worker>/api/health`
+| `GET` | `/api/docs/openapi.json` | Raw OpenAPI schema for the worker—ideal for AI agents and generated clients. | `curl -s "https://<worker>/api/docs/openapi.json" \| jq '.info.title'`
+| `GET` | `/docs` | ReDoc-powered HTML viewer that renders the same OpenAPI schema. | Visit `https://<worker>/docs`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders/latest` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders/latest?limit=10" \| jq` |
 | `GET` | `/api/orders-merged` | Fetches `/api/orders/latest` and `/api/menus`, returning both payloads without modifying either response body. | `curl -s "https://<worker>/api/orders-merged" \| jq` |
@@ -18,7 +20,7 @@ All of the API endpoints above are registered directly in `src/worker.ts`; `/api
 
 ### API documentation
 
-Run `npm run docs` to regenerate the structured OpenAPI definitions under `schemas/`. Both `openapi.json` and `openapi.yaml` are derived artifacts—commit the generated output, but do not edit either file manually.
+Run `npm run docs` to regenerate the structured OpenAPI definitions under `schemas/`. Both `openapi.json` and `openapi.yaml` are derived artifacts—commit the generated output, but do not edit either file manually. Once generated, the schema is served from `/api/docs/openapi.json` and rendered at `/docs` for humans and AI clients alike.
 
 ### Config Snapshot (1h cache)
 
