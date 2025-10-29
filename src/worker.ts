@@ -80,6 +80,7 @@ router.get("/api/items-expanded", async (env, request) => {
 router.get("/api/orders-merged", ordersMergedHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
 router.get("/api/docs/openapi.json", openApiDocumentHandler);
+router.get("/api/docs/openapi.js", openApiDocumentHandler);
 router.get("/docs", docsIndexHandler);
 
 interface ExecutionContextLike {

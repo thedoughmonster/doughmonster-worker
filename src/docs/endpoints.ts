@@ -1433,6 +1433,34 @@ const endpoints: EndpointDefinition[] = [
     ],
   },
   {
+    path: "/api/docs/openapi.js",
+    method: "get",
+    summary: "Fetch the OpenAPI definition as an ES module",
+    description:
+      "Returns the OpenAPI schema wrapped in a JavaScript module `export default` statement, useful for importing directly into documentation tooling.",
+    tags: ["Documentation"],
+    responses: [
+      {
+        status: 200,
+        description: "OpenAPI schema module returned successfully.",
+        headers: {
+          "Cache-Control": {
+            description:
+              "Hints that the schema can be cached by clients for five minutes while allowing stale reuse for a day.",
+            schema: { kind: "json", type: "string" },
+          },
+        },
+        content: {
+          "application/javascript": {
+            kind: "json",
+            type: "string",
+            description: "JavaScript module source code exporting the OpenAPI document.",
+          },
+        },
+      },
+    ],
+  },
+  {
     path: "/api/menus",
     method: "get",
     summary: "Retrieve the cached Toast menu document",
