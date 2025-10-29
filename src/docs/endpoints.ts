@@ -473,7 +473,7 @@ const schemaDefinitions: Record<string, SchemaNode> = {
         kind: "json",
         type: "string",
         description: "Echoed route path.",
-        example: "/api/orders/latest",
+        example: "/api/orders",
       },
       limit: { kind: "json", type: "integer" },
       detail: {
@@ -616,7 +616,7 @@ const schemaDefinitions: Record<string, SchemaNode> = {
       route: {
         kind: "json",
         type: "string",
-        example: "/api/orders/latest",
+        example: "/api/orders",
       },
       error: { kind: "json", type: "string" },
     },
@@ -1138,37 +1138,6 @@ const schemaDefinitions: Record<string, SchemaNode> = {
       errorMessage: { kind: "json", type: "string" },
     },
   },
-  OrdersMergedSuccess: {
-    kind: "json",
-    type: "object",
-    required: ["ok", "route", "orders", "menus"],
-    properties: {
-      ok: { kind: "json", type: "boolean", const: true },
-      route: {
-        kind: "json",
-        type: "string",
-        example: "/api/orders-merged",
-      },
-      orders: { kind: "ref", ref: "OrdersLatestResponse" },
-      menus: { kind: "ref", ref: "MenusResponse" },
-    },
-  },
-  OrdersMergedError: {
-    kind: "json",
-    type: "object",
-    required: ["ok", "route", "error", "orders", "menus"],
-    properties: {
-      ok: { kind: "json", type: "boolean", const: false },
-      route: {
-        kind: "json",
-        type: "string",
-        example: "/api/orders-merged",
-      },
-      error: { kind: "ref", ref: "ErrorObject" },
-      orders: { kind: "ref", ref: "UpstreamSummary" },
-      menus: { kind: "ref", ref: "UpstreamSummary" },
-    },
-  },
   ConfigSnapshotResponse: {
     kind: "json",
     type: "object",
@@ -1493,7 +1462,7 @@ const endpoints: EndpointDefinition[] = [
     ],
   },
   {
-    path: "/api/orders/latest",
+    path: "/api/orders",
     method: "get",
     summary: "Fetch the most recent Toast orders",
     description:
@@ -1523,132 +1492,6 @@ const endpoints: EndpointDefinition[] = [
         status: "default",
         description:
           "Error response emitted when the worker cannot return orders successfully.",
-        content: {
-          "application/json": { kind: "ref", ref: "ErrorResponse" },
-        },
-      },
-    ],
-  },
-  {
-    path: "/api/orders-detailed",
-    method: "get",
-    summary: "Retrieve expanded order details with menu enrichment",
-    description:
-      "Returns the most recent non-voided Toast orders enriched with menu metadata and normalized totals. The endpoint internally calls `/api/orders/latest` and `/api/menus`, applies filtering, and returns a deterministic list of expanded orders ready for presentation.",
-    tags: ["Orders"],
-    parameters: [
-      "OrdersDetailedLimit",
-      "OrdersDetailedStart",
-      "OrdersDetailedEnd",
-      "OrdersDetailedMinutes",
-      "OrdersDetailedStatus",
-      "OrdersDetailedFulfillmentStatus",
-      "OrdersDetailedLocationId",
-      "OrdersDetailedRefresh",
-      "OrdersDetailedDebug",
-    ],
-    responses: [
-      {
-        status: 200,
-        description: "Expanded orders returned successfully.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedSuccess" },
-        },
-      },
-      {
-        status: 502,
-        description: "One or more upstream dependencies failed.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedError" },
-        },
-      },
-      {
-        status: "default",
-        description: "Unexpected error response.",
-        content: {
-          "application/json": { kind: "ref", ref: "ErrorResponse" },
-        },
-      },
-    ],
-  },
-  {
-    path: "/api/items-expanded",
-    method: "get",
-    summary: "Legacy alias for `/api/orders-detailed`",
-    description:
-      "Deprecated alias that proxies `/api/orders-detailed` and emits a `Deprecation: true` header. New clients should migrate to `/api/orders-detailed`.",
-    tags: ["Orders"],
-    deprecated: true,
-    parameters: [
-      "OrdersDetailedLimit",
-      "OrdersDetailedStart",
-      "OrdersDetailedEnd",
-      "OrdersDetailedMinutes",
-      "OrdersDetailedStatus",
-      "OrdersDetailedFulfillmentStatus",
-      "OrdersDetailedLocationId",
-      "OrdersDetailedRefresh",
-      "OrdersDetailedDebug",
-    ],
-    responses: [
-      {
-        status: 200,
-        description: "Expanded orders returned successfully.",
-        headers: {
-          Deprecation: {
-            description: "Signals that the alias will be removed in a future release.",
-            schema: { kind: "json", type: "string", enum: ["true"] },
-          },
-          Link: {
-            description: "Indicates the canonical successor endpoint.",
-            schema: { kind: "json", type: "string" },
-          },
-        },
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedSuccess" },
-        },
-      },
-      {
-        status: 502,
-        description: "One or more upstream dependencies failed.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedError" },
-        },
-      },
-      {
-        status: "default",
-        description: "Unexpected error response.",
-        content: {
-          "application/json": { kind: "ref", ref: "ErrorResponse" },
-        },
-      },
-    ],
-  },
-  {
-    path: "/api/orders-merged",
-    method: "get",
-    summary: "Retrieve orders and menus payloads together",
-    description:
-      "Calls `/api/orders/latest` and `/api/menus`, returning their bodies unchanged inside a single payload.",
-    tags: ["Orders"],
-    responses: [
-      {
-        status: 200,
-        description: "Orders and menus were retrieved successfully.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersMergedSuccess" },
-        },
-      },
-      {
-        status: 502,
-        description: "At least one upstream response failed or was not valid JSON.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersMergedError" },
-        },
-      },
-      {
-        status: "default",
-        description: "Unexpected error response.",
         content: {
           "application/json": { kind: "ref", ref: "ErrorResponse" },
         },

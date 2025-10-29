@@ -19,7 +19,7 @@ import type {
 } from "./orders-detailed/types-local.js";
 import type { ToastCheck, ToastOrder } from "../types/toast-orders.js";
 
-const ORDERS_ENDPOINT = "/api/orders/latest";
+const ORDERS_ENDPOINT = "/api/orders";
 const MENUS_ENDPOINT = "/api/menus";
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 500;

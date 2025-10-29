@@ -91,62 +91,6 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/HealthResponse"
-  /api/items-expanded:
-    get:
-      summary: "Legacy alias for `/api/orders-detailed`"
-      description: "Deprecated alias that proxies `/api/orders-detailed` and emits a `Deprecation: true` header. New clients should migrate to `/api/orders-detailed`."
-      tags:
-        - Orders
-      responses:
-        200:
-          description: "Expanded orders returned successfully."
-          headers:
-            Deprecation:
-              schema:
-                type: string
-                enum:
-                  - true
-              description: "Signals that the alias will be removed in a future release."
-            Link:
-              schema:
-                type: string
-              description: "Indicates the canonical successor endpoint."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedSuccess"
-        502:
-          description: "One or more upstream dependencies failed."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedError"
-        default:
-          description: "Unexpected error response."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/ErrorResponse"
-      deprecated: true
-      parameters:
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLimit"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStart"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedEnd"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedMinutes"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedFulfillmentStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLocationId"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedRefresh"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedDebug"
   /api/menus:
     get:
       summary: "Retrieve the cached Toast menu document"
@@ -175,76 +119,7 @@ paths:
       parameters:
         -
           "$ref": "#/components/parameters/MenusRefresh"
-  /api/orders-detailed:
-    get:
-      summary: "Retrieve expanded order details with menu enrichment"
-      description: "Returns the most recent non-voided Toast orders enriched with menu metadata and normalized totals. The endpoint internally calls `/api/orders/latest` and `/api/menus`, applies filtering, and returns a deterministic list of expanded orders ready for presentation."
-      tags:
-        - Orders
-      responses:
-        200:
-          description: "Expanded orders returned successfully."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedSuccess"
-        502:
-          description: "One or more upstream dependencies failed."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedError"
-        default:
-          description: "Unexpected error response."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/ErrorResponse"
-      parameters:
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLimit"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStart"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedEnd"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedMinutes"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedFulfillmentStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLocationId"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedRefresh"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedDebug"
-  /api/orders-merged:
-    get:
-      summary: "Retrieve orders and menus payloads together"
-      description: "Calls `/api/orders/latest` and `/api/menus`, returning their bodies unchanged inside a single payload."
-      tags:
-        - Orders
-      responses:
-        200:
-          description: "Orders and menus were retrieved successfully."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersMergedSuccess"
-        502:
-          description: "At least one upstream response failed or was not valid JSON."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersMergedError"
-        default:
-          description: "Unexpected error response."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/ErrorResponse"
-  /api/orders/latest:
+  /api/orders:
     get:
       summary: "Fetch the most recent Toast orders"
       description: "Returns the most recent Toast orders using the worker's incremental KV-backed cache. By default the worker returns the five newest orders with full detail. Pass `detail=ids` to receive only the GUIDs while retaining ordering."
@@ -924,7 +799,7 @@ components:
         route:
           description: "Echoed route path."
           type: string
-          example: /api/orders/latest
+          example: /api/orders
         limit:
           type: integer
         detail:
@@ -1183,7 +1058,7 @@ components:
           const: false
         route:
           type: string
-          example: /api/orders/latest
+          example: /api/orders
         error:
           type: string
       required:
@@ -1251,45 +1126,6 @@ components:
                 type: string
           required:
             - orders
-    OrdersMergedError:
-      type: object
-      properties:
-        ok:
-          type: boolean
-          const: false
-        route:
-          type: string
-          example: /api/orders-merged
-        error:
-          "$ref": "#/components/schemas/ErrorObject"
-        orders:
-          "$ref": "#/components/schemas/UpstreamSummary"
-        menus:
-          "$ref": "#/components/schemas/UpstreamSummary"
-      required:
-        - ok
-        - route
-        - error
-        - orders
-        - menus
-    OrdersMergedSuccess:
-      type: object
-      properties:
-        ok:
-          type: boolean
-          const: true
-        route:
-          type: string
-          example: /api/orders-merged
-        orders:
-          "$ref": "#/components/schemas/OrdersLatestResponse"
-        menus:
-          "$ref": "#/components/schemas/MenusResponse"
-      required:
-        - ok
-        - route
-        - orders
-        - menus
     ToastCheck:
       title: Check
       description: "Represents a single check within an order, containing selections, discounts, service charges, and payments."
