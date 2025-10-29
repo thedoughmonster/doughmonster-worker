@@ -2,8 +2,7 @@ import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
-import ordersDetailedHandler from "./routes/orders-detailed.js";
-import ordersMergedHandler from "./routes/api/orders-merged";
+import itemsExpandedHandler from "./routes/orders-detailed.js";
 import configSnapshotHandler from "./routes/api/config-snapshot";
 import openApiDocumentHandler from "./routes/api/docs/openapi";
 import docsIndexHandler from "./routes/docs/index";
@@ -64,20 +63,8 @@ class WorkerRouter {
 const router = new WorkerRouter();
 
 router.get("/api/menus", menusHandler);
-router.get("/api/orders/latest", ordersLatestHandler);
-router.get("/api/orders-detailed", ordersDetailedHandler);
-router.get("/api/items-expanded", async (env, request) => {
-  const response = await ordersDetailedHandler(env, request);
-  const headers = new Headers(response.headers);
-  headers.set("Deprecation", "true");
-  headers.set("Link", "</api/orders-detailed>; rel=\"successor-version\"");
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-});
-router.get("/api/orders-merged", ordersMergedHandler);
+router.get("/api/orders", ordersLatestHandler);
+router.get("/api/items-expanded", itemsExpandedHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
 router.get("/api/docs/openapi.json", openApiDocumentHandler);
 router.get("/api/docs/openapi.js", openApiDocumentHandler);

@@ -59,7 +59,7 @@ function buildResponse(orders, nextPage) {
   return { orders, nextPage };
 }
 
-test('orders/latest returns every order for the requested business date', async () => {
+test('orders route returns every order for the requested business date', async () => {
   const env = createEnv();
   const calls = [];
   const responses = [
@@ -82,7 +82,7 @@ test('orders/latest returns every order for the requested business date', async 
 
   const response = await handler(
     env,
-    new Request('https://worker.test/api/orders/latest?businessDate=20241010')
+    new Request('https://worker.test/api/orders?businessDate=20241010')
   );
   const body = await response.json();
 
@@ -107,7 +107,7 @@ test('orders/latest returns every order for the requested business date', async 
   assert.equal(calls[1].page, 2);
 });
 
-test('orders/latest forwards pageSize query parameter', async () => {
+test('orders route forwards pageSize query parameter', async () => {
   const env = createEnv();
   const calls = [];
   const handler = createOrdersLatestHandler({
@@ -119,7 +119,7 @@ test('orders/latest forwards pageSize query parameter', async () => {
 
   const response = await handler(
     env,
-    new Request('https://worker.test/api/orders/latest?businessDate=20241010&pageSize=7')
+    new Request('https://worker.test/api/orders?businessDate=20241010&pageSize=7')
   );
   const body = await response.json();
 
@@ -129,7 +129,7 @@ test('orders/latest forwards pageSize query parameter', async () => {
   assert.equal(calls[0].pageSize, 7);
 });
 
-test('orders/latest supports detail=ids and omits data payload', async () => {
+test('orders route supports detail=ids and omits data payload', async () => {
   const env = createEnv();
   const handler = createOrdersLatestHandler({
     async getOrdersBulk() {
@@ -142,7 +142,7 @@ test('orders/latest supports detail=ids and omits data payload', async () => {
 
   const response = await handler(
     env,
-    new Request('https://worker.test/api/orders/latest?detail=ids&businessDate=20241011')
+    new Request('https://worker.test/api/orders?detail=ids&businessDate=20241011')
   );
   const body = await response.json();
 
@@ -152,7 +152,7 @@ test('orders/latest supports detail=ids and omits data payload', async () => {
   assert.equal('data' in body, false);
 });
 
-test('orders/latest uses the configured time zone when building the request window', async () => {
+test('orders route uses the configured time zone when building the request window', async () => {
   const env = createEnv({ TOAST_TIME_ZONE: 'America/Los_Angeles' });
   const calls = [];
   const handler = createOrdersLatestHandler({
@@ -164,7 +164,7 @@ test('orders/latest uses the configured time zone when building the request wind
 
   const response = await handler(
     env,
-    new Request('https://worker.test/api/orders/latest?businessDate=20240704')
+    new Request('https://worker.test/api/orders?businessDate=20240704')
   );
   const body = await response.json();
 

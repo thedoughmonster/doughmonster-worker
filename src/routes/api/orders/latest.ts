@@ -102,7 +102,7 @@ export function createOrdersLatestHandler(
 
       const responseBody: any = {
         ok: true,
-        route: "/api/orders/latest",
+        route: "/api/orders",
         limit,
         detail,
         minutes: windowInfo.minutes,
@@ -131,7 +131,7 @@ export function createOrdersLatestHandler(
       return jsonResponse(
         {
           ok: false,
-          route: "/api/orders/latest",
+          route: "/api/orders",
           error: errorMessage,
         },
         { status: statusCode }
