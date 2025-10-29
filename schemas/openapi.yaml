@@ -91,50 +91,6 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/HealthResponse"
-  /api/items-expanded:
-    get:
-      summary: "Fetch expanded orders enriched with menu metadata"
-      description: "Builds expanded orders by combining the latest Toast orders with menu metadata. Supports the same filtering, debug, and refresh controls as the legacy `/api/orders-detailed` endpoint."
-      tags:
-        - Orders
-      responses:
-        200:
-          description: "Expanded orders returned successfully."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedSuccess"
-        502:
-          description: "One or more upstream dependencies failed."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/OrdersDetailedError"
-        default:
-          description: "Unexpected error response."
-          content:
-            application/json:
-              schema:
-                "$ref": "#/components/schemas/ErrorResponse"
-      parameters:
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLimit"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStart"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedEnd"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedMinutes"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedFulfillmentStatus"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedLocationId"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedRefresh"
-        -
-          "$ref": "#/components/parameters/OrdersDetailedDebug"
   /api/menus:
     get:
       summary: "Retrieve the cached Toast menu document"

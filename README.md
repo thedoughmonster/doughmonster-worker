@@ -11,7 +11,6 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/docs` | ReDoc-powered HTML viewer that renders the same OpenAPI schema. | Visit `https://<worker>/docs`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders?limit=10" \| jq` |
-| `GET` | `/api/items-expanded` | Builds enriched order snapshots by pairing `/api/orders` data with the cached menu document. Supports the same filtering, debug, and refresh controls as the former `/api/orders-detailed` route. | `curl -s "https://<worker>/api/items-expanded?limit=3" \| jq` |
 | `GET` | `/api/config/snapshot` | Fetches a fixed set of Toast configuration slices and caches the merged payload for 1 hour. | `curl -s "https://<worker>/api/config/snapshot" \| jq` |
 
 All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders` are mounted on the worker router so downstream handlers can self-fetch them without leaving the worker boundary.
@@ -73,13 +72,6 @@ When the worker runs with `DEBUG` set and you append `?debug=1` (or `?debug=true
 
 Production consumers should continue calling the endpoint without `debug`; the telemetry fields are optional and only materialize when explicitly requested so the normal payload and caching behavior remain unchanged.
 
-### `/api/items-expanded`
-This handler pairs the cached menu document with the most recent orders to emit enriched snapshots that are ready for dashboards and kitchen displays.
-
-- Supports the same `limit`, `start`, `end`, `minutes`, `status`, `fulfillmentStatus`, `locationId`, `refresh`, and `debug` parameters documented for the legacy `/api/orders-detailed` route.
-- Aggregates line items, modifier totals, and fulfillment metadata so downstream clients do not need to reimplement Toast-specific normalization.
-- Honors `?refresh=1` to force a menu revalidation before composing the response; otherwise the existing menu cache is reused for fast responses.
-
 ### `/api/menus`
 `GET /api/menus` responds with:
 
@@ -105,7 +97,7 @@ The published menu is cached in the shared `CACHE_KV` namespace:
 - The full document lives at `menu:published:v1`; metadata (`updatedAt`, `staleAt`, `expireAt`, optional `etag`) is stored at `menu:published:meta:v1`.
 - Reads are considered fresh for 30 minutes. Between 30 minutes and 24 hours the worker serves the cached document immediately and schedules a background refresh via `waitUntil`.
 - After 24 hours the worker blocks on Toast before replying and overwrites both KV entries with the new payload and timestamps.
-- Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1` or `/api/items-expanded?refresh=true`) forces a synchronous revalidate and updates the KV entries regardless of age.
+- Appending a truthy `refresh` query parameter to `/api/menus` (for example `/api/menus?refresh=1`) forces a synchronous revalidate and updates the KV entries regardless of age.
 - Responses that rely on the cached menu surface `cacheInfo.menuUpdatedAt` so you can see when the document was last refreshed.
 
 ## Operations & Monitoring
@@ -114,7 +106,6 @@ The worker now ships without a dashboard or static asset pipeline; all operation
 
 - **Health probe:** `curl -i "$BASE_URL/api/health"` should return `200 OK` with `{ "ok": true }`.
 - **Order freshness:** `curl -s "$BASE_URL/api/orders?limit=5" | jq '.ids'` confirms cursor advancement.
-- **Expanded orders:** `curl -s "$BASE_URL/api/items-expanded?limit=3" | jq '.orders[0].items | length'` validates enrichment and aggregation.
 - **Config snapshot:** `curl -s "$BASE_URL/api/config/snapshot" | jq '.ttlSeconds'` surfaces cache TTLs and highlights stale slices.
 
 Set `BASE_URL` to either the production worker domain or your local dev URL (`http://127.0.0.1:8787`) before running the examples.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const module = await import('../dist/routes/items-expanded/compose.js');
+const module = await import('../dist/routes/orders-detailed/compose.js');
 const { buildExpandedOrders, __private } = module;
 
 function createOrdersPayload() {
@@ -39,7 +39,7 @@ function createOrdersPayload() {
   };
 }
 
-test('items-expanded builder reuses memoized orders for identical payloads', () => {
+test('orders-detailed builder reuses memoized orders for identical payloads', () => {
   __private.resetOrderCacheForTests();
 
   const payload = createOrdersPayload();

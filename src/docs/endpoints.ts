@@ -1499,48 +1499,6 @@ const endpoints: EndpointDefinition[] = [
     ],
   },
   {
-    path: "/api/items-expanded",
-    method: "get",
-    summary: "Fetch expanded orders enriched with menu metadata",
-    description:
-      "Builds expanded orders by combining the latest Toast orders with menu metadata. Supports the same filtering, debug, and refresh controls as the legacy `/api/orders-detailed` endpoint.",
-    tags: ["Orders"],
-    parameters: [
-      "OrdersDetailedLimit",
-      "OrdersDetailedStart",
-      "OrdersDetailedEnd",
-      "OrdersDetailedMinutes",
-      "OrdersDetailedStatus",
-      "OrdersDetailedFulfillmentStatus",
-      "OrdersDetailedLocationId",
-      "OrdersDetailedRefresh",
-      "OrdersDetailedDebug",
-    ],
-    responses: [
-      {
-        status: 200,
-        description: "Expanded orders returned successfully.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedSuccess" },
-        },
-      },
-      {
-        status: 502,
-        description: "One or more upstream dependencies failed.",
-        content: {
-          "application/json": { kind: "ref", ref: "OrdersDetailedError" },
-        },
-      },
-      {
-        status: "default",
-        description: "Unexpected error response.",
-        content: {
-          "application/json": { kind: "ref", ref: "ErrorResponse" },
-        },
-      },
-    ],
-  },
-  {
     path: "/api/config/snapshot",
     method: "get",
     summary: "Fetch Toast configuration snapshot",

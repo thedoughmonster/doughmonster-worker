@@ -2,7 +2,6 @@ import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
-import itemsExpandedHandler from "./routes/orders-detailed.js";
 import configSnapshotHandler from "./routes/api/config-snapshot";
 import openApiDocumentHandler from "./routes/api/docs/openapi";
 import docsIndexHandler from "./routes/docs/index";
@@ -64,7 +63,6 @@ const router = new WorkerRouter();
 
 router.get("/api/menus", menusHandler);
 router.get("/api/orders", ordersLatestHandler);
-router.get("/api/items-expanded", itemsExpandedHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
 router.get("/api/docs/openapi.json", openApiDocumentHandler);
 router.get("/api/docs/openapi.js", openApiDocumentHandler);
