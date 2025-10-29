@@ -41,6 +41,25 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/ErrorResponse"
+  /api/docs/openapi.js:
+    get:
+      summary: "Fetch the OpenAPI definition as an ES module"
+      description: "Returns the OpenAPI schema wrapped in a JavaScript module `export default` statement, useful for importing directly into documentation tooling."
+      tags:
+        - Documentation
+      responses:
+        200:
+          description: "OpenAPI schema module returned successfully."
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: "Hints that the schema can be cached by clients for five minutes while allowing stale reuse for a day."
+          content:
+            application/javascript:
+              schema:
+                description: "JavaScript module source code exporting the OpenAPI document."
+                type: string
   /api/docs/openapi.json:
     get:
       summary: "Fetch the OpenAPI definition"
