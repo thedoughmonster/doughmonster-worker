@@ -3,6 +3,7 @@ import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
 import configSnapshotHandler from "./routes/api/config-snapshot";
+import kitchenPrepStationsHandler from "./routes/api/kitchen/prep-stations";
 import openApiDocumentHandler from "./routes/api/docs/openapi";
 import docsIndexHandler from "./routes/docs/index";
 
@@ -64,6 +65,7 @@ const router = new WorkerRouter();
 router.get("/api/menus", menusHandler);
 router.get("/api/orders", ordersLatestHandler);
 router.get("/api/config/snapshot", configSnapshotHandler);
+router.get("/api/kitchen/prep-stations", kitchenPrepStationsHandler);
 router.get("/api/docs/openapi.json", openApiDocumentHandler);
 router.get("/api/docs/openapi.js", openApiDocumentHandler);
 router.get("/docs", docsIndexHandler);

@@ -199,6 +199,11 @@ const schemaDefinitions: Record<string, SchemaNode> = {
     schema: "modifierOption",
     description: toastSchemas.modifierOption.description,
   },
+  ToastPrepStation: {
+    kind: "toast",
+    schema: "prepStation",
+    description: toastSchemas.prepStation.description,
+  },
   MenusSuccess: {
     kind: "json",
     type: "object",
@@ -627,6 +632,81 @@ const schemaDefinitions: Record<string, SchemaNode> = {
       { kind: "ref", ref: "OrdersLatestSuccessFull" },
       { kind: "ref", ref: "OrdersLatestSuccessIds" },
       { kind: "ref", ref: "OrdersLatestError" },
+    ],
+  },
+  KitchenPrepStationsSuccess: {
+    kind: "json",
+    type: "object",
+    required: ["ok", "route", "count", "prepStations", "nextPageToken", "request"],
+    properties: {
+      ok: { kind: "json", type: "boolean", const: true },
+      route: {
+        kind: "json",
+        type: "string",
+        const: "/api/kitchen/prep-stations",
+      },
+      count: { kind: "json", type: "integer" },
+      prepStations: {
+        kind: "json",
+        type: "array",
+        items: { kind: "ref", ref: "ToastPrepStation" },
+      },
+      nextPageToken: {
+        kind: "oneOf",
+        oneOf: [
+          { kind: "json", type: "string" },
+          { kind: "json", type: "null" },
+        ],
+      },
+      request: {
+        kind: "json",
+        type: "object",
+        required: ["pageToken", "lastModified"],
+        properties: {
+          pageToken: {
+            kind: "oneOf",
+            oneOf: [
+              { kind: "json", type: "string" },
+              { kind: "json", type: "null" },
+            ],
+          },
+          lastModified: {
+            kind: "oneOf",
+            oneOf: [
+              { kind: "json", type: "string" },
+              { kind: "json", type: "null" },
+            ],
+          },
+        },
+      },
+      raw: {
+        kind: "json",
+        type: "object",
+        additionalProperties: true,
+      },
+    },
+  },
+  KitchenPrepStationsError: {
+    kind: "json",
+    type: "object",
+    required: ["ok", "route", "error"],
+    additionalProperties: true,
+    properties: {
+      ok: { kind: "json", type: "boolean", const: false },
+      route: {
+        kind: "json",
+        type: "string",
+        const: "/api/kitchen/prep-stations",
+      },
+      error: { kind: "json", type: "string" },
+      code: { kind: "json", type: "string" },
+    },
+  },
+  KitchenPrepStationsResponse: {
+    kind: "oneOf",
+    oneOf: [
+      { kind: "ref", ref: "KitchenPrepStationsSuccess" },
+      { kind: "ref", ref: "KitchenPrepStationsError" },
     ],
   },
   ExpandedOrderItemModifier: {
@@ -1358,6 +1438,20 @@ const parameterDefinitions: Record<string, ParameterDefinition> = {
       "Force a synchronous refresh of the published menu when set to a truthy value.",
     schema: { kind: "json", type: "boolean" },
   },
+  KitchenPrepStationsPageToken: {
+    name: "pageToken",
+    in: "query",
+    description:
+      "Pagination token returned by a previous Toast Kitchen API call. Forward the value to retrieve the next page.",
+    schema: { kind: "json", type: "string" },
+  },
+  KitchenPrepStationsLastModified: {
+    name: "lastModified",
+    in: "query",
+    description:
+      "Only return prep stations created or modified after the provided Toast timestamp (for example `2021-12-01T00:00:00.000+0000`).",
+    schema: { kind: "json", type: "string" },
+  },
 };
 
 const endpoints: EndpointDefinition[] = [
@@ -1499,6 +1593,34 @@ const endpoints: EndpointDefinition[] = [
     ],
   },
   {
+    path: "/api/kitchen/prep-stations",
+    method: "get",
+    summary: "List Toast kitchen prep stations",
+    description:
+      "Returns the published Toast prep station configuration for the configured restaurant. Supports pagination via `pageToken` and incremental syncs with `lastModified`.",
+    tags: ["Kitchen"],
+    parameters: [
+      "KitchenPrepStationsPageToken",
+      "KitchenPrepStationsLastModified",
+    ],
+    responses: [
+      {
+        status: 200,
+        description: "Prep stations fetched successfully.",
+        content: {
+          "application/json": { kind: "ref", ref: "KitchenPrepStationsResponse" },
+        },
+      },
+      {
+        status: "default",
+        description: "Unexpected error response.",
+        content: {
+          "application/json": { kind: "ref", ref: "ErrorResponse" },
+        },
+      },
+    ],
+  },
+  {
     path: "/api/config/snapshot",
     method: "get",
     summary: "Fetch Toast configuration snapshot",
@@ -1546,6 +1668,7 @@ export const apiDocs: ApiDocsMetadata = {
     { name: "Health" },
     { name: "Menus" },
     { name: "Orders" },
+    { name: "Kitchen" },
     { name: "Configuration" },
   ],
   schemas: schemaDefinitions,

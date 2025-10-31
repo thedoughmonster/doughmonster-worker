@@ -20,6 +20,8 @@ tags:
   -
     name: Orders
   -
+    name: Kitchen
+  -
     name: Configuration
 paths:
   /api/config/snapshot:
@@ -91,6 +93,30 @@ paths:
             application/json:
               schema:
                 "$ref": "#/components/schemas/HealthResponse"
+  /api/kitchen/prep-stations:
+    get:
+      summary: "List Toast kitchen prep stations"
+      description: "Returns the published Toast prep station configuration for the configured restaurant. Supports pagination via `pageToken` and incremental syncs with `lastModified`."
+      tags:
+        - Kitchen
+      responses:
+        200:
+          description: "Prep stations fetched successfully."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/KitchenPrepStationsResponse"
+        default:
+          description: "Unexpected error response."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ErrorResponse"
+      parameters:
+        -
+          "$ref": "#/components/parameters/KitchenPrepStationsPageToken"
+        -
+          "$ref": "#/components/parameters/KitchenPrepStationsLastModified"
   /api/menus:
     get:
       summary: "Retrieve the cached Toast menu document"
@@ -617,6 +643,79 @@ components:
           const: true
       required:
         - ok
+    KitchenPrepStationsError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          const: false
+        route:
+          type: string
+          const: /api/kitchen/prep-stations
+        error:
+          type: string
+        code:
+          type: string
+      required:
+        - ok
+        - route
+        - error
+      additionalProperties: true
+    KitchenPrepStationsResponse:
+      oneOf:
+        -
+          "$ref": "#/components/schemas/KitchenPrepStationsSuccess"
+        -
+          "$ref": "#/components/schemas/KitchenPrepStationsError"
+    KitchenPrepStationsSuccess:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          const: true
+        route:
+          type: string
+          const: /api/kitchen/prep-stations
+        count:
+          type: integer
+        prepStations:
+          type: array
+          items:
+            "$ref": "#/components/schemas/ToastPrepStation"
+        nextPageToken:
+          oneOf:
+            -
+              type: string
+            -
+              type: null
+        request:
+          type: object
+          properties:
+            pageToken:
+              oneOf:
+                -
+                  type: string
+                -
+                  type: null
+            lastModified:
+              oneOf:
+                -
+                  type: string
+                -
+                  type: null
+          required:
+            - pageToken
+            - lastModified
+        raw:
+          type: object
+          additionalProperties: true
+      required:
+        - ok
+        - route
+        - count
+        - prepStations
+        - nextPageToken
+        - request
     MenusResponse:
       oneOf:
         -
@@ -1685,6 +1784,65 @@ components:
         - diningOption
         - checks
         - guid
+    ToastPrepStation:
+      title: PrepStation
+      description: "Kitchen prep station configuration representing a printer or KDS destination for routed orders."
+      type: object
+      properties:
+        guid:
+          description: "Toast-maintained GUID for the referenced entity."
+          type: string
+        entityType:
+          description: "Type discriminator returned by Toast (response only)."
+          type: string
+        connectedPrepStations:
+          description: "Other prep stations monitored by this station to coordinate multi-station orders."
+          type: array
+          items:
+            description: "Prep station reference"
+            type: object
+            properties:
+              guid:
+                description: "Toast-maintained GUID for the referenced entity."
+                type: string
+              entityType:
+                description: "Type discriminator returned by Toast (response only)."
+                type: string
+            required:
+              - guid
+        printingMode:
+          description: "Printer routing behavior. `ON` prints every ticket, `OFFLINE_ONLY` only prints when the KDS is offline."
+          enum:
+            - ON
+            - OFFLINE_ONLY
+          type: string
+        includeWithExpediter:
+          description: "When true, also route tickets to the expediter device."
+          type: boolean
+        expoRouting:
+          description: "Expo routing strategy controlling how tickets flow between the station and expediter."
+          enum:
+            - SEND_TO_EXPO
+            - EXPO_ONLY
+            - SKIP_EXPO
+          type: string
+        name:
+          description: "Human readable prep station name."
+          type: string
+        kitchenPrinter:
+          description: "Printer associated with the prep station (if configured)."
+          type: object
+          properties:
+            guid:
+              description: "Toast-maintained GUID for the referenced entity."
+              type: string
+            entityType:
+              description: "Type discriminator returned by Toast (response only)."
+              type: string
+          required:
+            - guid
+      required:
+        - guid
     ToastSelection:
       title: Selection
       description: "Represents a primary menu item or modifier selection. Supports nested modifiers, pricing metadata, and fulfillment state."
@@ -1948,6 +2106,18 @@ components:
         - absoluteUrl
       additionalProperties: true
   parameters:
+    KitchenPrepStationsLastModified:
+      name: lastModified
+      in: query
+      description: "Only return prep stations created or modified after the provided Toast timestamp (for example `2021-12-01T00:00:00.000+0000`)."
+      schema:
+        type: string
+    KitchenPrepStationsPageToken:
+      name: pageToken
+      in: query
+      description: "Pagination token returned by a previous Toast Kitchen API call. Forward the value to retrieve the next page."
+      schema:
+        type: string
     MenusRefresh:
       name: refresh
       in: query

@@ -2,6 +2,7 @@ import type { AppEnv } from "../config/env.js";
 import { getToastHeaders } from "../lib/auth.js";
 import { fetchWithBackoff } from "../lib/http.js";
 import type { ToastMenusDocument } from "../types/toast-menus.js";
+import type { ToastPrepStation } from "../types/toast-kitchen.js";
 
 const MENU_CACHE_KEY = "menu:published:v1";
 const MENU_CACHE_META_KEY = "menu:published:meta:v1";
@@ -76,6 +77,18 @@ export interface DiningOptionConfig {
   name?: string | null;
 }
 
+export interface GetPrepStationsParams {
+  pageToken?: string | null;
+  lastModified?: string | null;
+}
+
+export interface PrepStationsResult {
+  prepStations: ToastPrepStation[];
+  nextPageToken: string | null;
+  raw: unknown;
+  responseHeaders: Record<string, string>;
+}
+
 export async function getOrdersBulk(env: AppEnv, params: GetOrdersBulkParams): Promise<OrdersBulkResult> {
   const base = env.TOAST_API_BASE.replace(/\/+$/, "");
   const url = new URL(`${base}/orders/v2/ordersBulk`);
@@ -133,6 +146,53 @@ export async function getOrderById(env: AppEnv, guid: string): Promise<any> {
   const headers = await getToastHeaders(env);
   const response = await fetchWithBackoff(url, { method: "GET", headers });
   return response.json();
+}
+
+export async function getPrepStations(
+  env: AppEnv,
+  params: GetPrepStationsParams = {}
+): Promise<PrepStationsResult> {
+  const base = env.TOAST_API_BASE.replace(/\/+$/, "");
+  const url = new URL(`${base}/kitchen/v1/published/prepStations`);
+
+  const pageToken = normalizeString(params.pageToken);
+  if (pageToken) {
+    url.searchParams.set("pageToken", pageToken);
+  }
+
+  const lastModified = normalizeString(params.lastModified);
+  if (lastModified) {
+    url.searchParams.set("lastModified", lastModified);
+  }
+
+  const headers = await getToastHeaders(env);
+  const response = await fetchWithBackoff(url.toString(), { method: "GET", headers });
+  const text = await response.text();
+
+  let payload: unknown = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (err) {
+      console.warn("failed to parse prep stations response", { err });
+      payload = null;
+    }
+  }
+
+  const stations = Array.isArray(payload)
+    ? (payload as ToastPrepStation[])
+    : Array.isArray((payload as any)?.prepStations)
+    ? ((payload as any).prepStations as ToastPrepStation[])
+    : [];
+
+  const nextPageToken = normalizeString(response.headers.get("Toast-Next-Page-Token"));
+
+  return {
+    prepStations: stations,
+    nextPageToken,
+    raw: payload,
+    responseHeaders: headersToObject(response.headers),
+  };
 }
 
 export async function getMenuMetadata(env: AppEnv): Promise<MenuMetadataResponse | null> {

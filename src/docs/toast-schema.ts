@@ -723,6 +723,46 @@ export const toastModifierOptionSchema: ToastSchemaDescriptor = {
   },
 };
 
+export const toastPrepStationSchema: ToastSchemaDescriptor = {
+  title: "PrepStation",
+  description: "Kitchen prep station configuration representing a printer or KDS destination for routed orders.",
+  properties: {
+    ...toastReferenceProperties,
+    connectedPrepStations: {
+      description: "Other prep stations monitored by this station to coordinate multi-station orders.",
+      type: "array",
+      items: {
+        description: "Prep station reference",
+        type: "object",
+        properties: toastReferenceProperties,
+      },
+    },
+    printingMode: {
+      description: "Printer routing behavior. `ON` prints every ticket, `OFFLINE_ONLY` only prints when the KDS is offline.",
+      type: "string",
+      enum: ["ON", "OFFLINE_ONLY"],
+    },
+    includeWithExpediter: {
+      description: "When true, also route tickets to the expediter device.",
+      type: "boolean",
+    },
+    expoRouting: {
+      description: "Expo routing strategy controlling how tickets flow between the station and expediter.",
+      type: "string",
+      enum: ["SEND_TO_EXPO", "EXPO_ONLY", "SKIP_EXPO"],
+    },
+    name: {
+      description: "Human readable prep station name.",
+      type: "string",
+    },
+    kitchenPrinter: {
+      description: "Printer associated with the prep station (if configured).",
+      type: "object",
+      properties: toastReferenceProperties,
+    },
+  },
+};
+
 export const toastSchemas = {
   order: toastOrderSchema,
   check: toastCheckSchema,
@@ -731,4 +771,5 @@ export const toastSchemas = {
   menuItem: toastMenuItemSchema,
   modifierGroup: toastModifierGroupSchema,
   modifierOption: toastModifierOptionSchema,
+  prepStation: toastPrepStationSchema,
 };
