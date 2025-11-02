@@ -2,6 +2,7 @@ import { getEnv } from "./config/env.js";
 import handleHealth from "./routes/api/health.js";
 import menusHandler from "./routes/api/menus";
 import ordersLatestHandler from "./routes/api/orders/latest";
+import orderByIdHandler from "./routes/api/orders/by-id";
 import configSnapshotHandler from "./routes/api/config-snapshot";
 import kitchenPrepStationsHandler from "./routes/api/kitchen/prep-stations";
 import openApiDocumentHandler from "./routes/api/docs/openapi";
@@ -95,6 +96,14 @@ export default {
 
       if (request.method === "GET" && path === "/api/health") {
         return applyCors(handleHealth());
+      }
+
+      if (request.method === "GET") {
+        const orderIdMatch = path.match(/^\/api\/orders\/[^/]+$/);
+        if (orderIdMatch) {
+          const orderResponse = await orderByIdHandler(env, request);
+          return applyCors(orderResponse);
+        }
       }
 
       const routeResponse = await router.handle(request.method, path, env, request);

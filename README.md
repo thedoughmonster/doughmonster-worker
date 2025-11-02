@@ -11,6 +11,7 @@ A Cloudflare Worker that owns Toast authentication, pagination, and response sha
 | `GET` | `/docs` | ReDoc-powered HTML viewer that renders the same OpenAPI schema. | Visit `https://<worker>/docs`
 | `GET` | `/api/menus` | Returns the currently published Toast menus along with metadata and cache status. | `curl -s "https://<worker>/api/menus" \| jq` |
 | `GET` | `/api/orders` | Returns the most recent Toast orders with deterministic ordering and incremental KV-backed caching. Supports `limit`, `detail`, `since`, `minutes`, `start`, `end`, `status`, `locationId`, and optional `debug=1`. | `curl -s "https://<worker>/api/orders?limit=10" \| jq` |
+| `GET` | `/api/orders/{guid}` | Looks up a single Toast order GUID and returns the raw Toast order document. | `curl -s "https://<worker>/api/orders/00000000-0000-0000-0000-000000000000" \| jq` |
 | `GET` | `/api/config/snapshot` | Fetches a fixed set of Toast configuration slices and caches the merged payload for 1 hour. | `curl -s "https://<worker>/api/config/snapshot" \| jq` |
 
 All of the API endpoints above are registered directly in `src/worker.ts`; `/api/menus` and `/api/orders` are mounted on the worker router so downstream handlers can self-fetch them without leaving the worker boundary.
@@ -55,6 +56,14 @@ The handler supports flexible time-range and filter parameters:
 The response shape remains `{ ok, route, limit, detail, minutes, window, expandUsed, count, ids, orders, data?, debug? }`. When both `DEBUG` is truthy in the environment and `?debug=1` is passed, a concise debug summary is included to surface paging and filtering diagnostics.
 
 When no manual window override is supplied, the worker reads the latest fulfilled cursor from KV, fetches Toast orders strictly after that timestamp, merges them into cache, and returns the most recent orders from the cached indices. Results are deduped by order GUID and sorted by opened date (descending) then order GUID (ascending) for deterministic output.
+
+### `/api/orders/{guid}`
+Use this endpoint when you need the latest Toast representation for a specific order without walking the incremental cache.
+
+- Supply a UUID-formatted order GUID directly in the path (for example `/api/orders/123e4567-e89b-12d3-a456-426614174000`).
+- The worker validates and normalizes the GUID before forwarding the request to Toast, returning a `400` error when the value is missing or malformed.
+- Toast `404` responses surface as friendly `404` errors (`{"ok": false, "error": "Order <guid> was not found."}`), while `5xx` failures return a generic retryable error message.
+- On success the payload mirrors Toast's native order JSON and includes the resolved `guid` and `route` fields alongside `ok: true`.
 
 ### Incremental Toast Order Caching
 

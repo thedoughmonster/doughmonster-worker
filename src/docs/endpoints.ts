@@ -634,6 +634,52 @@ const schemaDefinitions: Record<string, SchemaNode> = {
       { kind: "ref", ref: "OrdersLatestError" },
     ],
   },
+  OrderByIdSuccess: {
+    kind: "json",
+    type: "object",
+    required: ["ok", "route", "guid", "order"],
+    properties: {
+      ok: { kind: "json", type: "boolean", const: true },
+      route: {
+        kind: "json",
+        type: "string",
+        example: "/api/orders/00000000-0000-0000-0000-000000000000",
+      },
+      guid: {
+        kind: "json",
+        type: "string",
+        format: "uuid",
+      },
+      order: { kind: "ref", ref: "ToastOrder" },
+    },
+  },
+  OrderByIdError: {
+    kind: "json",
+    type: "object",
+    required: ["ok", "route", "error"],
+    additionalProperties: true,
+    properties: {
+      ok: { kind: "json", type: "boolean", const: false },
+      route: {
+        kind: "json",
+        type: "string",
+        example: "/api/orders/00000000-0000-0000-0000-000000000000",
+      },
+      guid: {
+        kind: "json",
+        type: "string",
+        format: "uuid",
+      },
+      error: { kind: "json", type: "string" },
+    },
+  },
+  OrderByIdResponse: {
+    kind: "oneOf",
+    oneOf: [
+      { kind: "ref", ref: "OrderByIdSuccess" },
+      { kind: "ref", ref: "OrderByIdError" },
+    ],
+  },
   KitchenPrepStationsSuccess: {
     kind: "json",
     type: "object",
@@ -1263,6 +1309,17 @@ const schemaDefinitions: Record<string, SchemaNode> = {
 };
 
 const parameterDefinitions: Record<string, ParameterDefinition> = {
+  OrderGuidPath: {
+    name: "guid",
+    in: "path",
+    description: "Toast order GUID to retrieve.",
+    required: true,
+    schema: {
+      kind: "json",
+      type: "string",
+      format: "uuid",
+    },
+  },
   OrdersLatestLimit: {
     name: "limit",
     in: "query",
@@ -1588,6 +1645,45 @@ const endpoints: EndpointDefinition[] = [
           "Error response emitted when the worker cannot return orders successfully.",
         content: {
           "application/json": { kind: "ref", ref: "ErrorResponse" },
+        },
+      },
+    ],
+  },
+  {
+    path: "/api/orders/{guid}",
+    method: "get",
+    summary: "Fetch a single Toast order by GUID",
+    description:
+      "Returns the Toast order document for the specified GUID without applying additional shaping.",
+    tags: ["Orders"],
+    parameters: ["OrderGuidPath"],
+    responses: [
+      {
+        status: 200,
+        description: "Order retrieved successfully.",
+        content: {
+          "application/json": { kind: "ref", ref: "OrderByIdSuccess" },
+        },
+      },
+      {
+        status: 400,
+        description: "Request rejected due to a missing or invalid GUID.",
+        content: {
+          "application/json": { kind: "ref", ref: "OrderByIdError" },
+        },
+      },
+      {
+        status: 404,
+        description: "Toast reported that the order does not exist.",
+        content: {
+          "application/json": { kind: "ref", ref: "OrderByIdError" },
+        },
+      },
+      {
+        status: "default",
+        description: "Unexpected error response.",
+        content: {
+          "application/json": { kind: "ref", ref: "OrderByIdError" },
         },
       },
     ],
