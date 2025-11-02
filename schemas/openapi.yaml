@@ -185,6 +185,40 @@ paths:
           "$ref": "#/components/parameters/OrdersLatestTimeZone"
         -
           "$ref": "#/components/parameters/OrdersLatestDebug"
+  "/api/orders/{guid}":
+    get:
+      summary: "Fetch a single Toast order by GUID"
+      description: "Returns the Toast order document for the specified GUID without applying additional shaping."
+      tags:
+        - Orders
+      responses:
+        200:
+          description: "Order retrieved successfully."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/OrderByIdSuccess"
+        400:
+          description: "Request rejected due to a missing or invalid GUID."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/OrderByIdError"
+        404:
+          description: "Toast reported that the order does not exist."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/OrderByIdError"
+        default:
+          description: "Unexpected error response."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/OrderByIdError"
+      parameters:
+        -
+          "$ref": "#/components/parameters/OrderGuidPath"
 components:
   schemas:
     ConfigSnapshotResponse:
@@ -757,6 +791,50 @@ components:
       description: "OpenAPI document describing the Doughmonster Worker HTTP interface."
       type: object
       additionalProperties: true
+    OrderByIdError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          const: false
+        route:
+          type: string
+          example: /api/orders/00000000-0000-0000-0000-000000000000
+        guid:
+          type: string
+          format: uuid
+        error:
+          type: string
+      required:
+        - ok
+        - route
+        - error
+      additionalProperties: true
+    OrderByIdResponse:
+      oneOf:
+        -
+          "$ref": "#/components/schemas/OrderByIdSuccess"
+        -
+          "$ref": "#/components/schemas/OrderByIdError"
+    OrderByIdSuccess:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          const: true
+        route:
+          type: string
+          example: /api/orders/00000000-0000-0000-0000-000000000000
+        guid:
+          type: string
+          format: uuid
+        order:
+          "$ref": "#/components/schemas/ToastOrder"
+      required:
+        - ok
+        - route
+        - guid
+        - order
     OrderCursor:
       type: object
       properties:
@@ -2124,6 +2202,14 @@ components:
       description: "Force a synchronous refresh of the published menu when set to a truthy value."
       schema:
         type: boolean
+    OrderGuidPath:
+      name: guid
+      in: path
+      description: "Toast order GUID to retrieve."
+      schema:
+        type: string
+        format: uuid
+      required: true
     OrdersDetailedDebug:
       name: debug
       in: query
